@@ -226,6 +226,10 @@ pub struct LogQuery {
     /// Case-insensitive substring filter.
     #[serde(default)]
     pub contains: Option<String>,
+    /// How many lines either side of a match to answer with. None and zero both mean the match
+    /// alone, which is what this call has always answered with.
+    #[serde(default)]
+    pub context: Option<usize>,
     #[serde(default)]
     pub limit: Option<usize>,
 }
@@ -245,6 +249,7 @@ pub const LOG_QUERY_FIELDS: &[(&str, bool)] = &[
     ("minSeverity", true),
     ("source", true),
     ("contains", true),
+    ("context", true),
     ("limit", true),
 ];
 
@@ -253,8 +258,10 @@ pub const LOG_QUERY_FIELDS: &[(&str, bool)] = &[
 #[serde(rename_all = "camelCase")]
 pub struct LogPage {
     pub entries: Vec<LogEntry>,
-    /// Pass back as `after` to continue. Unchanged when the page is empty, so a poller cannot skip
-    /// a line that arrives between two reads.
+    /// Pass back as `after` to continue. It stops at the last line the page carried, so trailing
+    /// context is never handed out twice and a filtered read never swallows lines it did not show.
+    /// Unchanged when the page is empty, so a poller cannot skip a line that arrives between two
+    /// reads.
     pub cursor: u64,
     /// How many lines the ring buffer discarded since the session started. A cursor older than the
     /// oldest buffered line silently resumes at that line, and this is how the caller notices.
@@ -293,27 +300,43 @@ impl LogBuffer {
         }
     }
 
+    /// One page: the lines a query matched, and the lines around them it asked to see.
+    ///
+    /// `limit` bounds matches rather than lines. Counting the context against it lets a page come
+    /// back holding none of what was searched for, which reads exactly like "nothing matched" — the
+    /// one answer a filtered read must never fake.
     fn read(&self, query: &LogQuery) -> LogPage {
         let limit = query.limit.unwrap_or(DEFAULT_LOG_PAGE).min(MAX_LOG_PAGE);
         let needle = query
             .contains
             .as_ref()
             .map(|contains| contains.to_lowercase());
-        let mut cursor = query.after.unwrap_or(0);
-        let mut entries = Vec::new();
-        for entry in &self.entries {
-            if entry.sequence <= query.after.unwrap_or(0) {
-                continue;
-            }
-            cursor = cursor.max(entry.sequence);
-            if !matches_filters(query, needle.as_deref(), entry) {
-                continue;
-            }
-            entries.push(entry.clone());
-            if entries.len() >= limit {
-                break;
-            }
+        let after = query.after.unwrap_or(0);
+        let context = query.context.unwrap_or(0);
+        let considered: Vec<&LogEntry> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.sequence > after)
+            .collect();
+        let mut answered = vec![false; considered.len()];
+        for at in considered
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| matches_filters(query, needle.as_deref(), entry))
+            .map(|(at, _)| at)
+            .take(limit)
+        {
+            let first = at.saturating_sub(context);
+            let last = (at + context).min(considered.len().saturating_sub(1));
+            answered[first..=last].fill(true);
         }
+        let entries: Vec<LogEntry> = considered
+            .into_iter()
+            .zip(&answered)
+            .filter(|(_, wanted)| **wanted)
+            .map(|(entry, _)| entry.clone())
+            .collect();
+        let cursor = entries.last().map_or(after, |entry| entry.sequence);
         LogPage {
             entries,
             cursor,
@@ -2558,6 +2581,196 @@ mod tests {
         .expect("tail page");
         assert!(tail.entries.is_empty());
         assert_eq!(tail.cursor, 5);
+        clear_logs();
+    }
+
+    /// A match comes back with the lines around it, because a match is rarely the whole answer.
+    ///
+    /// A game's `=== SUMMARY ===` banner is one matching line above four that carry the numbers. A
+    /// live turn harvested that block by sending six `contains` entries in one call, one per line
+    /// it already knew the wording of — which only works when you know what you are looking for.
+    #[test]
+    fn a_matching_line_can_come_back_with_the_lines_around_it() {
+        let _test = session_test_lock();
+        clear_logs();
+        for index in 0..10 {
+            append_log(LogSource::Editor, &format!("line {index}"));
+        }
+        append_log(LogSource::Editor, "=== SUMMARY ===");
+        for index in 0..4 {
+            append_log(LogSource::Editor, &format!("stat {index}"));
+        }
+
+        let page = read_logs(&LogQuery {
+            contains: Some("SUMMARY".to_owned()),
+            context: Some(4),
+            ..LogQuery::default()
+        })
+        .expect("read logs");
+        let lines: Vec<&str> = page
+            .entries
+            .iter()
+            .map(|entry| entry.message.as_str())
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "line 6",
+                "line 7",
+                "line 8",
+                "line 9",
+                "=== SUMMARY ===",
+                "stat 0",
+                "stat 1",
+                "stat 2",
+                "stat 3",
+            ],
+            "the four lines either side of the match must come with it"
+        );
+        clear_logs();
+    }
+
+    /// Two matches close together are one run of lines, not the same lines twice.
+    ///
+    /// `limit` still counts what comes back rather than what matched: a context window is lines the
+    /// caller pays for, and a page that overran its limit would be the cost the parameter exists to
+    /// bound.
+    #[test]
+    fn overlapping_context_windows_answer_each_line_once() {
+        let _test = session_test_lock();
+        clear_logs();
+        for index in 0..8 {
+            append_log(LogSource::Editor, &format!("line {index}"));
+        }
+        append_log(LogSource::Editor, "hit one");
+        append_log(LogSource::Editor, "between");
+        append_log(LogSource::Editor, "hit two");
+        for index in 0..8 {
+            append_log(LogSource::Editor, &format!("tail {index}"));
+        }
+
+        let page = read_logs(&LogQuery {
+            contains: Some("hit".to_owned()),
+            context: Some(2),
+            ..LogQuery::default()
+        })
+        .expect("read logs");
+        let lines: Vec<&str> = page
+            .entries
+            .iter()
+            .map(|entry| entry.message.as_str())
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "line 6", "line 7", "hit one", "between", "hit two", "tail 0", "tail 1",
+            ],
+            "two windows that overlap are one run of lines"
+        );
+
+        // `limit` bounds matches, and the context they asked for rides along. Counting context
+        // against the limit lets a page come back holding none of what was searched for, which
+        // reads exactly like "no matches" and is the one answer a filtered read must never fake.
+        let bounded = read_logs(&LogQuery {
+            contains: Some("hit".to_owned()),
+            context: Some(2),
+            limit: Some(1),
+            ..LogQuery::default()
+        })
+        .expect("read logs");
+        let first: Vec<&str> = bounded
+            .entries
+            .iter()
+            .map(|entry| entry.message.as_str())
+            .collect();
+        assert_eq!(
+            first,
+            ["line 6", "line 7", "hit one", "between", "hit two"],
+            "one match, with the lines around it"
+        );
+        clear_logs();
+    }
+
+    /// A page of context is a page: what it answered does not arrive again behind its cursor.
+    ///
+    /// Trailing context sits ahead of the match that pulled it in, so a cursor left at the match
+    /// hands those lines out twice and a cursor thrown to the end of the buffer swallows lines a
+    /// later query wanted. It goes to the last line the page actually carried.
+    #[test]
+    fn a_context_page_leaves_its_cursor_past_the_lines_it_answered() {
+        let _test = session_test_lock();
+        clear_logs();
+        for index in 0..4 {
+            append_log(LogSource::Editor, &format!("line {index}"));
+        }
+        append_log(LogSource::Editor, "hit one");
+        for index in 0..4 {
+            append_log(LogSource::Editor, &format!("tail {index}"));
+        }
+        append_log(LogSource::Editor, "hit two");
+        for index in 0..4 {
+            append_log(LogSource::Editor, &format!("rest {index}"));
+        }
+
+        let page = read_logs(&LogQuery {
+            contains: Some("hit".to_owned()),
+            context: Some(1),
+            limit: Some(1),
+            ..LogQuery::default()
+        })
+        .expect("read logs");
+        let answered: Vec<String> = page
+            .entries
+            .iter()
+            .map(|entry| entry.message.clone())
+            .collect();
+        assert_eq!(answered, ["line 3", "hit one", "tail 0"]);
+        assert_eq!(
+            page.cursor,
+            page.entries.last().expect("a page").sequence,
+            "the cursor stops at the last line the page carried"
+        );
+
+        let next = read_logs(&LogQuery {
+            contains: Some("hit".to_owned()),
+            context: Some(1),
+            after: Some(page.cursor),
+            ..LogQuery::default()
+        })
+        .expect("read logs");
+        let following: Vec<String> = next
+            .entries
+            .iter()
+            .map(|entry| entry.message.clone())
+            .collect();
+        assert_eq!(following, ["tail 3", "hit two", "rest 0"]);
+        assert!(
+            following.iter().all(|line| !answered.contains(line)),
+            "a second page must not repeat the first: {following:?}"
+        );
+        clear_logs();
+    }
+
+    /// No context asked for is the page this call has always answered with.
+    #[test]
+    fn a_read_that_asks_for_no_context_answers_only_what_matched() {
+        let _test = session_test_lock();
+        clear_logs();
+        for index in 0..4 {
+            append_log(LogSource::Editor, &format!("line {index}"));
+        }
+        append_log(LogSource::Editor, "=== SUMMARY ===");
+
+        for context in [None, Some(0)] {
+            let page = read_logs(&LogQuery {
+                contains: Some("SUMMARY".to_owned()),
+                context,
+                ..LogQuery::default()
+            })
+            .expect("read logs");
+            assert_eq!(page.entries.len(), 1, "{context:?}");
+            assert_eq!(page.entries[0].message, "=== SUMMARY ===");
+        }
         clear_logs();
     }
 

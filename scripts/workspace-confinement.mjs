@@ -1,4 +1,5 @@
 import {readFile, realpath} from 'node:fs/promises'
+import {tmpdir} from 'node:os'
 import {basename, dirname, extname, isAbsolute, normalize, relative, resolve, sep} from 'node:path'
 
 import {nearMiss, refusedAnchorIndex} from './anchor-near-miss.mjs'
@@ -143,29 +144,103 @@ function inProjectTerms(workspacePath, error) {
     throw new Error(spelled)
 }
 
-export function validateBashCommand(command) {
+const ESCAPES_THE_WORKSPACE =
+    /(?:^|[\s=<>|;&])["']?(?:\.\.(?:[\\/]|$)|~(?:[\\/]|$)|[A-Za-z]:(?:[\\/]|$)|\/)/u
+
+/// What a masked span is filled with. A word character, and the same width as what it replaced, so
+/// every offset the scanner reports still points at the command the caller actually wrote.
+const FILLER = 'x'
+
+function blank(text, pattern) {
+    return text.replace(pattern, match => FILLER.repeat(match.length))
+}
+
+/// The whole path that begins at a refused offset, quoted the way the command quoted it.
+///
+/// The scanner matches a separator and then the first character of a path, which is enough to
+/// refuse and not enough to name. A refusal that repeats the rule and names nothing sends the
+/// caller looking at its filenames: a sed address opens on a slash, and reads as a path to
+/// everything except the person who wrote it.
+function pathAt(command, index) {
+    let start = index
+    while (start < command.length && /[\s=<>|;&]/u.test(command[start])) start += 1
+    const quote = command[start] === '"' || command[start] === "'" ? command[start] : undefined
+    if (quote !== undefined) {
+        const closed = command.indexOf(quote, start + 1)
+        return command.slice(start, closed < 0 ? command.length : closed + 1)
+    }
+    let end = start
+    while (end < command.length && !/[\s;&|<>]/u.test(command[end])) end += 1
+    return command.slice(start, end)
+}
+
+/// Masks the paths that name the OS's own temporary directory, and only those.
+///
+/// Scratch output is not part of the project and does not belong in it: a benchmark's stdout
+/// written into the worktree has to be remembered and deleted, and one that is forgotten is a file
+/// the next commit carries. The directory is the OS's rather than a spelling, because `/tmp` is not
+/// where Windows puts one.
+///
+/// Masked per token rather than by prefix. A prefix comparison calls `/tmp/../root/.ssh` a
+/// temporary path, and `path.isAbsolute` answers false for a Windows path on Linux — so containment
+/// is counted here, over the separators both platforms use.
+function withoutTemporaryPaths(command, root) {
+    if (typeof root !== 'string' || root === '') return command
+    let masked = ''
+    let at = 0
+    for (;;) {
+        const found = command.indexOf(root, at)
+        if (found < 0) return masked + command.slice(at)
+        let end = found + root.length
+        while (end < command.length && !/[\s;&|<>"']/u.test(command[end])) end += 1
+        const token = command.slice(found, end)
+        masked +=
+            command.slice(at, found)
+            + (staysUnder(root, token) ? FILLER.repeat(token.length) : token)
+        at = end
+    }
+}
+
+/// Whether a token that opens with the temporary root stays inside it.
+function staysUnder(root, token) {
+    const rest = token.slice(root.length)
+    if (rest !== '' && !/^[\\/]/u.test(rest)) return false
+    let depth = 0
+    for (const step of rest.split(/[\\/]+/u)) {
+        if (step === '' || step === '.') continue
+        if (step !== '..') {
+            depth += 1
+            continue
+        }
+        depth -= 1
+        if (depth < 0) return false
+    }
+    return true
+}
+
+export function validateBashCommand(command, temporaryRoot = tmpdir()) {
     if (typeof command !== 'string' || command.length === 0 || command.includes('\0'))
         throw new Error('Shell commands must be non-empty strings')
-    const probed = command.replace(
-        /\/dev\/(?:null|stdin|stdout|stderr|fd\/\d+)(?![\w-])/gu,
-        'standard-stream'
-    )
-    const measured = probed.replace(
+    const probed = blank(command, /\/dev\/(?:null|stdin|stdout|stderr|fd\/\d+)(?![\w-])/gu)
+    const scratched = withoutTemporaryPaths(probed, temporaryRoot)
+    const measured = scratched.replace(
         /([^\s|;&]+)([^\S\n]+)\/+([^\S\n]+)(?=[\w$([.])/gu,
         (whole, left, before, after, at, text) =>
             left.startsWith('-') || /(?:^|[|;&\n(])\s*$/u.test(text.slice(0, at)) ?
                 whole
-            :   `${left}${before}divided-by${after}`
+            :   left
+                + before
+                + FILLER.repeat(whole.length - left.length - before.length - after.length)
+                + after
     )
-    if (
-        /(?:^|[\s=<>|;&])["']?(?:\.\.(?:[\\/]|$)|~(?:[\\/]|$)|[A-Za-z]:(?:[\\/]|$)|\/)/u.test(
-            measured
-        )
-    )
+    const escaping = ESCAPES_THE_WORKSPACE.exec(measured)
+    if (escaping !== null)
         throw new Error(
-            'Shell commands take paths relative to the workspace, and this one names an absolute '
-                + 'path or one that climbs out. The shell already runs in the workspace root, so '
-                + 'name the file the way the project does — scripts/mario.gd, not its full path.'
+            `Shell commands take paths relative to the workspace, and \`${pathAt(command, escaping.index)}\` `
+                + 'is an absolute path or one that climbs out. The shell already runs in the '
+                + 'workspace root, so name the file the way the project does — scripts/mario.gd, '
+                + 'not its full path. Scratch output can go in the temporary directory the OS '
+                + 'gives you.'
         )
     if (/(?:^|[;&|]\s*)cd(?:\s|$)/u.test(command))
         throw new Error('Shell commands cannot change the workspace directory')
@@ -209,7 +284,8 @@ async function withTheRegionTheFileHolds(workspacePath, toolName, params, error)
 const BASH_IS_CONFINED =
     ' It runs in the project root and can reach nothing outside it: every path in the command is'
     + ' relative to that root, and an absolute path, or one that climbs out with .. or ~, is'
-    + ' refused before the command runs.'
+    + ' refused before the command runs. Scratch output is the exception: a path under the'
+    + ' temporary directory the OS gives you is allowed, and nothing there is part of the project.'
 
 const SHELL_DEADLINE_SECONDS = 120
 

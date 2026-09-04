@@ -469,7 +469,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:a1427792de86a70d
+// GENERATED-BEGIN operations sha256:476639dcd56a21b8
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -1756,7 +1756,7 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
         op(
             "godot_runtime",
             "run",
-            "Runs the project and captures the first frame. `scene` runs that one scene instead of the project's main scene, which is the editor's own F6 — use it to try a scene you just built, rather than writing application/run/main_scene, running, and writing it back. restart restarts whatever run started, with the same scene and the same playArgs.",
+            "Runs the project and captures the first frame, unless `playArgs` start it with `--headless`, which draws none. `scene` runs that one scene instead of the project's main scene, which is the editor's own F6 — use it to try a scene you just built, rather than writing application/run/main_scene, running, and writing it back. restart restarts whatever run started, with the same scene and the same playArgs.",
             Answers::Addon("runtime.run"),
             &[
                 noted(
@@ -1889,7 +1889,7 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
     op(
         "godot_runtime",
         "wait",
-        "Lets the game run on for a few frames, then answers with how many passed and how long it took. This is how you wait for something the game does over time — a tween, a timer, a unit walking somewhere — before capturing or inspecting it. Never wait by running `sleep` in bash: that stops this process rather than letting the game advance, and it costs a whole request to do nothing.",
+        "Lets the game run on for a few frames, then answers with how many passed and how long it took. A game that ends while you are waiting for it — a benchmark reaching the end of its work — answers `exited: true` instead of a frame count, rather than failing: the waiting is over either way, and the calls after this one still run. This is how you wait for something the game does over time — a tween, a timer, a unit walking somewhere — before capturing or inspecting it. Never wait by running `sleep` in bash: that stops this process rather than letting the game advance, and it costs a whole request to do nothing.",
         Answers::Addon("runtime.wait"),
         &[
             noted(
@@ -1943,7 +1943,14 @@ pub const GODOT_LOGS_OPERATIONS: &[Operation] = &[op(
         opt("minSeverity", Kind::Choice(&["info", "warning", "error"])),
         opt("source", Kind::Choice(&["editor", "editorError"])),
         opt("contains", Text),
-        opt("limit", Int),
+        noted(
+            opt("context", Int),
+            "How many lines either side of each match to answer with. A banner is one matching line above the numbers it introduces, and asking for those by name only works when you already know their wording.",
+        ),
+        noted(
+            opt("limit", Int),
+            "How many matches to answer with, at most. The lines `context` asks for ride along and are not counted, so a page can never come back holding none of what was searched for.",
+        ),
     ],
 )];
 

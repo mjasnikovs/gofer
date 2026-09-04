@@ -1079,7 +1079,10 @@ func _launch_pending(id: String, kind: String) -> Dictionary:
 ## the caller can start the game and retry, so the error is retryable.
 func _runtime_forward(id: String, op: String, params: Dictionary) -> void:
     if not _runtime_ready or _runtime_session_id < 0:
-        _respond_error(id, "runtime_not_running", "No game with the Gofer runtime helper is running", true)
+        if RuntimeQueue.EXIT_ANSWERING_OPS.has(op):
+            _respond_result(id, {"exited": true})
+        else:
+            _respond_error(id, "runtime_not_running", "No game with the Gofer runtime helper is running", true)
         return
     if _runtime_broke and RuntimeQueue.PROCESS_AWAITING_OPS.has(op):
         _respond_error(id, "runtime_broke", "The game is paused in the debugger, so it runs no frames and this call would wait forever. Capture, get_tree, inspect_node and get_monitors all answer while it is paused. godot_debug continue lets it go, and godot_debug stack_trace says where it is stopped. If it stopped while starting, what stopped it is in the session output - read that, fix it, and run again", true)
@@ -1145,8 +1148,21 @@ func _on_runtime_debugger_session_stopped(session_id: int) -> void:
     _runtime_session_id = -1
     _runtime_ready = false
     _runtime_broke = false
+    _end_the_waits_their_game_outlived()
     _fail_pending(["game", "run_frame"], "runtime_not_running", "The game stopped before it could answer")
     _send_event("runtime.stopped", {})
+
+## Answers every pending wait whose game has just gone. There is nothing left to wait for, which is
+## an answer; the frame count is left out rather than reported as zero, because the frames that did
+## pass went unobserved.
+func _end_the_waits_their_game_outlived() -> void:
+    var kept: Array[Dictionary] = []
+    for pending in _runtime_pending:
+        if pending["kind"] == "game" and RuntimeQueue.EXIT_ANSWERING_OPS.has(str(pending.get("op", ""))):
+            _respond_result(pending["id"], {"exited": true})
+        else:
+            kept.append(pending)
+    _runtime_pending = kept
 
 ## Answers and drops every pending entry of the named kinds; the rest stay waiting. Every caller
 ## here is retryable: the game is gone or paused, and the caller can start one and ask again.
@@ -1176,12 +1192,30 @@ func _on_runtime_debugger_message(message: String, data: Array, session_id: int)
 
 ## A launch is answered once the helper is up, with the game's first rendered frame chained on.
 ## The frame is best-effort: a game that cannot produce one still counts as launched.
+## The engine flag that starts a game with no display, and only where the engine reads it: anything
+## after a `--` belongs to the game.
+const HEADLESS_FLAG := "--headless"
+
+func _asks_for_no_display(args: PackedStringArray) -> bool:
+    for arg in args:
+        if arg == "--":
+            return false
+        if arg == HEADLESS_FLAG:
+            return true
+    return false
+
 func _complete_pending_run() -> void:
     for index in range(_runtime_pending.size()):
         var pending := _runtime_pending[index]
         if pending["kind"] != "run":
             continue
         _runtime_pending.remove_at(index)
+        # A game with no display draws nothing, so the capture that proves every other launch can
+        # only time out here - and the launch times out with it, about a game that started fine.
+        # The helper announcing is the whole of the evidence a headless game can produce.
+        if _asks_for_no_display(_runtime_args):
+            _respond_result(pending["id"], {"running": true})
+            return
         _runtime_pending.append({
             "id": pending["id"],
             "kind": "run_frame",

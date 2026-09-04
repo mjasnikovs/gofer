@@ -454,8 +454,8 @@ fn told_the_editor_about<R: Runtime>(app: &AppHandle<R>, paths: Vec<String>) {
 /// the same code for the same reason — a stop that started an editor would be the opposite of what
 /// was asked.
 ///
-/// A start that fails still answers `session_not_active`. There is still no session, which is what
-/// the code says and what the caller has to act on; why the start failed is the sentence after it.
+/// A start that fails still answers the code the call met. There is still no session, which is what
+/// that code says and what the caller has to act on; why the start failed is the sentence after it.
 fn starting_the_session_if_there_is_none(
     domain: &ToolDomain,
     params: Value,
@@ -463,7 +463,7 @@ fn starting_the_session_if_there_is_none(
     start: impl FnOnce() -> Result<(), ToolFailure>,
 ) -> Result<Value, ToolFailure> {
     let failure = match run(params.clone()) {
-        Err(failure) if failure.code == SESSION_NOT_ACTIVE => failure,
+        Err(failure) if IS_A_MISSING_SESSION.contains(&failure.code.as_str()) => failure,
         answered => return answered,
     };
     if domain.name == "godot_session" {
@@ -487,8 +487,14 @@ fn starting_the_session_if_there_is_none(
     }
 }
 
-/// What every door to a missing editor answers with.
-const SESSION_NOT_ACTIVE: &str = "session_not_active";
+/// The codes that mean there is no editor to talk to, whichever door reported it.
+///
+/// `session_not_active` is what a call meets when nothing has been started. `connect_failed` is what
+/// it meets when a session record exists and the port behind it is not answering — an editor still
+/// coming up, or one that went away without clearing the record. A live turn's first
+/// `godot_script save` met the second and was told only that a port could not be reached, which is
+/// not a call it can make. Both have the same next move, so both open the same door.
+const IS_A_MISSING_SESSION: [&str; 2] = ["session_not_active", "connect_failed"];
 
 /// One entry of the `ops` list: the operation, and the parameters written beside it.
 ///
@@ -2600,20 +2606,52 @@ mod tests {
         assert_eq!((ran.get(), started.get()), (1, 0));
     }
 
-    /// A stop that started an editor would be the opposite of what was asked.
+    /// A language server that is not listening yet is a session that is not up.
+    ///
+    /// `session_not_active` is what a call meets when nothing has been started. `connect_failed` is
+    /// what it meets when the session record exists and the editor's language server port is not
+    /// answering — a session still coming up, or one whose editor went away without clearing the
+    /// record. The model cannot tell those apart and has the same next move for both, so the same
+    /// door opens for both. A live turn met this on its first `godot_script save` and was told only
+    /// that a port could not be reached.
     #[test]
-    fn the_session_domain_never_starts_an_editor_behind_its_own_back() {
+    fn a_language_server_that_cannot_be_reached_starts_a_session_and_answers() {
         let started = std::cell::Cell::new(0);
-        let failure = starting_the_session_if_there_is_none(
-            CATALOG
-                .iter()
-                .find(|domain| domain.name == "godot_session")
-                .expect("the session domain"),
+        let answered = starting_the_session_if_there_is_none(
+            project_domain(),
             json!({}),
             |_| {
+                if started.get() == 0 {
+                    return Err(ToolFailure::new(
+                        "connect_failed",
+                        "Could not reach the language server at 127.0.0.1:6005",
+                    ));
+                }
+                Ok(json!({"path": "scripts/player.gd"}))
+            },
+            || {
+                started.set(started.get() + 1);
+                Ok(())
+            },
+        )
+        .expect("the operation is answered from the session it started");
+        assert_eq!(started.get(), 1, "the session is started once");
+        assert_eq!(answered["path"], json!("scripts/player.gd"));
+    }
+
+    /// A server that stays unreachable after a start answers the failure, and starts nothing more.
+    #[test]
+    fn a_language_server_that_stays_unreachable_is_answered_rather_than_restarted() {
+        let started = std::cell::Cell::new(0);
+        let ran = std::cell::Cell::new(0);
+        let failure = starting_the_session_if_there_is_none(
+            project_domain(),
+            json!({}),
+            |_| {
+                ran.set(ran.get() + 1);
                 Err(ToolFailure::new(
-                    "session_not_active",
-                    "No Godot session is active",
+                    "connect_failed",
+                    "Could not reach the language server at 127.0.0.1:6005",
                 ))
             },
             || {
@@ -2621,9 +2659,35 @@ mod tests {
                 Ok(())
             },
         )
-        .expect_err("stopping a session that is not running is not a reason to start one");
-        assert_eq!(failure.code, "session_not_active");
-        assert_eq!(started.get(), 0);
+        .expect_err("a server that never answers is a failure, not a loop");
+        assert_eq!(failure.code, "connect_failed");
+        assert_eq!((ran.get(), started.get()), (2, 1));
+    }
+
+    /// A stop that started an editor would be the opposite of what was asked.
+    ///
+    /// Both codes the door opens on, because the exemption is one line past the match: widening
+    /// what counts as a missing session widens what `godot_session` has to be held out of.
+    #[test]
+    fn the_session_domain_never_starts_an_editor_behind_its_own_back() {
+        for code in ["session_not_active", "connect_failed"] {
+            let started = std::cell::Cell::new(0);
+            let failure = starting_the_session_if_there_is_none(
+                CATALOG
+                    .iter()
+                    .find(|domain| domain.name == "godot_session")
+                    .expect("the session domain"),
+                json!({}),
+                |_| Err(ToolFailure::new(code, "No Godot session is active")),
+                || {
+                    started.set(started.get() + 1);
+                    Ok(())
+                },
+            )
+            .expect_err("stopping a session that is not running is not a reason to start one");
+            assert_eq!(failure.code, code);
+            assert_eq!(started.get(), 0, "{code}");
+        }
     }
 
     /// A start that could not happen still answers "no session", and says why it could not.

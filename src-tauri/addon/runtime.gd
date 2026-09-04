@@ -275,7 +275,7 @@ func _op_wait(params: Dictionary) -> Dictionary:
             break
         await get_tree().process_frame
         frames += 1
-    return _succeed({"frames": frames, "ms": Time.get_ticks_msec() - started})
+    return _succeed({"frames": frames, "ms": Time.get_ticks_msec() - started, "exited": false})
 
 ## Freezes the running game, or lets it go again.
 ##

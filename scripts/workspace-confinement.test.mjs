@@ -4,7 +4,7 @@ import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import test from 'node:test'
 import {NodeExecutionEnv, createEditTool} from '@earendil-works/pi-agent-core/node'
-import {confineTool} from './workspace-confinement.mjs'
+import {confineTool, validateBashCommand} from './workspace-confinement.mjs'
 
 async function workspace() {
     const root = await mkdtemp(join(tmpdir(), 'gofer-confinement-'))
@@ -315,7 +315,7 @@ test('lets a command divide, which is not a path', async context => {
     for (const command of [
         'ls /',
         'cat /etc/shadow',
-        'x=/tmp/a echo hi',
+        'x=/etc/a echo hi',
         'echo hi | cat /etc/hosts',
         'cat //etc/passwd'
     ])
@@ -620,4 +620,97 @@ test('refuses a write to a path the task froze, and still reads it', async conte
             path
         )
     }
+})
+
+test('names the token it refused, so a false positive is visible', async context => {
+    const current = await workspace()
+    context.after(current.remove)
+    const tool = confineTool(fakeTool('bash'), current.path)
+
+    // A sed or awk address opens on a slash and is not a path. It stays refused, because the
+    // scanner cannot tell one from the other without parsing the shell — but a refusal that
+    // repeats the whole rule and names nothing sends the caller looking at its filenames.
+    //
+    // Quoted, so this cannot be satisfied by echoing the command back: every one of these tokens
+    // is already a substring of the command it came from.
+    for (const [command, named] of [
+        ['cat /etc/passwd', '/etc/passwd'],
+        ['cat ~/secret', '~/secret'],
+        ['cat ../secret', '../secret'],
+        ['type C:/Users/me/secrets.txt', 'C:/Users/me/secrets.txt'],
+        ["sed -n '/=== SUMMARY ===/,$p' notes.txt", "'/=== SUMMARY ===/,$p'"],
+        ["awk '/SUMMARY/,0' notes.txt", "'/SUMMARY/,0'"],
+        ["sed -n '/=== SUMMARY notes.txt", "'/=== SUMMARY notes.txt"]
+    ]) {
+        const refusal = await tool.execute('1', {command}).then(
+            () => undefined,
+            error => error.message
+        )
+        assert.ok(refusal !== undefined, `${command} was allowed`)
+        assert.ok(
+            refusal.includes(`\`${named}\``),
+            `${command} was refused without naming ${named}`
+        )
+        assert.ok(!refusal.includes(command), `${command} was echoed back instead of named`)
+    }
+})
+
+test('lets a command write scratch output to the temporary directory the OS gives it', async context => {
+    const current = await workspace()
+    context.after(current.remove)
+    const tool = confineTool(fakeTool('bash'), current.path)
+    const scratch = join(tmpdir(), 'gofer-probe.txt')
+
+    for (const command of [
+        `npm test > ${scratch}`,
+        `godot --headless --import 2> ${scratch}`,
+        `grep SUMMARY ${scratch}`,
+        `rm ${scratch}`
+    ])
+        assert.deepEqual(await tool.execute('1', {command}), asRun(command))
+
+    for (const command of [`cat /etc/passwd > ${scratch}`, `cp ${scratch} ~/keep.txt`])
+        await assert.rejects(tool.execute('2', {command}), /Shell|workspace/iu)
+})
+
+test('takes the temporary directory from the OS rather than assuming it is /tmp', async context => {
+    const current = await workspace()
+    context.after(current.remove)
+
+    // The regression this holds is a hardcoded `/tmp`. Windows hands out
+    // C:\Users\me\AppData\Local\Temp, which that spelling refuses and this one allows — and the
+    // reverse: a Linux `/tmp` is not a temporary path on a machine whose OS does not say so.
+    const windows = 'C:\\Users\\me\\AppData\\Local\\Temp'
+    assert.doesNotThrow(() => validateBashCommand(`npm test > ${windows}\\out.txt`, windows))
+    assert.throws(() => validateBashCommand('npm test > /tmp/out.txt', windows), /workspace/iu)
+
+    const linux = '/tmp'
+    assert.doesNotThrow(() => validateBashCommand('npm test > /tmp/out.txt', linux))
+    assert.throws(() => validateBashCommand(`npm test > ${windows}\\out.txt`, linux), /workspace/iu)
+
+    assert.throws(() => validateBashCommand('cat /etc/passwd', linux), /workspace/iu)
+    assert.throws(() => validateBashCommand('cat /tmpfoo/secret', linux), /workspace/iu)
+
+    // A machine that names no temporary directory has none to allow, and the workspace is still
+    // the workspace.
+    for (const none of ['', null])
+        assert.throws(() => validateBashCommand('npm test > /tmp/out.txt', none), /workspace/iu)
+})
+
+test('lets nothing climb out of the temporary directory it allowed', async context => {
+    const current = await workspace()
+    context.after(current.remove)
+
+    // `path.isAbsolute` answers false for a Windows path on Linux, so no path-aware containment
+    // check can span both spellings and the allowance is a prefix comparison. A prefix comparison
+    // on its own reaches /root: every one of these starts with an allowed temporary root.
+    const windows = 'C:\\Users\\me\\AppData\\Local\\Temp'
+    for (const [command, root] of [
+        ['cat /tmp/../root/.ssh/authorized_keys', '/tmp'],
+        ['npm test > /tmp/../root/.ssh/authorized_keys', '/tmp'],
+        ['cat /tmp/./../etc/shadow', '/tmp'],
+        [`cat ${windows}\\..\\..\\..\\.ssh\\id_rsa`, windows],
+        [`cat ${windows}/../secrets.txt`, windows]
+    ])
+        assert.throws(() => validateBashCommand(command, root), /workspace/iu, command)
 })

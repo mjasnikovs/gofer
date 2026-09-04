@@ -2224,7 +2224,7 @@
         {
             "tool": "godot_runtime",
             "op": "run",
-            "summary": "Runs the project and captures the first frame. `scene` runs that one scene instead of the project's main scene, which is the editor's own F6 \u2014 use it to try a scene you just built, rather than writing application/run/main_scene, running, and writing it back. restart restarts whatever run started, with the same scene and the same playArgs.",
+            "summary": "Runs the project and captures the first frame, unless `playArgs` start it with `--headless`, which draws none. `scene` runs that one scene instead of the project's main scene, which is the editor's own F6 \u2014 use it to try a scene you just built, rather than writing application/run/main_scene, running, and writing it back. restart restarts whatever run started, with the same scene and the same playArgs.",
             "alone": {
                 "scope": "repeat",
                 "why": "There is one running game, so a second one in the same call is the first one again."
@@ -2424,7 +2424,7 @@
         {
             "tool": "godot_runtime",
             "op": "wait",
-            "summary": "Lets the game run on for a few frames, then answers with how many passed and how long it took. This is how you wait for something the game does over time — a tween, a timer, a unit walking somewhere — before capturing or inspecting it. Never wait by running `sleep` in bash: that stops this process rather than letting the game advance, and it costs a whole request to do nothing.",
+            "summary": "Lets the game run on for a few frames, then answers with how many passed and how long it took. A game that ends while you are waiting for it — a benchmark reaching the end of its work — answers `exited: true` instead of a frame count, rather than failing: the waiting is over either way, and the calls after this one still run. This is how you wait for something the game does over time — a tween, a timer, a unit walking somewhere — before capturing or inspecting it. Never wait by running `sleep` in bash: that stops this process rather than letting the game advance, and it costs a whole request to do nothing.",
             "params": [
                 {
                     "name": "frames",
@@ -2504,9 +2504,16 @@
                     "required": false
                 },
                 {
+                    "name": "context",
+                    "kind": "int",
+                    "required": false,
+                    "note": "How many lines either side of each match to answer with. A banner is one matching line above the numbers it introduces, and asking for those by name only works when you already know their wording."
+                },
+                {
                     "name": "limit",
                     "kind": "int",
-                    "required": false
+                    "required": false,
+                    "note": "How many matches to answer with, at most. The lines `context` asks for ride along and are not counted, so a page can never come back holding none of what was searched for."
                 }
             ],
             "answeredBy": "rust"

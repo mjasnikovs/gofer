@@ -1634,3 +1634,140 @@ fn a_running_path_that_stops_matching_names_what_is_under_the_node_it_reached() 
 
     session.call("runtime.stop", json!({}));
 }
+
+/// A game that ends itself a fixed number of frames after it is asked to, and not before.
+///
+/// The end has to be triggered rather than timed. A launch is only answered once the helper has
+/// announced and a frame has come back, and a game on a clock of its own can reach the end of that
+/// clock first — on a loaded runner the test would then fail at its own `runtime.run`, about a race
+/// rather than about waiting. This one lives until a key it recognises arrives.
+///
+/// The lingering frames are what let the input that asks for the end be answered before the process
+/// goes. Counted in frames because that is the clock `runtime.wait` is counted in too.
+const SHORT_LIVED_PROBE_SCRIPT: &str = "extends Node2D\n\nconst INJECTED_DEVICE := 7777\nconst FRAMES_TO_LINGER := 30\n\nvar _left := -1\n\nfunc _input(event: InputEvent) -> void:\n\tif event.device != INJECTED_DEVICE:\n\t\treturn\n\tif event is InputEventKey and event.pressed and not event.echo:\n\t\t_left = FRAMES_TO_LINGER\n\nfunc _process(_delta: float) -> void:\n\tif _left < 0:\n\t\treturn\n\t_left -= 1\n\tif _left <= 0:\n\t\tprint(\"=== SUMMARY ===\")\n\t\tget_tree().quit()\n";
+
+/// The scene that runs it.
+const SHORT_LIVED_PROBE_SCENE: &str = "[gd_scene load_steps=2 format=3]\n\n[ext_resource type=\"Script\" path=\"res://scripts/runtime_probe.gd\" id=\"1_probe\"]\n\n[node name=\"RuntimeProbe\" type=\"Node2D\"]\nscript = ExtResource(\"1_probe\")\n";
+
+/// A wait the game outlives answers what happened, instead of failing the call that asked.
+///
+/// A benchmark ends. That is the outcome, not a fault: a headless run told to do fifteen seconds
+/// of work reaches the end of its work and quits. `runtime.wait` is held under ten seconds, so
+/// observing fifteen takes two of them — and a live turn's second wait met a game that had already
+/// finished, answered `runtime_not_running`, and took the rest of the ops list down with it. The
+/// `get_state` and the log read that would have carried the benchmark's own numbers never ran.
+///
+/// So a wait whose game is gone answers `{exited: true}` and the frames it did get. Both waits here
+/// assert the same thing on purpose: whether the game goes while the first is in flight or in the
+/// gap before it, the answer a caller needs is the same one, and the test does not have to win a
+/// race to say so.
+#[test]
+fn a_wait_whose_game_ends_answers_that_it_ended() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = godot_editor_harness::fixture_worktree(&directory);
+    std::fs::create_dir_all(worktree.join("scripts")).expect("create scripts directory");
+    std::fs::write(
+        worktree.join("scripts/runtime_probe.gd"),
+        SHORT_LIVED_PROBE_SCRIPT,
+    )
+    .expect("write the probe script");
+    std::fs::write(worktree.join("main.tscn"), SHORT_LIVED_PROBE_SCENE).expect("write the scene");
+    let ledger = directory.path().join("ledger.json");
+    let session = Session::start_on_worktree(worktree, ledger, Some(directory));
+
+    session
+        .try_call_within("runtime.run", json!({}), LAUNCH_TIMEOUT_MS)
+        .unwrap_or_else(|error| {
+            panic!(
+                "runtime.run failed: {error}\n--- editor output ---\n{}",
+                session.output()
+            )
+        });
+
+    // The game ends when it is told to, so nothing above this line can race it.
+    session.call(
+        "runtime.input",
+        json!({"events": [
+            {"kind": "key", "key": "Q", "pressed": true, "device": INJECTED_DEVICE},
+            {"kind": "key", "key": "Q", "pressed": false, "device": INJECTED_DEVICE},
+        ]}),
+    );
+
+    // Far more frames than the game has left.
+    let waited = session
+        .try_call_within("runtime.wait", json!({"frames": 600}), LAUNCH_TIMEOUT_MS)
+        .unwrap_or_else(|error| {
+            panic!(
+                "a wait the game ended must answer, not fail: {error}\n--- editor output ---\n{}",
+                session.output()
+            )
+        });
+    assert_eq!(
+        waited["exited"], true,
+        "a wait interrupted by the game ending must say so: {waited}"
+    );
+
+    // The second wait of a stacked pair: the game was already gone when this one was sent.
+    let after = session
+        .try_call_within("runtime.wait", json!({"frames": 600}), LAUNCH_TIMEOUT_MS)
+        .unwrap_or_else(|error| {
+            panic!("a wait for a game that already ended must answer, not fail: {error}")
+        });
+    assert_eq!(
+        after["exited"], true,
+        "waiting for a game that is already over is answered the same way: {after}"
+    );
+
+    // What the rest of the ops list was there to read, and used to be skipped. `running` is the
+    // editor's own play state, which lags the process; the helper is gone the moment its debugger
+    // session is, which is the fact a caller can act on.
+    let state = session.call("runtime.get_state", json!({}));
+    assert_eq!(state["runtimeReady"], false, "{state}");
+}
+
+/// A headless run answers without a frame, because a headless game renders none.
+///
+/// Every launch proves itself by capturing its first frame. A game started with `--headless` has
+/// no viewport to capture, so that proof costs a round trip to a helper that can only fail — and
+/// on the runs where it does come back, it is a PNG of nothing, charged to a caller that asked for
+/// a benchmark. The launch is proven by the helper announcing instead, which is the half of the
+/// evidence a headless game can actually produce.
+#[test]
+fn a_headless_run_is_answered_without_a_frame() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = worktree_with_probes(&directory);
+    let ledger = directory.path().join("ledger.json");
+    let session = Session::start_on_worktree(worktree, ledger, Some(directory));
+
+    let headless = session
+        .try_call_within(
+            "runtime.run",
+            json!({"playArgs": ["--headless"]}),
+            LAUNCH_TIMEOUT_MS,
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "a headless run failed: {error}\n--- editor output ---\n{}",
+                session.output()
+            )
+        });
+    assert_eq!(headless["running"], true, "{headless}");
+    assert!(
+        headless.get("frame").is_none(),
+        "a headless game renders nothing, so nothing is worth sending back: {headless}"
+    );
+    let state = session.call("runtime.get_state", json!({}));
+    assert_eq!(
+        state["runtimeReady"], true,
+        "the helper still announces, which is what proves the launch: {state}"
+    );
+
+    session.call("runtime.stop", json!({}));
+
+    // A run that asked for no such thing still carries its frame.
+    let windowed = session
+        .try_call_within("runtime.run", json!({}), LAUNCH_TIMEOUT_MS)
+        .unwrap_or_else(|error| panic!("runtime.run failed: {error}"));
+    assert_frame(&windowed["frame"]);
+    session.call("runtime.stop", json!({}));
+}
