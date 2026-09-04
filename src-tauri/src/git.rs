@@ -147,9 +147,63 @@ pub struct PendingChange {
 }
 
 /// Everything loose in the checkout, so the user can be told what a task switch is about to take.
+///
+/// A repository cloned into the project folder is left out, because the switch leaves it out too:
+/// listing it offers the user a choice between two things that both do nothing to it, under a
+/// sentence saying it goes with the task being closed.
+///
+/// Read twice rather than once. `-z` is what spells an exotic path correctly, but it also splits a
+/// rename into two records in the opposite order, and this listing names the rename.
 pub fn pending_changes(workspace_path: &Path) -> Result<Vec<PendingChange>, String> {
+    let embedded = status_records(workspace_path)
+        .map(|records| embedded_repositories_in(workspace_path, &records))
+        .unwrap_or_default();
     let status = git_text(workspace_path, &["status", "--porcelain", "-uall"])?;
-    Ok(status.lines().filter_map(parse_status_line).collect())
+    Ok(status
+        .lines()
+        .filter_map(parse_status_line)
+        .filter(|change| {
+            !embedded
+                .iter()
+                .any(|path| change.path.trim_end_matches('/') == path)
+        })
+        .collect())
+}
+
+/// Every record of `git status -z`, the empty tail of the final separator dropped.
+///
+/// `-uall` rather than the default: Git otherwise collapses an untracked directory to its own name,
+/// and the thing being looked for lives inside one. It also decides the clean check, which without
+/// it answers "clean" for a user who set `status.showUntrackedFiles=no`, and their loose files then
+/// follow the checkout into the next task.
+fn status_records(workspace_path: &Path) -> Result<Vec<String>, String> {
+    let output = git_bytes(workspace_path, &["status", "--porcelain", "-uall", "-z"])?;
+    Ok(nul_records(&output)
+        .into_iter()
+        .filter(|record| !record.is_empty())
+        .collect())
+}
+
+/// The Git repositories sitting inside the checkout, which `git add --all` would otherwise swallow
+/// as gitlinks.
+///
+/// A clone in the project folder is nobody's work: `git add --all` records it as a bare commit
+/// pointer, and a commit still moves the branch it lands on, which is how a merged task comes back
+/// asking to be merged again. The clone that caused this was an agent's, under a directory that was
+/// itself untracked.
+///
+/// Under `-uall` Git expands every untracked directory except one it will not enter, so a record
+/// that still ends in a slash is a repository boundary and nothing else. A registered submodule is
+/// tracked and never reported as untracked, so this cannot reach one.
+fn embedded_repositories_in(workspace_path: &Path, records: &[String]) -> Vec<String> {
+    records
+        .iter()
+        .filter_map(|record| record.strip_prefix("?? "))
+        .filter(|path| path.ends_with('/'))
+        // a linked worktree keeps its `.git` as a file, and is gitlinked just the same
+        .filter(|path| workspace_path.join(path).join(".git").exists())
+        .map(|path| path.trim_end_matches('/').to_owned())
+        .collect()
 }
 
 fn parse_status_line(line: &str) -> Option<PendingChange> {
@@ -512,11 +566,25 @@ fn commit_pending_task_changes(worktree_path: &Path) -> Result<bool, String> {
         return Err(unfinished_merge_message(&unresolved));
     }
     let merging = merge_in_progress(worktree_path);
-    let is_clean = git_text(worktree_path, &["status", "--porcelain"])?.is_empty();
-    if is_clean && !merging {
+    let records = status_records(worktree_path)?;
+    if records.is_empty() && !merging {
         return Ok(false);
     }
-    let add = git_output(worktree_path, &["add", "--all"])?;
+    let mut arguments = vec![
+        "add".to_owned(),
+        "--all".to_owned(),
+        "--".to_owned(),
+        ".".to_owned(),
+    ];
+    // `literal` so a clone named `star*dir` cannot also exclude a real `starXdir`; `top` anchors at
+    // the root, which `repository_root` has already refused to leave.
+    arguments.extend(
+        embedded_repositories_in(worktree_path, &records)
+            .into_iter()
+            .map(|path| format!(":(exclude,literal,top){path}")),
+    );
+    let borrowed = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+    let add = git_output(worktree_path, &borrowed)?;
     if !add.status.success() {
         return Err(git_failure("stage the task changes", &add));
     }
@@ -534,15 +602,29 @@ fn commit_pending_task_changes(worktree_path: &Path) -> Result<bool, String> {
 ///
 /// Git refuses to delete the branch `HEAD` points at, and a task being deleted is exactly the task
 /// the user was most likely looking at.
-pub fn discard_task_branch(workspace_path: &Path, branch_name: &str, base_branch: &str) {
+///
+/// A refused bank stops the whole thing, branch included. The bank is what keeps the outgoing task's
+/// loose files off the branch being moved to, so moving anyway puts them on the base branch as work
+/// nobody did — and leaving a branch behind that no task points at costs the user nothing, where
+/// that does.
+///
+/// Answers the refusal rather than swallowing it: the checkout is then still on the branch of a task
+/// that is already gone from the database, and a caller that says nothing leaves the user reading
+/// one task's files with no task on screen owning them.
+pub fn discard_task_branch(
+    workspace_path: &Path,
+    branch_name: &str,
+    base_branch: &str,
+) -> Result<(), String> {
     let Ok(Some(repository_root)) = repository_root(workspace_path) else {
-        return;
+        return Ok(());
     };
     if current_branch(&repository_root).as_deref() == Some(branch_name) {
-        let _ = commit_pending_task_changes(&repository_root);
-        let _ = checkout_branch(&repository_root, base_branch);
+        commit_pending_task_changes(&repository_root)?;
+        checkout_branch(&repository_root, base_branch)?;
     }
     let _ = git_output(&repository_root, &["branch", "-D", branch_name]);
+    Ok(())
 }
 
 /// The branch a task's work is merged into, recorded the first time the project is opened.
@@ -680,6 +762,8 @@ pub struct RepositoryStatus {
     /// Whether Godot's cache is in the history. Tracked, it makes every task switch commit a
     /// change no one made, and every merged task ask to be merged again.
     pub tracks_editor_cache: bool,
+    /// Git repositories cloned into the project folder. Never the user's work, and never committed.
+    pub embedded_repositories: Vec<String>,
     pub has_identity: bool,
     pub is_clean: bool,
 }
@@ -702,6 +786,9 @@ pub fn inspect(workspace: &Path) -> RepositoryStatus {
             .is_ok_and(|output| output.status.success()),
         tracks_project_file: head_tracks_project_file(workspace),
         tracks_editor_cache: tracks_editor_cache(workspace),
+        embedded_repositories: status_records(&root)
+            .map(|records| embedded_repositories_in(&root, &records))
+            .unwrap_or_default(),
         has_identity: has_identity(&root),
         is_clean: git_text(&root, &["status", "--porcelain"]).is_ok_and(|text| text.is_empty()),
         root: Some(root),
@@ -1761,6 +1848,196 @@ mod tests {
         assert_eq!(current_branch(repository.path()).as_deref(), Some(TASK));
     }
 
+    /// The listing behind the New Task dialog must not offer a choice about a clone.
+    ///
+    /// Both answers there say the files move — into the new task, or into the one being closed — and
+    /// neither is true of a folder the switch leaves alone. A user whose only loose thing is an
+    /// agent's clone would be asked about work that does not exist.
+    #[test]
+    fn a_clone_is_not_offered_as_work_to_carry() {
+        let repository = repository();
+        clone_into(&repository, "profiler_evidence/_godotsrc");
+        fs::write(repository.path().join("player.gd"), "extends Node\n").expect("real work");
+
+        let listed = pending_changes(repository.path()).expect("the loose files");
+
+        assert_eq!(
+            listed,
+            vec![PendingChange {
+                path: "player.gd".to_owned(),
+                is_new: true
+            }]
+        );
+    }
+
+    /// A Git repository inside the checkout, and a commit in it so it can be gitlinked at all.
+    fn clone_into(repository: &TempDir, path: &str) {
+        let inner = repository.path().join(path);
+        fs::create_dir_all(&inner).expect("the inner directory");
+        git(&inner, &["init", "-b", "master"]);
+        identify(&inner);
+        fs::write(inner.join("source.txt"), "borrowed\n").expect("a file in the clone");
+        git(&inner, &["add", "--all"]);
+        git(&inner, &["commit", "-m", "the clone"]);
+    }
+
+    /**
+     * A clone in the project folder is never banked, and the parent it sits under does not matter.
+     *
+     * The parent was itself untracked in the case this comes from, which is what defeats a scan of
+     * plain `git status`: Git collapses the whole directory to its own name, and a look for a `.git`
+     * in that name finds nothing while the clone underneath is gitlinked anyway.
+     */
+    #[test]
+    fn a_clone_under_an_untracked_directory_is_left_out_of_the_commit() {
+        let repository = repository();
+        create_task_branch(repository.path(), TASK, "master").expect("create the branch");
+        checkout_branch(repository.path(), TASK).expect("open the task");
+        clone_into(&repository, "profiler_evidence/_godotsrc");
+        fs::write(repository.path().join("player.gd"), "extends Node\n").expect("real work");
+
+        assert!(commit_pending_changes(repository.path()).expect("bank the work"));
+
+        let listed = git_text(repository.path(), &["ls-files", "--stage"]).expect("the index");
+        assert!(listed.contains("player.gd"), "{listed}");
+        assert!(
+            !listed.contains("_godotsrc"),
+            "the clone must not be in the index: {listed}"
+        );
+        assert!(
+            repository
+                .path()
+                .join("profiler_evidence/_godotsrc/source.txt")
+                .exists(),
+            "the clone stays on disk"
+        );
+    }
+
+    /// A clone with nothing committed in it yet. `git add --all` refuses it outright — "does not
+    /// have a commit checked out" — and a refusal here is a task the user cannot switch away from.
+    #[test]
+    fn a_clone_with_no_commit_does_not_block_the_switch() {
+        let repository = repository();
+        create_task_branch(repository.path(), TASK, "master").expect("create the branch");
+        checkout_branch(repository.path(), TASK).expect("open the task");
+        let inner = repository.path().join("half_a_clone");
+        fs::create_dir_all(&inner).expect("the inner directory");
+        git(&inner, &["init", "-b", "master"]);
+        fs::write(repository.path().join("player.gd"), "extends Node\n").expect("real work");
+
+        assert!(commit_pending_changes(repository.path()).expect("the switch must go through"));
+    }
+
+    /// A clone on its own is not work, so there is nothing to bank and the branch must not move.
+    /// A branch that moves after its merge is a merged task asking to be merged again.
+    #[test]
+    fn a_clone_on_its_own_moves_no_branch() {
+        let repository = repository();
+        create_task_branch(repository.path(), TASK, "master").expect("create the branch");
+        checkout_branch(repository.path(), TASK).expect("open the task");
+        let before = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head");
+        clone_into(&repository, "profiler_evidence/_godotsrc");
+
+        assert!(!commit_pending_changes(repository.path()).expect("nothing to bank"));
+
+        assert_eq!(
+            git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head"),
+            before,
+            "the branch must stand exactly where its merge left it"
+        );
+    }
+
+    /// A path Git would C-quote without `-z`, which names no directory on disk once quoted.
+    #[test]
+    fn a_clone_whose_path_git_would_quote_is_still_left_out() {
+        let repository = repository();
+        create_task_branch(repository.path(), TASK, "master").expect("create the branch");
+        checkout_branch(repository.path(), TASK).expect("open the task");
+        clone_into(&repository, "wéird évidence");
+        fs::write(repository.path().join("player.gd"), "extends Node\n").expect("real work");
+
+        assert!(commit_pending_changes(repository.path()).expect("bank the work"));
+
+        let listed = git_text(repository.path(), &["ls-files", "--stage"]).expect("the index");
+        assert!(!listed.contains("vidence"), "{listed}");
+    }
+
+    /// The exclusion names a path, not a pattern. A clone called `star*dir` that also swallowed a
+    /// real `starXdir` would lose the user work it matched, silently and for good.
+    #[test]
+    fn excluding_a_clone_does_not_exclude_a_directory_its_name_would_match() {
+        let repository = repository();
+        create_task_branch(repository.path(), TASK, "master").expect("create the branch");
+        checkout_branch(repository.path(), TASK).expect("open the task");
+        clone_into(&repository, "star*dir");
+        let decoy = repository.path().join("starXdir");
+        fs::create_dir_all(&decoy).expect("the decoy");
+        fs::write(decoy.join("real.gd"), "extends Node\n").expect("real work");
+
+        assert!(commit_pending_changes(repository.path()).expect("bank the work"));
+
+        let listed = git_text(repository.path(), &["ls-files", "--stage"]).expect("the index");
+        assert!(listed.contains("starXdir/real.gd"), "{listed}");
+        assert!(!listed.contains("star*dir"), "{listed}");
+    }
+
+    /// Excluding a clone must not narrow the rest of the commit. `--all` with a pathspec still has
+    /// to record a file the user deleted.
+    #[test]
+    fn a_deleted_file_is_still_banked_while_a_clone_is_left_out() {
+        let repository = repository();
+        create_task_branch(repository.path(), TASK, "master").expect("create the branch");
+        checkout_branch(repository.path(), TASK).expect("open the task");
+        fs::write(repository.path().join("player.gd"), "extends Node\n").expect("a file");
+        git(repository.path(), &["add", "--all"]);
+        git(repository.path(), &["commit", "-m", "with the file"]);
+        fs::remove_file(repository.path().join("player.gd")).expect("delete it");
+        clone_into(&repository, "profiler_evidence/_godotsrc");
+
+        assert!(commit_pending_changes(repository.path()).expect("bank the work"));
+
+        let listed = git_text(repository.path(), &["ls-files", "--stage"]).expect("the index");
+        assert!(!listed.contains("player.gd"), "{listed}");
+    }
+
+    /// A submodule the project registered is the user's own dependency, and moving its pointer is
+    /// their work. Git tracks it, so it is never reported as untracked and the exclusion cannot
+    /// reach it — which is the whole reason this reads Git's status instead of walking the folder
+    /// for a `.git`.
+    #[test]
+    fn a_registered_submodule_is_still_banked_as_the_tasks_work() {
+        let outer = repository();
+        let inner = repository();
+        let url = inner.path().to_string_lossy().to_string();
+        git(
+            outer.path(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                &url,
+                "addons/dep",
+            ],
+        );
+        git(outer.path(), &["add", "-A"]);
+        git(outer.path(), &["commit", "-m", "Vendor a dependency"]);
+        create_task_branch(outer.path(), TASK, "master").expect("create the branch");
+        checkout_branch(outer.path(), TASK).expect("open the task");
+
+        let dependency = outer.path().join("addons/dep");
+        identify(&dependency);
+        fs::write(dependency.join("moved.gd"), "extends Node\n").expect("write");
+        git(&dependency, &["add", "-A"]);
+        git(&dependency, &["commit", "-m", "Move the pointer"]);
+
+        assert!(commit_pending_changes(outer.path()).expect("bank the work"));
+
+        let recorded = git_text(outer.path(), &["show", "--stat", "--format=", "HEAD"])
+            .expect("the banked commit");
+        assert!(recorded.contains("addons/dep"), "{recorded}");
+    }
+
     /// One checkout means loose files follow it. Committing them onto the branch being left is what
     /// keeps one task's half-finished work from arriving in the next task as that task's own.
     #[test]
@@ -2108,6 +2385,33 @@ mod tests {
 
     /// Git refuses to delete the branch `HEAD` points at, and the task being deleted is the one the
     /// user was most likely looking at.
+    /// A bank that was refused leaves the checkout where it is, branch and all.
+    ///
+    /// The bank is what keeps a task's loose files off the branch being moved to. Moving anyway put
+    /// them on the base branch as work nobody did, and the refusal was thrown away without ever
+    /// reaching the user.
+    #[test]
+    fn discarding_a_branch_whose_work_cannot_be_banked_moves_nothing() {
+        let repository = repository();
+        conflicting_task(&repository);
+        resolve_task_conflicts(repository.path(), TASK, "master").expect("start the resolution");
+
+        let refusal = discard_task_branch(repository.path(), TASK, "master")
+            .expect_err("an unfinished merge cannot be banked");
+
+        assert!(refusal.contains("part-way through a merge"), "{refusal}");
+
+        assert_eq!(
+            current_branch(repository.path()).as_deref(),
+            Some(TASK),
+            "an unfinished merge must not be walked away from"
+        );
+        assert!(
+            branch_exists(repository.path(), TASK),
+            "the branch outlives the task rather than the work being moved"
+        );
+    }
+
     #[test]
     fn discarding_the_checked_out_task_branch_moves_off_it_first() {
         let repository = repository();
@@ -2115,7 +2419,7 @@ mod tests {
         checkout_branch(repository.path(), TASK).expect("open the task");
         fs::write(repository.path().join("scratch.gd"), "extends Node\n").expect("loose work");
 
-        discard_task_branch(repository.path(), TASK, "master");
+        let _ = discard_task_branch(repository.path(), TASK, "master");
 
         assert!(!branch_exists(repository.path(), TASK));
         assert_eq!(current_branch(repository.path()).as_deref(), Some("master"));
@@ -2186,7 +2490,7 @@ mod tests {
                 .contains("not a Git repository")
         );
         assert!(base_branch_candidate(directory.path()).is_none());
-        discard_task_branch(directory.path(), TASK, "master");
+        let _ = discard_task_branch(directory.path(), TASK, "master");
     }
 
     /// Per-repository excludes live in the Git directory the whole repository shares, which is where

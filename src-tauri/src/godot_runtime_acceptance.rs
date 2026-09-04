@@ -52,7 +52,7 @@ const INJECTED_DEVICE: i64 = 7777;
 /// game standing still with nothing to say about it, and that is exactly what injected input did:
 /// `project.set_input_action` binds on the physical key and the helper built events with only
 /// `keycode`, so no action Gofer registered could ever be driven by input Gofer injected.
-const PROBE_SCRIPT: &str = "extends Node2D\n\nconst INJECTED_DEVICE := 7777\nconst PROBE_ACTION := \"acceptance_probe_action\"\n\nvar presses := 0\nvar actions := 0\nvar last_source := \"none\"\n\n@onready var label: Label = $Label\n\nfunc _ready() -> void:\n\t_refresh()\n\n# Only the test's own input counts. Anything the desktop delivers to this window carries a device\n# the engine assigned, never this one, so a stray keystroke cannot change the assertions.\nfunc _input(event: InputEvent) -> void:\n\tif InputMap.has_action(PROBE_ACTION) and event.is_action_pressed(PROBE_ACTION):\n\t\tactions += 1\n\tif event.device != INJECTED_DEVICE:\n\t\treturn\n\tif event is InputEventKey and event.pressed and not event.echo:\n\t\t_record(\"key\")\n\telif event is InputEventMouseButton and event.pressed:\n\t\t_record(\"mouse\")\n\telif event is InputEventJoypadButton and event.pressed:\n\t\t_record(\"gamepad\")\n\nfunc _record(source: String) -> void:\n\tpresses += 1\n\tlast_source = source\n\t_refresh()\n\nfunc _refresh() -> void:\n\tlabel.text = \"presses: %d (%s)\" % [presses, last_source]\n";
+const PROBE_SCRIPT: &str = "extends Node2D\n\nconst INJECTED_DEVICE := 7777\nconst PROBE_ACTION := \"acceptance_probe_action\"\n\nvar presses := 0\nvar actions := 0\nvar last_source := \"none\"\nvar launch_args := \"\"\n\n@onready var label: Label = $Label\n\nfunc _ready() -> void:\n\tlaunch_args = \"|\".join(OS.get_cmdline_user_args())\n\t_refresh()\n\n# Only the test's own input counts. Anything the desktop delivers to this window carries a device\n# the engine assigned, never this one, so a stray keystroke cannot change the assertions.\nfunc _input(event: InputEvent) -> void:\n\tif InputMap.has_action(PROBE_ACTION) and event.is_action_pressed(PROBE_ACTION):\n\t\tactions += 1\n\tif event.device != INJECTED_DEVICE:\n\t\treturn\n\tif event is InputEventKey and event.pressed and not event.echo:\n\t\t_record(\"key\")\n\telif event is InputEventMouseButton and event.pressed:\n\t\t_record(\"mouse\")\n\telif event is InputEventJoypadButton and event.pressed:\n\t\t_record(\"gamepad\")\n\nfunc _record(source: String) -> void:\n\tpresses += 1\n\tlast_source = source\n\t_refresh()\n\nfunc _refresh() -> void:\n\tlabel.text = \"presses: %d (%s)\" % [presses, last_source]\n";
 
 /// The fixture scene with the probe script attached. Written into the copied worktree: the
 /// checked-in fixture deliberately stays free of scripts so the Node journeys see a project that
@@ -114,6 +114,22 @@ fn await_event(events: &Receiver<EventEnvelope>, name: &str) -> Value {
         }
     }
     panic!("the addon never sent a {name} event");
+}
+
+/// The command line the running game was started with, as the probe read it back.
+fn launch_args(session: &Session) -> String {
+    let inspected = session.call(
+        "runtime.inspect_node",
+        json!({"path": "/root/RuntimeProbe", "properties": ["launch_args"]}),
+    );
+    inspected["properties"]["launch_args"]
+        .as_object()
+        .filter(|tagged| tagged["type"] == "string")
+        .and_then(|tagged| tagged["value"].as_str())
+        .unwrap_or_else(|| {
+            panic!("the launch arguments must cross the wire as a tagged string: {inspected}")
+        })
+        .to_owned()
 }
 
 /// Reads the probe label through the debugger channel, the inspectable consequence of input.
@@ -755,11 +771,10 @@ const UNPARSABLE_PROBE_SCRIPT: &str = "extends Node2D\n\nfunc _ready() -> void:\
 /// agent reads that as "wait longer", and waits.
 /// One scene can be run without making it the project's entry point.
 ///
-/// Two live turns reached for a `playArgs` parameter `godot_runtime run` does not have, and a
-/// third took the only route that was open: it wrote `application/run/main_scene` to the scene it
-/// wanted, ran, and wrote it back — two calls of detour, and a window in which the project boots
-/// into a test scene. `play_custom_scene` is the editor's own F6 and is what "run this scene"
-/// means.
+/// One live turn took the only route that was open: it wrote `application/run/main_scene` to the
+/// scene it wanted, ran, and wrote it back — two calls of detour, and a window in which the
+/// project boots into a test scene. `play_custom_scene` is the editor's own F6 and is what "run
+/// this scene" means.
 #[test]
 fn a_named_scene_runs_without_becoming_the_project_entry_point() {
     let directory = TempDir::new().expect("temporary directory");
@@ -813,6 +828,88 @@ fn a_named_scene_runs_without_becoming_the_project_entry_point() {
     assert!(
         refused.starts_with("scene_not_found") && refused.contains("nope.tscn"),
         "a scene that does not exist must be refused by name: {refused}"
+    );
+}
+
+/// The command line a caller asks for reaches the game, survives a restart, and is not written
+/// down.
+///
+/// Neither `play_custom_scene` nor `play_main_scene` takes arguments, so the only route is the
+/// `editor/run/main_run_args` project setting. That is a setting a person owns: an agent running a
+/// scene must not leave it changed, and must not add a line to `project.godot` that was not there.
+#[test]
+fn a_run_carries_a_command_line_to_the_game_without_writing_it_down() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = worktree_with_probes(&directory);
+    let project = worktree.join("project.godot");
+    let ledger = directory.path().join("ledger.json");
+    let session = Session::start_on_worktree(worktree, ledger, Some(directory));
+    // After the session, not before: enabling the addon is its own write to project.godot.
+    let before = std::fs::read_to_string(&project).expect("read project.godot");
+
+    let run = session
+        .try_call_within(
+            "runtime.run",
+            json!({"playArgs": ["--", "--rate=30", "--seconds=15"]}),
+            LAUNCH_TIMEOUT_MS,
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "runtime.run with playArgs failed: {error}\n--- editor output ---\n{}",
+                session.output()
+            )
+        });
+    assert_eq!(run["running"], true);
+    assert_eq!(
+        launch_args(&session),
+        "--rate=30|--seconds=15",
+        "the game must receive what the caller asked for, after the `--` it wrote"
+    );
+
+    let restarted = session
+        .try_call_within("runtime.restart", json!({}), LAUNCH_TIMEOUT_MS)
+        .unwrap_or_else(|error| panic!("runtime.restart failed: {error}"));
+    assert_eq!(restarted["running"], true);
+    assert_eq!(
+        launch_args(&session),
+        "--rate=30|--seconds=15",
+        "a restart must restart the command line that was running"
+    );
+
+    session.call("runtime.stop", json!({}));
+    session
+        .try_call_within("runtime.run", json!({}), LAUNCH_TIMEOUT_MS)
+        .expect("a run with no playArgs");
+    assert_eq!(
+        launch_args(&session),
+        "",
+        "a run that asks for no arguments must not inherit the last one's"
+    );
+
+    // The editor carries the command line as one string it splits on spaces, and measured on 4.7.2
+    // it groups on double quotes without ever removing them. A spaced argument has no spelling that
+    // arrives whole, so it is named rather than delivered in halves.
+    let refused = session
+        .try_call_within(
+            "runtime.run",
+            json!({"playArgs": ["--", "--level=Boss Fight"]}),
+            LAUNCH_TIMEOUT_MS,
+        )
+        .expect_err("an argument that cannot survive the trip must be refused");
+    assert!(
+        refused.to_string().contains("cannot hold a space"),
+        "{refused}"
+    );
+
+    session.call("runtime.stop", json!({}));
+    let after = std::fs::read_to_string(&project).expect("read project.godot");
+    assert!(
+        !after.contains("main_run_args"),
+        "running a game must not write the run arguments down: {after}"
+    );
+    assert_eq!(
+        after, before,
+        "running a game must not rewrite project.godot"
     );
 }
 

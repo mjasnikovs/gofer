@@ -469,7 +469,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:12ddb273450b570e
+// GENERATED-BEGIN operations sha256:a1427792de86a70d
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -1756,12 +1756,18 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
         op(
             "godot_runtime",
             "run",
-            "Runs the project and captures the first frame. `scene` runs that one scene instead of the project's main scene, which is the editor's own F6 — use it to try a scene you just built, rather than writing application/run/main_scene, running, and writing it back. restart restarts whatever run started.",
+            "Runs the project and captures the first frame. `scene` runs that one scene instead of the project's main scene, which is the editor's own F6 — use it to try a scene you just built, rather than writing application/run/main_scene, running, and writing it back. restart restarts whatever run started, with the same scene and the same playArgs.",
             Answers::Addon("runtime.run"),
-            &[noted(
-                opt("scene", Text),
-                "A res:// path to a .tscn, like res://scenes/level_2.tscn. Without it the project's main scene runs.",
-            )],
+            &[
+                noted(
+                    opt("scene", Text),
+                    "A res:// path to a .tscn, like res://scenes/level_2.tscn. Without it the project's main scene runs.",
+                ),
+                noted(
+                    opt("playArgs", Kind::ListOf(&Text)),
+                    "Command-line arguments for the game, like [\"--\", \"--rate=30\"]. A game reads its own with OS.get_cmdline_user_args(), which sees only what follows a `--`. The editor carries them as one string it splits on spaces, so an argument holding a space is refused rather than delivered in pieces. restart reuses whatever run passed.",
+                ),
+            ],
         ),
         Sharing::Repeat,
         "There is one running game, so a second one in the same call is the first one again.",

@@ -48,7 +48,7 @@ impl Tasks<'_> {
         let created = git::create_task_branch(&self.storage.workspace_path, &branch_name, &base)?;
         let result = self.storage.insert_task(&task_id, created.as_ref());
         if result.is_err() && created.is_some() {
-            git::discard_task_branch(&self.storage.workspace_path, &branch_name, &base);
+            let _ = git::discard_task_branch(&self.storage.workspace_path, &branch_name, &base);
         }
         result?;
         if created.is_some() {
@@ -59,7 +59,7 @@ impl Tasks<'_> {
             };
             if let Err(error) = moved {
                 let _ = self.forget_task(&task_id);
-                git::discard_task_branch(&self.storage.workspace_path, &branch_name, &base);
+                let _ = git::discard_task_branch(&self.storage.workspace_path, &branch_name, &base);
                 return Err(error.into());
             }
         }
@@ -199,7 +199,11 @@ impl Tasks<'_> {
         }
         if let Some(branch_name) = branch {
             let base = self.storage.base_branch()?;
-            git::discard_task_branch(&self.storage.workspace_path, &branch_name, &base);
+            git::discard_task_branch(&self.storage.workspace_path, &branch_name, &base).map_err(
+                |error| {
+                    format!("The task was deleted, but its branch could not be put away: {error}")
+                },
+            )?;
         }
         if let Some(next) = active_task_id(&self.storage.connection()?)? {
             self.storage.task_workspace(&next)?;
@@ -1799,6 +1803,61 @@ mod tests {
         assert_eq!(
             row.merged_commit, None,
             "a branch that moved past its merge has work to merge, and the window is drawn from this"
+        );
+    }
+
+    /**
+     * A clone left in the project folder must not make a merged task ask to be merged again.
+     *
+     * The whole journey, because every seam in it was in the fault: an agent leaves a Git
+     * repository in the workspace, the user opens another task, and the switch banks whatever is
+     * loose onto the branch it is leaving. Git records a clone as a bare commit pointer, so that
+     * bank was a commit carrying none of its files onto a branch that had no work — and a branch
+     * that moved past its merge is a merged task offering Merge.
+     */
+    #[test]
+    fn a_clone_left_in_the_project_does_not_unmerge_a_finished_task() {
+        let directory = TempDir::new().expect("temporary directory");
+        let workspace = committed_repository(directory.path());
+        let storage =
+            ProjectStorage::open(&directory.path().join("data"), &workspace).expect("storage");
+        let task = storage.tasks().active().expect("read").expect("a task");
+        fs::write(workspace.join("player.gd"), "extends Node\n").expect("task work");
+        let merged = storage
+            .tasks()
+            .merge(
+                &task,
+                &storage.switch_with_no_turn_to_refuse(&NOTHING_TO_STOP),
+            )
+            .expect("merge the task");
+
+        let clone = workspace.join("profiler_evidence/_godotsrc");
+        fs::create_dir_all(&clone).expect("the clone");
+        git(&clone, &["init", "-b", "master"]);
+        git(&clone, &["config", "user.name", "Gofer Test"]);
+        git(&clone, &["config", "user.email", "gofer@example.invalid"]);
+        fs::write(clone.join("source.txt"), "borrowed\n").expect("a file in the clone");
+        git(&clone, &["add", "--all"]);
+        git(&clone, &["commit", "-m", "the clone"]);
+
+        storage
+            .tasks()
+            .create(&storage.switch_with_no_turn_to_refuse(&NOTHING_TO_STOP))
+            .expect("open another task");
+
+        let row = storage
+            .tasks()
+            .list()
+            .expect("tasks")
+            .into_iter()
+            .find(|row| row.id == task)
+            .expect("the task")
+            .worktree
+            .expect("a branch");
+        assert_eq!(
+            row.merged_commit.as_deref(),
+            Some(merged.merged_commit.as_str()),
+            "the merged task must still read as merged"
         );
     }
 

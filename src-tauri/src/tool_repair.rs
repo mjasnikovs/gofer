@@ -2085,6 +2085,29 @@ mod tests {
             .message
     }
 
+    /// A command line is a list of strings, and saying only "list" let anything through.
+    ///
+    /// `str()` in the addon turns a number or an object into a token and hands it to the game, so a
+    /// call that was never a command line launched one anyway. The kind is what refuses it, by the
+    /// index that is wrong, before the editor is asked.
+    #[test]
+    fn a_play_argument_that_is_not_text_is_refused_by_its_index() {
+        check_ok(
+            "godot_runtime",
+            "run",
+            json!({"playArgs": ["--", "--rate=30"]}),
+        );
+
+        let numbers = message("godot_runtime", "run", json!({"playArgs": [30]}));
+        assert!(numbers.contains("playArgs[0]"), "{numbers}");
+        let objects = message(
+            "godot_runtime",
+            "run",
+            json!({"playArgs": [{"arg": "--rate=30"}]}),
+        );
+        assert!(objects.contains("playArgs[0]"), "{objects}");
+    }
+
     /// One file's edits, written without the list they go in.
     ///
     /// `godot_script edit` takes `files`, a list of `{path, edits}`. A caller changing one file has

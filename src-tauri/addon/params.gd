@@ -21,7 +21,7 @@ const Protocol := preload("res://addons/gofer/protocol.gd")
 ## `expectedRevision` and `timeoutMs` are absent on purpose. Both are lifted onto the envelope by
 ## the caller, so a handler that looked for them among its parameters would refuse every call that
 ## was actually well formed.
-# GENERATED-BEGIN command-params sha256:80a058a090ba4b8b
+# GENERATED-BEGIN command-params sha256:c3ccf35531a176a0
 const COMMAND_PARAMS: Dictionary = {
     "session.get_state": {"required": [], "optional": []},
     "session.answer_dialog": {"required": ["button"], "optional": []},
@@ -73,7 +73,7 @@ const COMMAND_PARAMS: Dictionary = {
     "resource.create_texture": {"required": ["path", "size"], "optional": ["background", "rects"]},
     "resource.create_shape": {"required": ["path", "shapeType"], "optional": ["size", "radius", "height", "points"]},
     "resource.describe_tileset": {"required": ["path"], "optional": []},
-    "runtime.run": {"required": [], "optional": ["scene"]},
+    "runtime.run": {"required": [], "optional": ["scene", "playArgs"]},
     "runtime.stop": {"required": [], "optional": []},
     "runtime.restart": {"required": [], "optional": []},
     "runtime.get_state": {"required": [], "optional": []},

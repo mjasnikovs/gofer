@@ -401,6 +401,21 @@ fn git_checks(workspace: &Path, repository: &git::RepositoryStatus) -> Vec<Healt
         );
     }
 
+    if !repository.embedded_repositories.is_empty() {
+        checks.push(HealthCheck::new(
+            "git-embedded-repository",
+            "Git repository inside the project",
+            HealthStatus::Degraded,
+            format!(
+                "{} is a Git repository of its own, inside this one. Gofer leaves it out of every \
+                 task commit: Git records such a folder as a bare pointer, which carries none of \
+                 its files and would move a branch that has no work in it. Move it outside the \
+                 project folder, or add it as a real submodule, if it belongs to the game.",
+                repository.embedded_repositories.join(", ")
+            ),
+        ));
+    }
+
     if repository.has_commit && !repository.is_clean {
         checks.push(HealthCheck::new(
             "git-clean",
@@ -863,6 +878,33 @@ mod tests {
         assert!(checks[0].detail.contains("git-scm.com"));
     }
 
+    /// A clone in the project folder is left out of every commit, and silence about that is the
+    /// same failure one step along: a folder that is never committed and never mentioned.
+    #[test]
+    fn a_clone_inside_the_project_is_reported() {
+        let root = std::path::PathBuf::from("/somewhere");
+        let repository = git::RepositoryStatus {
+            is_installed: true,
+            root: Some(root.clone()),
+            has_commit: true,
+            tracks_project_file: true,
+            tracks_editor_cache: false,
+            embedded_repositories: vec!["profiler_evidence/_godotsrc".to_owned()],
+            has_identity: true,
+            is_clean: true,
+        };
+
+        let checks = git_checks(&root, &repository);
+
+        let embedded = check_in(&checks, "git-embedded-repository");
+        assert_eq!(embedded.status, HealthStatus::Degraded);
+        assert!(
+            embedded.detail.contains("profiler_evidence/_godotsrc"),
+            "the folder has to be named or the user cannot act: {}",
+            embedded.detail
+        );
+    }
+
     /// A tracked Godot cache is silent while it does its damage, so the report is the only place it
     /// can be seen: nothing in the window says why a merged task is offering Merge again.
     #[test]
@@ -874,6 +916,7 @@ mod tests {
             has_commit: true,
             tracks_project_file: true,
             tracks_editor_cache: true,
+            embedded_repositories: Vec::new(),
             has_identity: true,
             is_clean: true,
         };

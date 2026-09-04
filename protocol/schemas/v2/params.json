@@ -2224,7 +2224,7 @@
         {
             "tool": "godot_runtime",
             "op": "run",
-            "summary": "Runs the project and captures the first frame. `scene` runs that one scene instead of the project's main scene, which is the editor's own F6 \u2014 use it to try a scene you just built, rather than writing application/run/main_scene, running, and writing it back. restart restarts whatever run started.",
+            "summary": "Runs the project and captures the first frame. `scene` runs that one scene instead of the project's main scene, which is the editor's own F6 \u2014 use it to try a scene you just built, rather than writing application/run/main_scene, running, and writing it back. restart restarts whatever run started, with the same scene and the same playArgs.",
             "alone": {
                 "scope": "repeat",
                 "why": "There is one running game, so a second one in the same call is the first one again."
@@ -2235,6 +2235,15 @@
                     "kind": "text",
                     "required": false,
                     "note": "A res:// path to a .tscn, like res://scenes/level_2.tscn. Without it the project's main scene runs."
+                },
+                {
+                    "name": "playArgs",
+                    "kind": "listOf",
+                    "of": {
+                        "kind": "text"
+                    },
+                    "required": false,
+                    "note": "Command-line arguments for the game, like [\"--\", \"--rate=30\"]. A game reads its own with OS.get_cmdline_user_args(), which sees only what follows a `--`. The editor carries them as one string it splits on spaces, so an argument holding a space is refused rather than delivered in pieces. restart reuses whatever run passed."
                 }
             ],
             "command": "runtime.run"

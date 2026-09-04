@@ -115,6 +115,9 @@ var _autoloads_added_here: Array[String] = []
 ## point, which is a different game whenever `run` named a scene.
 var _runtime_scene: String = ""
 
+## The command line the running game was started with, held for the same reason as _runtime_scene.
+var _runtime_args: PackedStringArray = PackedStringArray()
+
 var _debugger_bridge: GoferDebuggerBridge
 var _runtime_session_id: int = -1
 var _runtime_ready: bool = false
@@ -141,6 +144,8 @@ var _quit_countdown: int = 0
 ## Forwarded runtime requests outlive a few slow frames, launches outlive a cold game boot.
 const RUNTIME_REQUEST_TIMEOUT_MS := 20000
 const RUNTIME_LAUNCH_TIMEOUT_MS := 30000
+
+const RUN_ARGS_SETTING := "editor/run/main_run_args"
 
 ## The launch deadline this editor actually waits out.
 ##
@@ -897,9 +902,14 @@ func _handle_runtime_request(id: String, command: String, params: Dictionary) ->
                 "broke": _runtime_broke,
             })
         "runtime.run":
-            _runtime_launch(id, false, str(params.get("scene", "")))
+            var asked = params.get("playArgs", [])
+            var refusal := _args_refusal(asked)
+            if not refusal.is_empty():
+                _respond_error(id, "unsupported_value", refusal, false)
+            else:
+                _runtime_launch(id, false, str(params.get("scene", "")), _as_args(asked))
         "runtime.restart":
-            _runtime_launch(id, true, _runtime_scene)
+            _runtime_launch(id, true, _runtime_scene, _runtime_args)
         "runtime.stop":
             _runtime_stop()
             if EditorInterface.is_playing_scene():
@@ -949,7 +959,7 @@ func _runtime_stop() -> void:
 ## Starts (or restarts) the game. The response waits for the GoferRuntime autoload to announce
 ## itself, then rides back with the first rendered frame attached — the launch is only proven once
 ## the game has produced pixels.
-func _runtime_launch(id: String, restart: bool, scene: String) -> void:
+func _runtime_launch(id: String, restart: bool, scene: String, args: PackedStringArray) -> void:
     var playing := EditorInterface.is_playing_scene()
     if playing and not restart:
         _respond_error(id, "already_running", "The project is already running; stop it or use runtime.restart", true)
@@ -965,6 +975,7 @@ func _runtime_launch(id: String, restart: bool, scene: String) -> void:
         return
     if playing:
         _runtime_scene = scene
+        _runtime_args = args
         _runtime_stop()
         _runtime_pending.append({"id": id, "kind": "restart", "deadline": _runtime_deadline(_runtime_launch_timeout_ms)})
         return
@@ -973,21 +984,64 @@ func _runtime_launch(id: String, restart: bool, scene: String) -> void:
         _respond_dialog_open(id, asking)
         return
     _runtime_scene = scene
+    _runtime_args = args
     _runtime_play()
     _runtime_pending.append(_launch_pending(id, "run"))
+
+## Why this command line cannot be delivered, or "" when it can.
+##
+## `editor/run/main_run_args` is one string the editor splits on spaces, and measured on 4.7.2 it
+## groups on double quotes without ever removing them: there is no spelling of an argument holding a
+## space that reaches the game as the caller wrote it. Refused by name rather than delivered in
+## pieces, because a game reading a half of its own argument fails somewhere else entirely.
+func _args_refusal(playArgs: Variant) -> String:
+    if not playArgs is Array:
+        return "playArgs must be a list of strings"
+    for arg in playArgs as Array:
+        if not arg is String:
+            return "playArgs must be a list of strings"
+        if (arg as String).contains(" "):
+            return "A play argument cannot hold a space, and '%s' does: the editor carries the command line as one string and splits it on spaces" % arg
+    return ""
+
+
+## The command line a caller asked the game to be started with. `_args_refusal` has passed it.
+func _as_args(playArgs: Variant) -> PackedStringArray:
+    var args := PackedStringArray()
+    for arg in playArgs as Array:
+        args.append(str(arg))
+    return args
+
 
 ## Presses Play, on the scene the caller named or on the project's own.
 ##
 ## `play_custom_scene` is the editor's F6, and it is what an agent asking to run one scene means.
 ## Without it the only way to run anything but the main scene is to write
 ## `application/run/main_scene`, run, and write it back — which one live turn did, spending two
-## calls on the detour and leaving a window in which the project boots into a test scene. Another
-## two reached for a `playArgs` parameter that `godot_runtime run` does not have.
+## calls on the detour and leaving a window in which the project boots into a test scene.
+##
+## `editor/run/main_run_args` is the only command line the launched game can be given: neither
+## play_custom_scene nor play_main_scene takes one. It is put back before this returns and never
+## saved, so a project.godot does not gain a line because an agent ran a scene.
 func _runtime_play() -> void:
+    var restore: String = str(ProjectSettings.get_setting(RUN_ARGS_SETTING, ""))
+    _set_run_args(" ".join(_runtime_args))
     if _runtime_scene.is_empty():
         EditorInterface.play_main_scene()
     else:
         EditorInterface.play_custom_scene(_runtime_scene)
+    _set_run_args(restore)
+
+
+## Writes the command line the next launch will carry.
+##
+## The editor holds its own copy of this setting and reads it back only on `settings_changed`, so
+## a plain `set_setting` is invisible to a launch in the same session: measured on 4.7.2, the game
+## started with no arguments at all while the setting read back correct. Emitting the signal is
+## what the Project Settings dialog does after it applies.
+func _set_run_args(args: String) -> void:
+    ProjectSettings.set_setting(RUN_ARGS_SETTING, args)
+    ProjectSettings.emit_signal("settings_changed")
 
 ## Answers a request the editor turned into a question for a person.
 ##
