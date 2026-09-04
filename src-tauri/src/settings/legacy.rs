@@ -146,6 +146,8 @@ pub(super) struct AiSettingsFile {
     subagent: SubagentSettings,
     #[serde(default)]
     web: WebSettings,
+    #[serde(default)]
+    plan: PlanSettings,
     #[serde(flatten)]
     model_fields: ModelChoiceFile,
 }
@@ -197,6 +199,7 @@ impl From<AiSettingsFile> for AiSettings {
             compaction_percent: file.compaction_percent,
             subagent: file.subagent,
             web: file.web,
+            plan: file.plan,
         }
     }
 }

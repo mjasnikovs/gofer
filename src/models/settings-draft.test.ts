@@ -14,6 +14,7 @@ import type {SettingsAction, SettingsDraft, SettingsTaskAction} from './settings
 import {
     DEFAULT_GODOT_SETTINGS,
     DEFAULT_SUBAGENT_SETTINGS,
+    DEFAULT_PLAN_SETTINGS,
     DEFAULT_WEB_SETTINGS,
     activeConnection
 } from './settings'
@@ -54,7 +55,8 @@ const SETTINGS: GoferSettings = {
         timeoutMs: 120_000,
         compactionPercent: 86,
         subagent: DEFAULT_SUBAGENT_SETTINGS,
-        web: DEFAULT_WEB_SETTINGS
+        web: DEFAULT_WEB_SETTINGS,
+        plan: DEFAULT_PLAN_SETTINGS
     },
     godot: DEFAULT_GODOT_SETTINGS
 }

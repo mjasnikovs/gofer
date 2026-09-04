@@ -12,6 +12,7 @@ import {StatusDot} from '@astryxdesign/core/StatusDot'
 import {Heading, Text} from '@astryxdesign/core/Text'
 import {TextInput} from '@astryxdesign/core/TextInput'
 import GlobeAltIcon from '@heroicons/react/24/outline/GlobeAltIcon'
+import MapIcon from '@heroicons/react/24/outline/MapIcon'
 import MagnifyingGlassIcon from '@heroicons/react/24/outline/MagnifyingGlassIcon'
 import ServerStackIcon from '@heroicons/react/24/outline/ServerStackIcon'
 import {invoke} from '../../services/desktop'
@@ -843,6 +844,53 @@ export function useAiTab(view: SettingsView): AiTabView {
                                         dispatch={dispatch}
                                     />
                                 )}
+                            </FormLayout>
+                        </VStack>
+                    </Grid>
+                )}
+
+                {draft && (
+                    <Grid
+                        columns={SETTINGS_GRID_COLUMNS}
+                        gap={10}
+                    >
+                        <VStack gap={2}>
+                            <HStack
+                                gap={2}
+                                vAlign='center'
+                            >
+                                <Icon
+                                    icon={MapIcon}
+                                    size='md'
+                                    color='accent'
+                                />
+                                <Heading level={2}>Planning</Heading>
+                            </HStack>
+                            <Text color='secondary'>
+                                Execute as plan reads the project, then raises the questions that
+                                decide what gets built. There is no round limit and no clock: the
+                                plan asks until it runs out of questions, or until you press Stop
+                                asking on the card.
+                            </Text>
+                        </VStack>
+                        <VStack gap={4}>
+                            <FormLayout>
+                                <CheckboxInput
+                                    label='Let the plan answer its own questions'
+                                    value={draft.ai.plan.answersItsOwnQuestions}
+                                    description='It settles what its own research already covers and asks you only the rest. Off, every question it raises reaches you.'
+                                    onChange={answersItsOwnQuestions => {
+                                        dispatch({
+                                            type: 'ai-changed',
+                                            update: {
+                                                plan: {
+                                                    ...draft.ai.plan,
+                                                    answersItsOwnQuestions
+                                                }
+                                            }
+                                        })
+                                    }}
+                                />
                             </FormLayout>
                         </VStack>
                     </Grid>

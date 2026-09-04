@@ -772,7 +772,8 @@ describe('InspectorWorkspace', () => {
             sketches: [],
             why: 'it changes the scene tree',
             revision: 1,
-            isDelegated: false
+            isDelegated: false,
+            canStopAsking: false
         }
         const frame = (questions: readonly UserQuestionPrompt[]) => (
             <AskedQuestionsContext value={{questions, answer: vi.fn()}}>

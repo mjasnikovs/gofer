@@ -24,18 +24,10 @@ export {BRIEF_PHASES}
 
 export const ASK_TOOL_NAME = 'ask_user'
 
-export const BRIEF_DEADLINE_MS = 20 * 60 * 1000
-
-export class BriefExpired extends Error {
-    constructor(phase, elapsedMs) {
-        super(`the plan was still on ${phase} after ${Math.round(elapsedMs / 60_000)} minutes`)
-        this.phase = phase
-    }
-}
-
-export function guardDeadline(phase, elapsedMs, deadlineMs = BRIEF_DEADLINE_MS) {
-    if (deadlineMs > 0 && elapsedMs > deadlineMs) throw new BriefExpired(phase, elapsedMs)
-}
+// Cancelling sends the cancel line and this question's rejection down one pipe from two
+// threads, so the rejection can arrive first, with the abort flag not yet set. Reading the
+// code is what tells a cancelled run from a failed one.
+const CANCELLED_QUESTION = 'question_cancelled'
 
 const PHASE_WORK = {
     refine: (done, deps) => refine(done.prompt, deps),
@@ -86,8 +78,6 @@ export async function runBrief({
     credentialHost,
     emit,
     signal,
-    now = () => Date.now(),
-    deadlineMs = BRIEF_DEADLINE_MS,
     world = LIVE_WORLD
 }) {
     if (typeof prompt !== 'string' || prompt.trim().length === 0) {
@@ -120,8 +110,6 @@ export async function runBrief({
     }
 
     let spend = {input: 0, output: 0}
-    let waitedOnTheUser = 0
-    const startedAt = now()
     let atPhase = 'startup'
 
     const runWorker = async ({label, prompt: text, toolNames, images: pictures = []}) => {
@@ -141,7 +129,12 @@ export async function runBrief({
             deps: childDeps,
             signal
         })
-        if (outcome.kind === 'ok') spend = addSpend(spend, outcome.usage)
+        // Nothing bounds a plan but the Cancel button, so the number the user decides on has
+        // to climb while they are deciding rather than arrive once the run is over.
+        if (outcome.kind === 'ok') {
+            spend = addSpend(spend, outcome.usage)
+            emit(briefCost(spend))
+        }
         return outcome
     }
 
@@ -152,26 +145,28 @@ export async function runBrief({
         existingFiles,
         planContext,
         canSearch,
-        guard: phase => guardDeadline(phase, now() - startedAt - waitedOnTheUser, deadlineMs),
+        answersItsOwnQuestions: settings?.plan?.answersItsOwnQuestions === true,
         log: message => emit(briefLog(message)),
         onWorker: (section, kind) => emit(briefWorkerDone(section, kind)),
         onQuestion: (question, outcome) => emit(briefQuestionSettled(question.question, outcome)),
         askUser: async question => {
-            const askedAt = now()
             const answer = await stoppableCall(() =>
                 host.call(
                     ASK_TOOL_NAME,
                     {
                         question: question.question,
                         options: question.options,
-                        why: question.why
+                        why: question.why,
+                        canStopAsking: true
                     },
                     signal
                 )
             )
-            waitedOnTheUser += now() - askedAt
             const text = typeof answer?.answer === 'string' ? answer.answer.trim() : ''
-            return text.length > 0 ? text : null
+            return {
+                answer: text.length > 0 ? text : null,
+                stopAsking: answer?.stopAsking === true
+            }
         }
     }
 
@@ -179,7 +174,9 @@ export async function runBrief({
         try {
             return await run()
         } catch (error) {
-            if (signal?.aborted) throw new PhaseStopped(atPhase)
+            const cancelled =
+                signal?.aborted || String(error?.message ?? '').startsWith(CANCELLED_QUESTION)
+            if (cancelled) throw new PhaseStopped(atPhase)
             throw error
         }
     }
@@ -210,7 +207,6 @@ export async function runBrief({
             finished(name, field, stored(done[field]))
         }
 
-        emit(briefCost(spend))
         emit(briefDone(done.spec))
         return done.spec
     } catch (error) {
@@ -224,7 +220,7 @@ export async function runBrief({
             : error instanceof Error ? error.message
             : String(error)
         emit(briefFailed(phase, reason))
-        if (error instanceof PhaseFailed || error instanceof BriefExpired) return null
+        if (error instanceof PhaseFailed) return null
         throw error
     }
 }

@@ -43,8 +43,10 @@ pub(crate) struct Switch<'a> {
 impl<'a> Switch<'a> {
     /// The Switch the application builds: it takes the provider operation, or refuses.
     ///
-    /// The refusal is a state rather than a fault — something is answering right now — so it is
-    /// retryable, and the sentence tells the user what to wait for.
+    /// The refusal is a state rather than a fault — something is running right now — so it is
+    /// retryable. The sentence names both endings because one of them is not a wait at all: a plan
+    /// parked on a question waits on the user, and telling them to wait for it is telling them to
+    /// wait for themselves.
     pub(crate) fn refusing_a_turn(
         workspace: impl Into<PathBuf>,
         release: &'a dyn Fn(&Path) -> Result<(), String>,
@@ -52,7 +54,7 @@ impl<'a> Switch<'a> {
         let operation = crate::ai_turn::begin_provider_operation().map_err(|_| {
             CommandError::new(
                 "ai_request_in_progress",
-                "Wait for the current answer to finish before opening another task",
+                "Something is still running here. Answer or cancel it — a plan waiting on a question waits as long as you do — then open another task",
             )
             .retryable()
         })?;

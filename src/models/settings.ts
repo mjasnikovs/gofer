@@ -8,6 +8,7 @@ export type AiSettings = Readonly<{
     compactionPercent: number
     subagent: SubagentSettings
     web: WebSettings
+    plan: PlanSettings
 }>
 
 export type AiConnections = Readonly<Partial<Record<AiConnectionType, AiConnectionProfile>>>
@@ -29,6 +30,12 @@ export const SEARCH_PROVIDER_LABELS: Readonly<Record<SearchProvider, string>> = 
 export const SEARCH_PROVIDERS_NEEDING_KEY: readonly SearchProvider[] = ['brave']
 
 export const DEFAULT_WEB_SETTINGS: WebSettings = {searchProvider: 'exa'}
+
+export type PlanSettings = Readonly<{
+    answersItsOwnQuestions: boolean
+}>
+
+export const DEFAULT_PLAN_SETTINGS: PlanSettings = {answersItsOwnQuestions: false}
 
 export type AiApiDialect = 'openai-completions' | 'openai-codex-responses'
 
@@ -256,7 +263,8 @@ export function normalizeSettings(settings: GoferSettings): GoferSettings {
             ...settings.ai,
             connections: {...settings.ai.connections},
             subagent: {...DEFAULT_SUBAGENT_SETTINGS, ...settings.ai.subagent},
-            web: {...DEFAULT_WEB_SETTINGS, ...settings.ai.web}
+            web: {...DEFAULT_WEB_SETTINGS, ...settings.ai.web},
+            plan: {...DEFAULT_PLAN_SETTINGS, ...settings.ai.plan}
         }
     }
 }

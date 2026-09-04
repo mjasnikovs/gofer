@@ -86,6 +86,11 @@ export function BriefProgress({
                                             {`${String(state.research.length)}/${String(RESEARCH_SECTIONS.length)}`}
                                         </Text>
                                     )}
+                                    {phase === 'grill' && state.questions > 0 && (
+                                        <Text type='supporting'>
+                                            {`${String(state.questions)} settled`}
+                                        </Text>
+                                    )}
                                 </HStack>
                                 {isRunning && phase !== 'research' && state.step && (
                                     <VStack paddingInline={5}>
@@ -161,7 +166,7 @@ export function BriefProgress({
                             label='Cancel planning'
                             variant='secondary'
                             size='sm'
-                            tooltip='Ends the plan. The phases it has finished are not kept.'
+                            tooltip='Ends the plan. The phases it has already finished are kept.'
                             onClick={onCancel}
                         />
                     </HStack>

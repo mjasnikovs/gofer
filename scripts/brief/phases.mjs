@@ -1,6 +1,5 @@
 import {classifyWorkerOutcome, degradedSection, emptySection} from './outcome.mjs'
 import {
-    MAX_QUESTIONS,
     NO_COMMANDS,
     apisPrompt,
     autoAnswerPrompt,
@@ -29,7 +28,6 @@ export class PhaseStopped extends Error {
 }
 
 async function ask(phase, deps, spec) {
-    deps.guard?.(phase)
     const verdict = classifyWorkerOutcome(await deps.runWorker(spec), {partial: spec.partial ?? ''})
     if (verdict.kind === 'stopped') throw new PhaseStopped(phase)
     if (verdict.kind === 'fatal') throw new PhaseFailed(phase, verdict.reason)
@@ -145,10 +143,27 @@ export function parseAutoAnswer(text) {
     return answered ? answered[1].trim() : null
 }
 
+async function answerFromResearch(question, refined, research, deps) {
+    if (!deps.answersItsOwnQuestions) return null
+    const attempted = await ask('grill', deps, {
+        label: 'grill:answer',
+        toolNames: ['read'],
+        prompt: autoAnswerPrompt(question.question, refined, research)
+    })
+    return attempted.kind === 'ok' ? parseAutoAnswer(attempted.text) : null
+}
+
+const sameQuestion = text =>
+    text
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/gu, ' ')
+        .trim()
+
 export async function grill(refined, research, deps = {}) {
     const settled = []
     const asked = []
-    for (let round = 0; round < MAX_QUESTIONS; round += 1) {
+    const alreadyAsked = new Set()
+    for (;;) {
         const generated = await ask('grill', deps, {
             label: 'grill',
             toolNames: ['read'],
@@ -157,20 +172,22 @@ export async function grill(refined, research, deps = {}) {
         if (generated.kind !== 'ok') break
         const question = parseQuestion(generated.text)
         if (!question) break
+        // ALREADY ASKED is a sentence in a prompt, and a prompt enforces nothing. Without the round
+        // count there is no other floor under a model that keeps putting the same question back —
+        // and with the answering setting on, no user sees it happening.
+        if (alreadyAsked.has(sameQuestion(question.question))) break
+        alreadyAsked.add(sameQuestion(question.question))
         asked.push(`- ${question.question}`)
 
-        const attempted = await ask('grill', deps, {
-            label: 'grill:answer',
-            toolNames: ['read'],
-            prompt: autoAnswerPrompt(question.question, refined, research)
-        })
-        const automatic = attempted.kind === 'ok' ? parseAutoAnswer(attempted.text) : null
+        const automatic = await answerFromResearch(question, refined, research, deps)
         if (automatic) {
             settled.push({...question, answer: automatic, from: 'research'})
             deps.onQuestion?.(question, 'answered')
             continue
         }
 
+        // Nothing else ends the loop now that the round count is gone, and a caller with
+        // nobody to ask would put the same question back forever.
         if (!deps.askUser) {
             settled.push({
                 ...question,
@@ -178,15 +195,16 @@ export async function grill(refined, research, deps = {}) {
                 from: 'open'
             })
             deps.onQuestion?.(question, 'open')
-            continue
+            break
         }
-        const answer = await deps.askUser(question)
+        const {answer, stopAsking} = await deps.askUser(question)
         settled.push({
             ...question,
             answer: answer ?? '(skipped — left to the implementer)',
             from: answer ? 'user' : 'skipped'
         })
         deps.onQuestion?.(question, answer ? 'user' : 'skipped')
+        if (stopAsking) break
     }
     return settled
 }

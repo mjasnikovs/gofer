@@ -1,5 +1,5 @@
 import {Fragment, memo, useEffect, useMemo, useState} from 'react'
-import type {CSSProperties, RefObject} from 'react'
+import type {CSSProperties, Ref} from 'react'
 import {Button} from '@astryxdesign/core/Button'
 import {
     ChatMessage,
@@ -37,7 +37,7 @@ type ChatConversationProps = Readonly<{
     attachmentPreviews: Readonly<Record<string, string>>
     isStreaming: boolean
     messages: readonly Message[]
-    scrollRef: RefObject<HTMLElement | null>
+    scrollRef: Ref<HTMLElement>
     onRetry: (assistantId: number) => void
 }>
 
@@ -567,6 +567,7 @@ export function ChatConversation({
     return (
         <StackItem
             ref={scrollRef}
+            data-testid='chat-scroll'
             size='fill'
             isScrollable
             style={CHAT_SCROLL_VIEWPORT_STYLE}

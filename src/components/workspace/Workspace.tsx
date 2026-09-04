@@ -124,7 +124,11 @@ export function Workspace({
     const [workspaceError, setWorkspaceError] = useState<string>()
     const [mergeOffered, setMergeOffered] = useState<MergeOffer>(NOTHING_TO_OFFER)
     const [unsaved, setUnsaved] = useState<readonly string[]>([])
-    const messageScrollRef = useRef<HTMLElement>(null)
+    const [messageScroll, setMessageScroll] = useState<HTMLElement | null>(null)
+    // The chat tab unmounts its scroller, and the one that replaces it is a different
+    // element. A fresh ref object per element is what re-runs the scroll hook onto the
+    // one actually on screen; a single stable ref leaves it listening to a dead node.
+    const messageScrollRef = useMemo(() => ({current: messageScroll}), [messageScroll])
 
     const report = useCallback((message: string) => {
         setWorkspaceError(message)
@@ -204,12 +208,19 @@ export function Workspace({
         chatScroll.scrollIfLocked()
     }, [messages, chatScroll.scrollIfLocked])
 
+    // Opening the chat shows where the conversation got to, never where the last reader
+    // left off, so a scroller arriving on screen is put at the newest message and relocked.
+    useEffect(() => {
+        if (!messageScroll) return
+        chatScroll.scrollToBottom({behavior: 'instant'})
+    }, [messageScroll, chatScroll.scrollToBottom])
+
     const jumpToNewest = useCallback(() => {
         chatScroll.scrollToBottom()
     }, [chatScroll.scrollToBottom])
 
     useEffect(() => {
-        const content = messageScrollRef.current?.firstElementChild
+        const content = messageScroll?.firstElementChild
         if (!content) return undefined
         const observer = new ResizeObserver(() => {
             chatScroll.scrollIfLocked()
@@ -218,7 +229,7 @@ export function Workspace({
         return () => {
             observer.disconnect()
         }
-    }, [chatScroll.scrollIfLocked, hasConversation])
+    }, [chatScroll.scrollIfLocked, messageScroll])
 
     const takeAttachments = async (): Promise<readonly ChatAttachment[]> => {
         const taken = draftAttachments
@@ -582,7 +593,7 @@ export function Workspace({
             attachmentPreviews,
             isStreaming: isBusy,
             messages,
-            scrollRef: messageScrollRef,
+            scrollRef: setMessageScroll,
             isScrolledUp: chatScroll.isScrolledUp,
             scrollToBottom: jumpToNewest,
             retry: retryTurn,

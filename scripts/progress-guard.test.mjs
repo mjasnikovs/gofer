@@ -69,6 +69,37 @@ test('a digit that changes between calls does not make a different call', async 
     assert.notEqual(normalisedKey('read', {path: 'a.gd'}), normalisedKey('read', {path: 'b.gd'}))
 })
 
+test('stepping a debugger is not a loop, however identical the calls read', async () => {
+    const guard = createProgressGuard()
+    let line = 0
+    const debugger_ = guard.decorate(
+        answering('godot_debug', () => `stopped at line ${String((line += 1))}`)
+    )
+
+    const outcomes = await repeat(debugger_, {ops: [{op: 'step_over'}]}, SAME_CALL_LIMIT * 3)
+
+    assert.ok(
+        outcomes.every(outcome => outcome.ok),
+        `step_over takes an optional thread and nothing else, so every call is byte-identical: `
+            + JSON.stringify(outcomes.find(outcome => outcome.refused))
+    )
+    assert.equal(guard.verdict(), undefined)
+})
+
+test('paging a file to its end is not a loop, though the offsets fold to one call', async () => {
+    const guard = createProgressGuard()
+    const read = guard.decorate(answering('read', ({offset}) => `lines from ${String(offset)}`))
+
+    const outcomes = []
+    for (let page = 0; page < SAME_CALL_LIMIT * 2; page += 1)
+        outcomes.push(await call(read, {path: 'big.gd', offset: 1 + page * 200}))
+
+    assert.ok(
+        outcomes.every(outcome => outcome.ok),
+        'the read tool tells the model to continue with offset until the file is complete'
+    )
+})
+
 test('an ack between two pieces of work never counts', async () => {
     const guard = createProgressGuard()
     const stop = guard.decorate(answering('godot_runtime', () => '{"op":"stopped"}'))

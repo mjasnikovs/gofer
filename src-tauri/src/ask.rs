@@ -21,14 +21,15 @@
 //! senders cannot reach a caller that is still on its way in, so without the gate that one waits for
 //! an answer nobody will ever send.
 //!
-//! What is NOT shared is the timeout and the wording. A yes-or-no about a delete and a question a
-//! person is composing prose for are not the same wait, and pretending they are is how a question
-//! surface inherits a five-minute ceiling nobody chose for it.
+//! What is NOT shared is the ceiling and the wording. A yes-or-no about a delete waits five minutes;
+//! a question a person is composing prose for waits as long as they need, because any number there
+//! is a ceiling on thinking rather than on a hung backend.
 //!
 //! What IS shared, deliberately, is the *gate*. `open_user_prompts` and `cancel_user_prompts` cover
 //! every registry a turn can park a prompt in, because a turn ends in four places and the count of
-//! things it has to remember to close must not grow with the count of surfaces. A registry closed in
-//! three of the four leaves a tool call parked for half an hour on a card nobody can see.
+//! things it has to remember to close must not grow with the count of surfaces. That gate is the
+//! only thing that releases a question, so a registry closed in three of the four parks a tool call
+//! on a card nobody can see for as long as the process lives.
 
 use crate::ai_tools::ToolFailure;
 use serde::Serialize;
@@ -37,8 +38,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
-use std::time::Duration;
+use std::sync::mpsc::{Receiver, RecvError, Sender, channel};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 /// The window every prompt is shown in. Tauri permissions restrict the answering commands to it too.
@@ -207,10 +207,16 @@ pub struct QuestionPrompt {
     /// the button that ends a delegation. Only a delegated question has an agent still looping
     /// behind it, so only a delegated question has a loop to end.
     pub is_delegated: bool,
+    /// Whether the asker will stop questioning if the user says so, and so may offer the control.
+    ///
+    /// A plan's questioning has no round count any more, so the user is the only thing that ends it
+    /// early. Every other asker asks once and has nothing to stop, which is why this is offered
+    /// rather than assumed — a button that ends nothing is worse than no button.
+    pub can_stop_asking: bool,
 }
 
-/// Emitted whenever a question stops waiting — answered, skipped, timed out or cancelled — so the
-/// renderer never leaves a card open over a decision nobody is waiting for anymore.
+/// Emitted whenever a question stops waiting — answered, skipped or cancelled — so the renderer
+/// never leaves a card open over a decision nobody is waiting for anymore.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuestionSettled {
@@ -251,6 +257,11 @@ pub struct Reply {
     /// It is not the same as saying nothing. A model reads an answer and decides for itself whether
     /// to come back; this is the user saying they expect it to.
     pub again: bool,
+    /// They are done being asked: settle what is left without them and get on with it.
+    ///
+    /// Orthogonal to `skipped`, and usually alongside it. A skip is about this question; this is
+    /// about every question after it.
+    pub stop_asking: bool,
 }
 
 /// How a question ended.
@@ -258,8 +269,6 @@ pub struct Reply {
 pub enum Answer {
     /// The user did something with it — including deliberately nothing, as `Reply::skipped`.
     Answered(Reply),
-    /// Nobody answered in time.
-    TimedOut,
     /// The run ended, or the question was asked after it had already ended.
     Cancelled,
     /// There is no window to ask in, so nobody could have answered.
@@ -268,15 +277,6 @@ pub enum Answer {
 
 const QUESTION_REQUEST_EVENT: &str = "ai-question-request";
 const QUESTION_SETTLED_EVENT: &str = "ai-question-settled";
-
-/// How long a question waits before it gives up.
-///
-/// Half an hour, where an approval waits five minutes, and the difference is the point of keeping the
-/// two timeouts apart. An approval is a yes or no about something the user is already watching. A
-/// question asks them to make a decision and write it down, and it can arrive while they are reading
-/// the code it is about — or looking at a layout, which is slower still. Five minutes there is not a
-/// ceiling on a hung backend, it is a ceiling on thinking.
-const QUESTION_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// The questions currently waiting. Its own registry rather than the approvals one, because the
 /// answers are different shapes and the two are opened and closed by different runs.
@@ -292,8 +292,9 @@ static ASKED: Mutex<Option<HashMap<String, u32>>> = Mutex::new(None);
 ///
 /// One function rather than one per registry, and that is the whole point of it. A turn opens in one
 /// place and closes in four, and a surface that has to be remembered separately at each of them is a
-/// surface that will be forgotten at one of them — which reads, from the outside, as a tool call that
-/// hung for half an hour over a card nobody could see.
+/// surface that will be forgotten at one of them — which reads, from the outside, as a tool call
+/// hung over a card nobody could see. A question has no clock behind it, so forgetting one here is
+/// how it hangs until the process ends rather than for a bounded while.
 ///
 /// [`crate::approvals`] is one of those surfaces, and it was outside this call until it was not.
 /// The bundling stopped at the two question registries, so every caller opened a pair by hand —
@@ -329,9 +330,10 @@ pub(crate) fn questions_open() -> bool {
 ///
 /// The twin of [`crate::approvals::pending_approvals`], and it exists for the same reason: a live
 /// turn has no user, and everything a turn can stop and wait for has to be answerable by the run
-/// itself. Approvals had that half and questions did not, so a turn that asked one waited out
-/// `QUESTION_TIMEOUT` — **thirty minutes**, in a harness that answers approvals in milliseconds.
-/// One live run spent them, on a task whose fixture did not hold what the task described.
+/// itself. Approvals had that half and questions did not, so a turn that asked one stopped dead in a
+/// harness that answers approvals in milliseconds. One live run spent its whole budget there, on a
+/// task whose fixture did not hold what the task described. A question waits on nothing but an
+/// answer now, so this is the only thing that ends one.
 ///
 /// Absent from every non-test build.
 #[cfg(all(test, feature = "godot-acceptance"))]
@@ -388,30 +390,37 @@ fn next_revision(question_id: &str) -> u32 {
 /// `question_id` is the caller's, not ours. A caller revising something it has already asked sends
 /// back the identifier it was given, which is what lets the card say "revision 3" rather than
 /// pretending to be new.
-#[allow(clippy::too_many_arguments)]
-pub fn ask_question<R: Runtime>(
-    app: &AppHandle<R>,
-    question_id: &str,
-    question: &str,
-    options: Vec<String>,
-    sketches: Vec<Sketch>,
-    why: &str,
-    owner_call_id: Option<String>,
-    is_delegated: bool,
-) -> Answer {
+///
+/// One struct rather than eight arguments, because three of them are now booleans and strings that
+/// a call site can silently transpose. `revision` is not among them: it is counted here, from the
+/// identifier, so no caller can claim one.
+#[derive(Clone, Debug, Default)]
+pub struct Asked {
+    pub question_id: String,
+    pub question: String,
+    pub options: Vec<String>,
+    pub sketches: Vec<Sketch>,
+    pub why: String,
+    pub owner_call_id: Option<String>,
+    pub is_delegated: bool,
+    pub can_stop_asking: bool,
+}
+
+pub fn ask_question<R: Runtime>(app: &AppHandle<R>, asked: Asked) -> Answer {
     if !app.webview_windows().contains_key(MAIN_WINDOW) {
         return Answer::Unavailable;
     }
 
     let prompt = QuestionPrompt {
-        question_id: question_id.to_owned(),
-        question: question.to_owned(),
-        options,
-        sketches,
-        why: why.to_owned(),
-        revision: next_revision(question_id),
-        owner_call_id,
-        is_delegated,
+        revision: next_revision(&asked.question_id),
+        question_id: asked.question_id,
+        question: asked.question,
+        options: asked.options,
+        sketches: asked.sketches,
+        why: asked.why,
+        owner_call_id: asked.owner_call_id,
+        is_delegated: asked.is_delegated,
+        can_stop_asking: asked.can_stop_asking,
     };
     let Ok(receiver) = QUESTIONS.register(&prompt.question_id) else {
         return Answer::Unavailable;
@@ -427,10 +436,14 @@ pub fn ask_question<R: Runtime>(
         return Answer::Unavailable;
     }
 
+    // A question has no ceiling, where an approval waits five minutes. An approval is a yes or no
+    // about something the user is already watching; a question asks them to read the code it is
+    // about and write a decision down. Any number put here is a ceiling on thinking, and the wait
+    // is released by the run ending rather than by a clock.
     let outcome = if abandoned {
-        Err(RecvTimeoutError::Disconnected)
+        Err(RecvError)
     } else {
-        receiver.recv_timeout(QUESTION_TIMEOUT)
+        receiver.recv()
     };
     QUESTIONS.take(&prompt.question_id);
 
@@ -445,8 +458,7 @@ pub fn ask_question<R: Runtime>(
     );
     match outcome {
         Ok(reply) => Answer::Answered(reply),
-        Err(RecvTimeoutError::Timeout) => Answer::TimedOut,
-        Err(RecvTimeoutError::Disconnected) => Answer::Cancelled,
+        Err(RecvError) => Answer::Cancelled,
     }
 }
 
@@ -467,6 +479,8 @@ pub struct QuestionResponse {
     pub approved: bool,
     #[serde(default)]
     pub again: bool,
+    #[serde(default)]
+    pub stop_asking: bool,
 }
 
 /// A refusal, in the shape every other command already reports one.
@@ -492,10 +506,14 @@ pub fn respond_question(response: QuestionResponse) -> Result<(), QuestionError>
         .unwrap_or_default();
     let empty =
         text.is_empty() && response.picked.is_none() && !response.approved && !response.again;
+    // `stop_asking` stays out of `empty` and is carried through the skip branch by hand. Pressing
+    // the button with an empty box is the normal way to press it, so it has to stay a skip — but
+    // `..Reply::default()` would drop the one thing that press actually said.
     let reply = if response.skipped || empty {
         Reply {
             blocked: response.blocked,
             skipped: true,
+            stop_asking: response.stop_asking,
             ..Reply::default()
         }
     } else {
@@ -506,6 +524,7 @@ pub fn respond_question(response: QuestionResponse) -> Result<(), QuestionError>
             skipped: false,
             approved: response.approved,
             again: response.again,
+            stop_asking: response.stop_asking,
         }
     };
     QUESTIONS
@@ -560,9 +579,9 @@ fn unquoted(value: &str) -> String {
 
 /// Blocks until the user answers, and reports every other ending as a failure the asker can act on.
 ///
-/// A skip and a timeout are told apart on purpose. A skip is a decision — the user read the question
-/// and left it to the implementer — so it comes back as an ordinary answer saying so. A timeout and a
-/// cancellation are not answers at all, and reporting them as an empty one would put words in the
+/// A skip and a cancellation are told apart on purpose. A skip is a decision — the user read the
+/// question and left it to the implementer — so it comes back as an ordinary answer saying so. A
+/// cancellation is not an answer at all, and reporting it as an empty one would put words in the
 /// user's mouth.
 pub(crate) fn ask_user<R: Runtime>(
     app: &AppHandle<R>,
@@ -613,27 +632,30 @@ pub(crate) fn ask_user<R: Runtime>(
         .get("isDelegated")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let can_stop_asking = params
+        .get("canStopAsking")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
     let (shown, unresolved) = resolve_sketch_assets(app, sketches.clone());
 
     match ask_question(
         app,
-        &question_id,
-        question,
-        options,
-        shown.clone(),
-        why,
-        owner_call_id,
-        is_delegated,
+        Asked {
+            question_id: question_id.clone(),
+            question: question.to_owned(),
+            options,
+            sketches: shown.clone(),
+            why: why.to_owned(),
+            owner_call_id,
+            is_delegated,
+            can_stop_asking,
+        },
     ) {
         Answer::Answered(reply) => {
             keep_sketch(app, &question_id, question, &sketches, &shown, &reply);
             Ok(reply_answer(&question_id, &sketches, &reply, unresolved))
         }
-        Answer::TimedOut => Err(ToolFailure::new(
-            "question_timeout",
-            "Nobody answered the question in time. Decide it yourself and say which way you went.",
-        )),
         Answer::Cancelled => Err(ToolFailure::new(
             "question_cancelled",
             "The question was cancelled because the run ended.",
@@ -690,6 +712,7 @@ fn reply_answer(
         "note": skipping_is_a_decision(reply),
         "approved": reply.approved,
         "again": reply.again,
+        "stopAsking": reply.stop_asking,
         "answer": reply.text,
         "picked": picked,
         "sketch": chosen,
@@ -962,6 +985,7 @@ fn asset_data_uri(workspace: &crate::files::Workspace, relative: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn an_identifier_is_never_handed_out_twice() {
@@ -1051,6 +1075,55 @@ mod tests {
         assert!(reply.skipped);
     }
 
+    /**
+     * Stopping the questioning with an empty box is still a skip, and still says stop.
+     *
+     * The two travel together because pressing the button without typing is the normal way to
+     * press it. The skip branch fills the rest of the reply from `Reply::default()`, so the one
+     * thing that press said is the one thing it is placed to lose — and losing it is silent: the
+     * plan simply asks again.
+     */
+    #[test]
+    fn stopping_with_an_empty_box_is_a_skip_that_still_carries_the_stop() {
+        let _guard = serialize_question_tests();
+        let receiver = QUESTIONS.register("question-stop").expect("registered");
+        respond_question(QuestionResponse {
+            question_id: "question-stop".to_owned(),
+            stop_asking: true,
+            ..QuestionResponse::default()
+        })
+        .expect("answered");
+
+        let reply = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("a reply");
+        assert!(reply.skipped, "nothing was typed, so nothing was decided");
+        assert!(reply.stop_asking, "but the asking was ended");
+        assert_eq!(
+            reply_answer("question-stop", &[], &reply, Vec::new())["stopAsking"],
+            serde_json::json!(true),
+            "and the asker is told, because only it can act on it"
+        );
+    }
+
+    /// A question that offers the control says so, and one that does not stays silent about it.
+    #[test]
+    fn only_an_asker_that_can_stop_offers_to() {
+        let offered = QuestionPrompt {
+            question_id: "question-1".to_owned(),
+            question: "which?".to_owned(),
+            options: Vec::new(),
+            sketches: Vec::new(),
+            why: String::new(),
+            revision: 1,
+            owner_call_id: None,
+            is_delegated: false,
+            can_stop_asking: true,
+        };
+        let payload = serde_json::to_value(&offered).expect("a prompt serialises");
+        assert_eq!(payload["canStopAsking"], serde_json::json!(true));
+    }
+
     /// Text the user did write arrives trimmed, and a question only settles once.
     #[test]
     fn a_written_answer_arrives_and_the_question_stops_waiting() {
@@ -1120,7 +1193,7 @@ mod tests {
      * No window is nobody to ask, and the agent must not answer for the user.
      *
      * A headless backend still runs tools, and a question reaching one has to come back as
-     * unanswered rather than blocking the tool call for half an hour over a card nobody can see.
+     * unanswered rather than blocking the tool call forever over a card nobody can see.
      */
     #[test]
     fn a_question_with_no_window_to_show_it_in_is_unavailable_at_once() {
@@ -1132,13 +1205,12 @@ mod tests {
         assert_eq!(
             ask_question(
                 app.handle(),
-                "question-1",
-                "which menu?",
-                Vec::new(),
-                Vec::new(),
-                "it decides the scene",
-                None,
-                false
+                Asked {
+                    question_id: "question-1".to_owned(),
+                    question: "which menu?".to_owned(),
+                    why: "it decides the scene".to_owned(),
+                    ..Asked::default()
+                }
             ),
             Answer::Unavailable
         );
@@ -1160,13 +1232,12 @@ mod tests {
         assert_eq!(
             ask_question(
                 app.handle(),
-                "question-2",
-                "which menu?",
-                vec!["pause".to_owned()],
-                Vec::new(),
-                "",
-                None,
-                false
+                Asked {
+                    question_id: "question-2".to_owned(),
+                    question: "which menu?".to_owned(),
+                    options: vec!["pause".to_owned()],
+                    ..Asked::default()
+                }
             ),
             Answer::Cancelled
         );
@@ -1200,13 +1271,12 @@ mod tests {
 
         let answer = ask_question(
             app.handle(),
-            "question-3",
-            "which menu?",
-            Vec::new(),
-            Vec::new(),
-            "it picks the scene",
-            None,
-            false,
+            Asked {
+                question_id: "question-3".to_owned(),
+                question: "which menu?".to_owned(),
+                why: "it picks the scene".to_owned(),
+                ..Asked::default()
+            },
         );
         responder
             .join()
@@ -1267,6 +1337,7 @@ mod tests {
             revision: 1,
             owner_call_id: None,
             is_delegated: false,
+            can_stop_asking: false,
         };
         let payload = serde_json::to_value(&plain).expect("a prompt serialises");
         assert!(
@@ -1315,16 +1386,17 @@ mod tests {
 
         let answer = ask_question(
             app.handle(),
-            "question-owned",
-            "which?",
-            Vec::new(),
-            vec![Sketch {
-                label: "Bar across the top".to_owned(),
-                html: "<p>a</p>".to_owned(),
-            }],
-            "",
-            Some("call-1".to_owned()),
-            true,
+            Asked {
+                question_id: "question-owned".to_owned(),
+                question: "which?".to_owned(),
+                sketches: vec![Sketch {
+                    label: "Bar across the top".to_owned(),
+                    html: "<p>a</p>".to_owned(),
+                }],
+                owner_call_id: Some("call-1".to_owned()),
+                is_delegated: true,
+                ..Asked::default()
+            },
         );
         responder
             .join()
@@ -1423,13 +1495,12 @@ mod tests {
         let first = reply();
         let one = ask_question(
             app.handle(),
-            "question-rev",
-            "which?",
-            Vec::new(),
-            sketches.clone(),
-            "",
-            None,
-            false,
+            Asked {
+                question_id: "question-rev".to_owned(),
+                question: "which?".to_owned(),
+                sketches: sketches.clone(),
+                ..Asked::default()
+            },
         );
         first.join().expect("responder thread").expect("answered");
         assert_eq!(
@@ -1443,13 +1514,12 @@ mod tests {
         let second = reply();
         ask_question(
             app.handle(),
-            "question-rev",
-            "which?",
-            Vec::new(),
-            sketches,
-            "",
-            None,
-            false,
+            Asked {
+                question_id: "question-rev".to_owned(),
+                question: "which?".to_owned(),
+                sketches,
+                ..Asked::default()
+            },
         );
         second.join().expect("responder thread").expect("answered");
         assert_eq!(next_revision("question-rev"), 3);
@@ -1596,6 +1666,7 @@ mod tests {
             skipped: false,
             approved: false,
             again: false,
+            stop_asking: false,
         };
 
         assert!(
@@ -1633,6 +1704,7 @@ mod tests {
             skipped,
             approved: false,
             again: false,
+            stop_asking: false,
         };
 
         let (source, drawn) =

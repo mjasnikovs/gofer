@@ -41,12 +41,18 @@ const activeTaskId = async () =>
         tasks => tasks.find(task => task.isCurrent)?.id ?? ''
     )
 
+// Planning is not started from the dialog. The dialog makes an empty task; the ask is typed into
+// the composer, and `Execute as plan` is the second button beside Send.
 async function newTask(ask: string, mode: 'basic' | 'planned') {
     await endTurn()
     await clickText('New task', 60_000)
-    await fillLabelledInput('What needs doing?', ask)
-    if (mode === 'planned') await clickText('Plan it first')
-    await clickButton(mode === 'planned' ? 'Plan it' : 'Create task')
+    await clickButton('Create task')
+    const composer = browser.$('[role="combobox"]')
+    await composer.waitForDisplayed({timeout: 60_000})
+    await composer.click()
+    await composer.setValue(ask)
+    if (mode === 'planned') await clickButton('Execute as plan')
+    else await browser.keys('Enter')
 }
 
 const SUGGESTION = '//*[contains(concat(" ", @class, " "), " astryx-selectable-card ")]'
@@ -69,19 +75,28 @@ const WORKING = 'Gofer is working…'
 
 const asking = () => shows('Your answer')
 
+// A plan asks until it runs out of questions, so answering every one with the same sentence against
+// a model told not to repeat itself is a way to spend the whole budget. One real answer, then the
+// button that ends the questioning.
 async function answerEveryQuestion(answer: string, limitMs = BRIEF_LIMIT) {
     const deadline = Date.now() + limitMs
     let answered = 0
     while (Date.now() < deadline) {
         if (await asking()) {
             await fillLabelledInput('Your answer', answer)
-            await clickButton('Answer')
+            await clickButton(answered === 0 ? 'Send' : 'Stop asking, continue')
             answered += 1
-            await browser.pause(1_000)
             continue
         }
         if (!(await shows('Planning this task'))) return answered
-        await browser.pause(2_000)
+        await browser.waitUntil(
+            async () => (await asking()) || !(await shows('Planning this task')),
+            {
+                timeout: Math.max(deadline - Date.now(), 1_000),
+                interval: 2_000,
+                timeoutMsg: 'the plan neither asked nor finished'
+            }
+        )
     }
     throw new Error(`the brief never finished; the window shows: ${await pageText()}`)
 }

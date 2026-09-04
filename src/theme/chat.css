@@ -26,6 +26,25 @@
     background-color: var(--color-background-popover);
 }
 
+/* An answer is a sentence, not a label. An Astryx button is one nowrap line at a fixed height,
+   so all three have to go: the height or the text spills out of its own border, and the label
+   span needs the slack or the badge beside it is what shrinks. */
+.astryx-button.gofer-ask-option {
+    white-space: normal;
+    text-align: start;
+    height: auto;
+    min-height: var(--size-element-md);
+}
+
+.astryx-button.gofer-ask-option > span > span:first-child {
+    flex: 1;
+    overflow: visible;
+}
+
+.astryx-button.gofer-ask-option .astryx-token {
+    flex-shrink: 0;
+}
+
 .astryx-collapsible-trigger > span {
     min-width: 0;
 }

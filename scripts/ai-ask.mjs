@@ -225,7 +225,9 @@ export function createAskUserTool({host, ownerCallId, delegate, agreed}) {
         execute: async (toolCallId, params, signal, onUpdate) => {
             const given = params ?? {}
             const probing = given.probe === true
-            const {ownerCallId: _sent, ...rest} = given
+            // Both are read off untyped JSON on the Rust side, so a model that emits either
+            // would forge it. Only a plan may offer to stop its own questioning.
+            const {ownerCallId: _sent, canStopAsking: _refused, ...rest} = given
             const owner = ownerCallId ?? toolCallId
 
             if (probing) {

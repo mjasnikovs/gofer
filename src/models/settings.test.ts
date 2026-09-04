@@ -14,6 +14,7 @@ import {
     connectionNotice,
     formatBytes,
     normalizeSettings,
+    DEFAULT_PLAN_SETTINGS,
     progressLabel,
     progressValue,
     OPENROUTER_BASE_URL,
@@ -199,7 +200,8 @@ describe('adoptSubagentReasoning', () => {
         timeoutMs: 120_000,
         compactionPercent: 85,
         subagent: DEFAULT_SUBAGENT_SETTINGS,
-        web: DEFAULT_WEB_SETTINGS
+        web: DEFAULT_WEB_SETTINGS,
+        plan: DEFAULT_PLAN_SETTINGS
     }
     const withChild = (overrides: Partial<typeof listed>, level: ThinkingLevel) => ({
         ...base,

@@ -184,7 +184,29 @@ test('only an ANSWER tag settles a question', () => {
     assert.equal(parseAutoAnswer('probably its own scene?'), null)
 })
 
-test('grill answers from research where it can and asks the user where it cannot', async () => {
+const said = answer => () => ({answer, stopAsking: false})
+
+test('every question reaches the user, because settling them alone is off by default', async () => {
+    const worker = scriptedWorker([ok(QUESTION), ok('NONE')])
+    const asked = []
+    const settled = await grill(REFINED, 'RESEARCH', {
+        runWorker: worker.run,
+        askUser: question => {
+            asked.push(question.question)
+            return {answer: 'inside the HUD', stopAsking: false}
+        }
+    })
+
+    assert.deepEqual(asked, ['Where does the menu live?'])
+    assert.equal(settled[0].from, 'user')
+    assert.equal(settled[0].answer, 'inside the HUD')
+    assert.ok(
+        worker.calls.every(call => call.label === 'grill'),
+        'nothing asked the model to answer for the user'
+    )
+})
+
+test('turned on, it answers from research where it can and asks where it cannot', async () => {
     const worker = scriptedWorker([
         ok(QUESTION),
         ok('ANSWER: its own scene, matching src/ui/'),
@@ -195,9 +217,10 @@ test('grill answers from research where it can and asks the user where it cannot
     const asked = []
     const settled = await grill(REFINED, 'RESEARCH', {
         runWorker: worker.run,
+        answersItsOwnQuestions: true,
         askUser: question => {
             asked.push(question.question)
-            return 'inside the HUD'
+            return {answer: 'inside the HUD', stopAsking: false}
         }
     })
 
@@ -210,30 +233,62 @@ test('grill answers from research where it can and asks the user where it cannot
 })
 
 test('what has been asked already travels into the next question', async () => {
-    const worker = scriptedWorker([ok(QUESTION), ok('ANSWER: yes'), ok('NONE')])
-    await grill(REFINED, 'RESEARCH', {runWorker: worker.run})
+    const worker = scriptedWorker([ok(QUESTION), ok('NONE')])
+    await grill(REFINED, 'RESEARCH', {runWorker: worker.run, askUser: said('inside the HUD')})
     assert.doesNotMatch(worker.calls[0].prompt, /ALREADY ASKED/u)
-    assert.match(worker.calls[2].prompt, /ALREADY ASKED/u)
-    assert.match(worker.calls[2].prompt, /Where does the menu live\?/u)
+    assert.match(worker.calls[1].prompt, /ALREADY ASKED/u)
+    assert.match(worker.calls[1].prompt, /Where does the menu live\?/u)
 })
 
 test('a skip is recorded as a decision, not as a missing answer', async () => {
-    const worker = scriptedWorker([ok(QUESTION), ok('UNKNOWN: nope'), ok('NONE')])
-    const settled = await grill(REFINED, 'RESEARCH', {runWorker: worker.run, askUser: () => null})
+    const worker = scriptedWorker([ok(QUESTION), ok('NONE')])
+    const settled = await grill(REFINED, 'RESEARCH', {
+        runWorker: worker.run,
+        askUser: said(null)
+    })
     assert.equal(settled[0].from, 'skipped')
     assert.match(settled[0].answer, /skipped/u)
 })
 
-test('with nobody to ask, a question is recorded open rather than blocking', async () => {
-    const worker = scriptedWorker([ok(QUESTION), ok('UNKNOWN: nope'), ok('NONE')])
+test('a skip is not a stop: the next question is still asked', async () => {
+    const worker = scriptedWorker([
+        ok(QUESTION),
+        ok(QUESTION.replace('Where does', 'When does')),
+        ok('NONE')
+    ])
+    const settled = await grill(REFINED, 'RESEARCH', {
+        runWorker: worker.run,
+        askUser: said(null)
+    })
+    assert.equal(settled.length, 2)
+})
+
+test('with nobody to ask, one question is recorded open and the loop ends', async () => {
+    const worker = scriptedWorker([ok(QUESTION)])
     const settled = await grill(REFINED, 'RESEARCH', {runWorker: worker.run})
+    assert.equal(settled.length, 1)
     assert.equal(settled[0].from, 'open')
 })
 
-test('grill stops asking rather than asking forever', async () => {
-    const worker = scriptedWorker([spec => ok(spec.label === 'grill' ? QUESTION : 'ANSWER: sure')])
-    const settled = await grill(REFINED, 'RESEARCH', {runWorker: worker.run})
-    assert.equal(settled.length, 6)
+test('a question already asked ends the grilling, whoever is answering', async () => {
+    const worker = scriptedWorker([
+        spec => ok(spec.label === 'grill' ? QUESTION : 'ANSWER: its own scene')
+    ])
+    const settled = await grill(REFINED, 'RESEARCH', {
+        runWorker: worker.run,
+        answersItsOwnQuestions: true
+    })
+    assert.equal(settled.length, 1, 'nothing but this check stands between it and forever')
+})
+
+test('grill stops when the user says stop asking', async () => {
+    const worker = scriptedWorker([spec => ok(spec.label === 'grill' ? QUESTION : 'NONE')])
+    const settled = await grill(REFINED, 'RESEARCH', {
+        runWorker: worker.run,
+        askUser: () => ({answer: null, stopAsking: true})
+    })
+    assert.equal(settled.length, 1, 'the question on screen is recorded, and nothing follows it')
+    assert.equal(settled[0].from, 'skipped')
 })
 
 const SPEC =

@@ -270,10 +270,17 @@ test('question with one sketch', async ({page}) => {
     await stableScreenshot(page, 'question-one-sketch.png', false, true)
 })
 
+// The long option is the point: it is wider than the card, and it used to be cut off with an
+// ellipsis while the badge beside it was cut off too.
 test('question in words', async ({page}) => {
     await askDuringATurn(page, 0)
     await expect(page.getByRole('textbox', {name: /Your answer/u})).toBeVisible()
-    await expect(page.getByRole('button', {name: 'Its own scene'})).toBeVisible()
+    await expect(
+        page.getByRole('button', {
+            name: 'Its own scene under ui/, instanced by every level that needs it (recommended)'
+        })
+    ).toBeVisible()
+    await expect(page.getByRole('button', {name: 'Stop asking, continue'})).toBeVisible()
     await stableScreenshot(page, 'question-in-words.png')
 })
 

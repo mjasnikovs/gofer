@@ -103,7 +103,13 @@ export function createProgressGuard() {
         lastKey = key
         const repeated = seenCalls.has(key)
         seenCalls.add(key)
-        if (streak >= SAME_CALL_LIMIT) return {kind: 'same-call', key, name, params, count: streak}
+        // The refusal claims nothing changed between the calls, so it has to be true: `dead` is
+        // zero for as long as the last result was one this turn had not seen. Stepping a debugger
+        // and paging a file both repeat their arguments exactly — `step_over` takes an optional
+        // thread and nothing else, and a folded offset reads as the same call — and both are
+        // progress. The runaway this rule was measured on repeated its results too.
+        if (streak >= SAME_CALL_LIMIT && dead > 0)
+            return {kind: 'same-call', key, name, params, count: streak}
         // A call never made this turn is the one thing the refusal asks for, so it runs, and its
         // result rather than its arguments decides whether the streak goes on.
         if (repeated && dead >= NO_NEW_GROUND_LIMIT)

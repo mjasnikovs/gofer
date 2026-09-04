@@ -4,6 +4,9 @@ import {BRIEF_PHASES, runBrief} from './run.mjs'
 
 const SPEC = 'GOAL\nA pause menu.\n\nVERIFY\n```sh\nnpm run check\n```'
 
+const QUESTION =
+    'QUESTION: Where does the menu live?\nA: its own scene\nB: the HUD\nWHY: it decides the tree'
+
 const worldSaying = text => ({
     createModelContext: () => ({
         models: {},
@@ -144,47 +147,6 @@ test('a phase that cannot finish ends the run without breaking the worker', asyn
     assert.equal(ending.phase, 'compose')
 })
 
-test('the deadline ends a run inside a phase, not only between two', async () => {
-    let clock = 0
-    const world = worldSaying(SPEC)
-    world.runSubagentOutcome = async () => {
-        clock += 5 * 60 * 1000
-        return {kind: 'ok', text: SPEC, usage: {input: 1, output: 1}}
-    }
-    const {events, promise} = run({world, now: () => clock, deadlineMs: 12 * 60 * 1000})
-    assert.equal(await promise, null)
-
-    const ending = endingOf(events)
-    assert.equal(ending.type, 'brief-failed')
-    assert.equal(ending.phase, 'research', 'the phase it was inside, not the next one')
-    assert.match(ending.reason, /still on research after \d+ minutes/u)
-})
-
-test('a run held up by a person is not a runaway', async () => {
-    let clock = 0
-    const world = worldSaying(prompt =>
-        prompt.includes('ANSWER:') ? 'UNKNOWN: a person has to decide'
-        : prompt.includes('QUESTION') ? 'NONE'
-        : SPEC
-    )
-    const {events, promise} = run({
-        world,
-        now: () => clock,
-        deadlineMs: 10 * 60 * 1000,
-        host: {
-            call: async () => {
-                clock += 60 * 60 * 1000
-                return {answer: 'Escape'}
-            }
-        }
-    })
-    assert.equal(await promise, SPEC)
-    assert.equal(
-        events.filter(e => e.type === 'brief-failed' || e.type === 'brief-stopped').length,
-        0
-    )
-})
-
 test('a brief with nothing to plan never starts', async () => {
     const events = []
     await assert.rejects(
@@ -243,4 +205,56 @@ test('a plan whose model cannot read a picture says so instead of failing', asyn
         logs.some(event => /cannot read images/u.test(event.message)),
         `expected the run to say the pictures were left out, got ${JSON.stringify(logs)}`
     )
+})
+
+test('the cost climbs while the plan runs, rather than arriving once it is over', async () => {
+    const {events, promise} = run()
+    await promise
+
+    const costs = events.filter(event => event.type === 'brief-cost')
+    const done = events.findIndex(event => event.type === 'brief-done')
+    assert.ok(
+        costs.length > 1,
+        `a plan the user must decide to cancel shows one total: ${costs.length}`
+    )
+    assert.ok(events.indexOf(costs[0]) < done, 'the first total lands long before the plan ends')
+    assert.ok(costs.at(-1).input > costs[0].input, 'and it grows')
+})
+
+test('a plan offers to stop its own questioning, and stops when told to', async () => {
+    const asked = []
+    const world = worldSaying(prompt => (prompt.includes('ALREADY ASKED') ? 'NONE' : QUESTION))
+    world.runSubagentOutcome = async ({prompt}) => ({
+        kind: 'ok',
+        text: prompt.includes('QUESTION:') || prompt.includes('Ask ONE question') ? QUESTION : SPEC,
+        usage: {input: 1, output: 1}
+    })
+    const {promise} = run({
+        world,
+        host: {
+            call: async (_tool, params) => {
+                asked.push(params)
+                return {answer: '', skipped: true, stopAsking: true}
+            }
+        }
+    })
+    assert.equal(await promise, SPEC)
+    assert.equal(asked.length, 1, 'the loop ended on the first stop')
+    assert.equal(asked[0].canStopAsking, true)
+})
+
+test('a question cancelled with the run stops the plan rather than failing it', async () => {
+    const world = worldSaying(prompt => (prompt.includes('Ask ONE question') ? QUESTION : SPEC))
+    const {events, promise} = run({
+        world,
+        host: {
+            call: async () => {
+                throw new Error(
+                    'question_cancelled: The question was cancelled because the run ended.'
+                )
+            }
+        }
+    })
+    assert.equal(await promise, null)
+    assert.equal(endingOf(events).type, 'brief-stopped')
 })

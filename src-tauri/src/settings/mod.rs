@@ -149,6 +149,7 @@ pub(crate) struct AiSettings {
     pub(crate) compaction_percent: u32,
     pub(crate) subagent: SubagentSettings,
     pub(crate) web: WebSettings,
+    pub(crate) plan: PlanSettings,
 }
 
 /// One connection and the model chosen on it: an address half, and a `ModelChoice`.
@@ -350,6 +351,19 @@ fn default_search_provider() -> String {
 /// The engines the settings file may name. A file naming anything else is corrected to the default
 /// rather than refused: a typo in one field must not make the whole settings file unloadable.
 pub(crate) const SEARCH_PROVIDERS: [&str; 3] = ["exa", "ddg", "brave"];
+
+/// What the planning phases may decide without the user.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PlanSettings {
+    /// Whether the plan may settle a question from its own research instead of asking.
+    ///
+    /// Off, because the questions a plan raises are the ones that decide what gets built, and a
+    /// plan that answers them has taken the decision. On, it asks only what the research could not
+    /// settle — cheaper in attention, and the reason it worked that way first.
+    #[serde(default)]
+    pub(crate) answers_its_own_questions: bool,
+}
 
 /// What bounds the sub-agent, the second agent the main one delegates reading to.
 ///
@@ -772,6 +786,7 @@ impl Default for AiSettings {
             compaction_percent: default_compaction_percent(),
             subagent: SubagentSettings::default(),
             web: WebSettings::default(),
+            plan: PlanSettings::default(),
         }
     }
 }
@@ -1729,6 +1744,7 @@ fn default_settings_from_pi_path(path: &Path) -> Option<GoferSettings> {
             compaction_percent: default_compaction_percent(),
             subagent: SubagentSettings::default(),
             web: WebSettings::default(),
+            plan: PlanSettings::default(),
         },
         godot: GodotSettings::default(),
     })
@@ -2872,6 +2888,56 @@ mod tests {
 
         assert_eq!(loaded.ai.web, WebSettings::default());
         assert_eq!(loaded.ai.web.search_provider, "exa");
+    }
+
+    /// A settings file written before the planning section existed opens with the plan asking.
+    ///
+    /// `AiSettings` reads through `AiSettingsFile`, so a field added to one and not the other is
+    /// dropped on every read — which reads, from the settings page, as a box that will not stay
+    /// ticked. This is the half that catches that.
+    #[test]
+    fn a_settings_file_that_predates_the_planning_section_asks_the_user() {
+        let directory = TempDir::new().expect("temporary directory");
+        let path = directory.path().join("settings.json");
+        let mut older = serde_json::to_value(GoferSettings::default()).expect("settings as json");
+        older["ai"]
+            .as_object_mut()
+            .expect("ai settings")
+            .remove("plan");
+        fs::write(&path, older.to_string()).expect("write older settings");
+
+        let loaded = read_settings_from_path(&path).expect("read settings");
+
+        assert!(!loaded.ai.plan.answers_its_own_questions);
+    }
+
+    /// The Node worker reads this off the wire by name, so the name is the contract.
+    ///
+    /// Nothing else catches a rename: the plan would simply go on asking every question, which is
+    /// also what the setting does when it is off.
+    #[test]
+    fn the_planning_setting_crosses_the_wire_under_the_name_the_worker_reads() {
+        let settings = AiSettings::default();
+        let wire = serde_json::to_value(&settings).expect("ai settings as json");
+
+        assert_eq!(
+            wire["plan"]["answersItsOwnQuestions"],
+            serde_json::json!(false)
+        );
+    }
+
+    /// The other half: a file that says the plan may answer itself is read back saying so.
+    #[test]
+    fn a_plan_told_to_answer_its_own_questions_is_read_back_that_way() {
+        let directory = TempDir::new().expect("temporary directory");
+        let path = directory.path().join("settings.json");
+        let mut settings = GoferSettings::default();
+        settings.ai.plan.answers_its_own_questions = true;
+        write_settings_to_path(&path, &settings).expect("write settings");
+
+        let loaded = read_settings_from_path(&path).expect("read settings");
+
+        assert!(loaded.ai.plan.answers_its_own_questions);
     }
 
     #[test]

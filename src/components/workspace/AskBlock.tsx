@@ -76,6 +76,8 @@ function SketchZoom({
 
 const ASK_SURFACE = 'gofer-ask-surface'
 
+const ASK_OPTION = 'gofer-ask-option'
+
 const RECOMMENDED_STYLE = {borderColor: 'var(--color-border-green)'} as const
 
 function equalColumns(count: number) {
@@ -249,7 +251,9 @@ function Asking({prompt, onAnswer, canAskAgain = true}: AskingProps) {
     const noteBlocked = (uri: string) => {
         setBlocked(previous => (previous.includes(uri) ? previous : [...previous, uri]))
     }
-    const send = (extra: Readonly<{approved?: boolean; again?: boolean}> = {}) => {
+    const send = (
+        extra: Readonly<{approved?: boolean; again?: boolean; stopAsking?: boolean}> = {}
+    ) => {
         onAnswer({
             questionId: prompt.questionId,
             answer,
@@ -289,41 +293,36 @@ function Asking({prompt, onAnswer, canAskAgain = true}: AskingProps) {
                     {prompt.options.length > 0 && !isVisual && (
                         <VStack gap={2}>
                             {prompt.options.map((option, index) => (
-                                <HStack
+                                <Button
                                     key={`${String(index)}-${option}`}
-                                    gap={2}
-                                    align='center'
+                                    className={ASK_OPTION}
+                                    label={
+                                        isRecommended(index) ? `${option} (recommended)` : option
+                                    }
+                                    variant='secondary'
+                                    width='100%'
+                                    {...(isRecommended(index) && {style: RECOMMENDED_STYLE})}
+                                    onClick={() => {
+                                        onAnswer({
+                                            questionId: prompt.questionId,
+                                            answer: option,
+                                            blocked: refused
+                                        })
+                                    }}
                                 >
-                                    <StackItem size='fill'>
-                                        <Button
-                                            label={
-                                                isRecommended(index) ?
-                                                    `${option} (recommended)`
-                                                :   option
-                                            }
-                                            variant='secondary'
-                                            width='100%'
-                                            {...(isRecommended(index) && {
-                                                style: RECOMMENDED_STYLE,
-                                                endContent: (
-                                                    <Token
-                                                        size='sm'
-                                                        label='Recommended'
-                                                    />
-                                                )
-                                            })}
-                                            onClick={() => {
-                                                onAnswer({
-                                                    questionId: prompt.questionId,
-                                                    answer: option,
-                                                    blocked: refused
-                                                })
-                                            }}
-                                        >
-                                            {option}
-                                        </Button>
-                                    </StackItem>
-                                </HStack>
+                                    <HStack
+                                        gap={2}
+                                        align='center'
+                                    >
+                                        <StackItem size='fill'>{option}</StackItem>
+                                        {isRecommended(index) && (
+                                            <Token
+                                                size='sm'
+                                                label='Recommended'
+                                            />
+                                        )}
+                                    </HStack>
+                                </Button>
                             ))}
                         </VStack>
                     )}
@@ -414,6 +413,16 @@ function Asking({prompt, onAnswer, canAskAgain = true}: AskingProps) {
                                 })
                             }}
                         />
+                        {prompt.canStopAsking && (
+                            <Button
+                                label='Stop asking, continue'
+                                variant='ghost'
+                                tooltip='Settles the rest without you and gets on with the work'
+                                onClick={() => {
+                                    send({stopAsking: true})
+                                }}
+                            />
+                        )}
                         {canAskAgain && (
                             <Button
                                 label={prompt.isDelegated ? 'Send changes' : 'Ask me again'}

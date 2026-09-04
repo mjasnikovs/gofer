@@ -97,6 +97,7 @@ export type UserQuestionPrompt = Readonly<{
     revision: number
     ownerCallId?: string
     isDelegated: boolean
+    canStopAsking: boolean
 }>
 
 export type UserQuestionResponse = Readonly<{
@@ -107,6 +108,7 @@ export type UserQuestionResponse = Readonly<{
     skipped?: boolean
     approved?: boolean
     again?: boolean
+    stopAsking?: boolean
 }>
 
 export type UserQuestionSettled = Readonly<{
@@ -136,6 +138,7 @@ export type BriefState = Readonly<{
     running: string | undefined
     step: string | undefined
     research: readonly ResearchWorker[]
+    questions: number
     cost: Readonly<{input: number; output: number}> | undefined
     ended: Readonly<{kind: 'stopped' | 'failed'; reason?: string}> | undefined
 }>
@@ -146,6 +149,7 @@ export const EMPTY_BRIEF_STATE: BriefState = {
     running: undefined,
     step: undefined,
     research: [],
+    questions: 0,
     cost: undefined,
     ended: undefined
 }
@@ -161,6 +165,8 @@ export function applyBriefEvent(state: BriefState, event: BriefEvent): BriefStat
             return {...EMPTY_BRIEF_STATE, isRunning: true}
         case 'brief-cost':
             return {...state, cost: {input: event.input, output: event.output}}
+        case 'brief-question-settled':
+            return {...state, questions: state.questions + 1}
         case 'brief-phase-start':
             return {...state, phase: event.phase, running: undefined, step: undefined}
         case 'brief-worker':

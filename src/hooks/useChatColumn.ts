@@ -1,5 +1,5 @@
 import {createContext, use} from 'react'
-import type {RefObject} from 'react'
+import type {Ref} from 'react'
 import type {BriefState} from '../models/brief'
 import type {Message} from '../models/chat'
 
@@ -7,7 +7,7 @@ export type ChatColumn = Readonly<{
     attachmentPreviews: Readonly<Record<string, string>>
     isStreaming: boolean
     messages: readonly Message[]
-    scrollRef: RefObject<HTMLElement | null>
+    scrollRef: Ref<HTMLElement>
     isScrolledUp: boolean
     scrollToBottom: () => void
     retry: (assistantId: number) => void

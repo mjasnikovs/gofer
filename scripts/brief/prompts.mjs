@@ -145,8 +145,6 @@ export function scopedGoal(refined) {
     return bullet === -1 ? goal : goal.slice(0, bullet).trim()
 }
 
-export const MAX_QUESTIONS = 6
-
 export function grillPrompt(refined, research, {asked} = {}) {
     return (
         'You are finding the questions that must be settled before this task can be specified. Ask '

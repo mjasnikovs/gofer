@@ -1142,3 +1142,104 @@ describe('Workspace errors', () => {
         expect(await screen.findByRole('alert')).toHaveTextContent('the AI worker died')
     })
 })
+
+describe('Workspace chat scroll', () => {
+    const VIEWPORT = 300
+    const CONTENT = 1000
+    const BOTTOM = CONTENT - VIEWPORT
+
+    function measure(name: 'scrollHeight' | 'clientHeight' | 'offsetHeight', value: number) {
+        const own = Object.getOwnPropertyDescriptor(HTMLElement.prototype, name)
+        Object.defineProperty(HTMLElement.prototype, name, {configurable: true, get: () => value})
+        return () => {
+            if (own) Object.defineProperty(HTMLElement.prototype, name, own)
+        }
+    }
+
+    let restore: (() => void)[] = []
+
+    beforeEach(() => {
+        restore = [
+            measure('scrollHeight', CONTENT),
+            measure('clientHeight', VIEWPORT),
+            measure('offsetHeight', VIEWPORT)
+        ]
+        server = installBackend(tauri, {
+            answers: {send_ai_message: runTurn},
+            chat: {
+                taskId: 'task-1',
+                messages: [
+                    {id: 1, sender: 'user', text: 'Make the spiders flock', timestamp: 10},
+                    {id: 2, sender: 'assistant', text: 'Done', timestamp: 20}
+                ],
+                agentMessages: []
+            } as unknown as StoredChat
+        })
+    })
+
+    afterEach(() => {
+        for (const undo of restore) undo()
+    })
+
+    // The spring positions on an animation frame, so a settled scroll is one the
+    // browser has actually had a frame to place.
+    async function frame() {
+        await act(async () => {
+            await new Promise(resolve => {
+                requestAnimationFrame(() => {
+                    resolve(undefined)
+                })
+            })
+        })
+    }
+
+    function centreTab(value: string) {
+        const found = document.querySelector<HTMLElement>(`[data-tab-value="${value}"]`)
+        if (!found) throw new Error(`The workspace has no ${value} tab`)
+        return found
+    }
+
+    async function reopenChat(user: ReturnType<typeof userEvent.setup>) {
+        await user.click(centreTab('scripts'))
+        await flush()
+        await user.click(centreTab('chat'))
+        await flush()
+        await frame()
+    }
+
+    async function openChat() {
+        render(<Workspace taskId='task-1' />)
+        await flush()
+        await frame()
+        return screen.getByTestId('chat-scroll')
+    }
+
+    it('opens a stored conversation at its newest message', async () => {
+        const viewport = await openChat()
+
+        expect(viewport.scrollTop).toBe(BOTTOM)
+    })
+
+    it('returns to the newest message when the chat tab is reopened', async () => {
+        const user = userEvent.setup()
+        await openChat()
+
+        await reopenChat(user)
+
+        expect(screen.getByTestId('chat-scroll').scrollTop).toBe(BOTTOM)
+    })
+
+    it('reopens at the newest message even after the reader scrolled up', async () => {
+        const user = userEvent.setup()
+        const viewport = await openChat()
+
+        viewport.scrollTop = 0
+        await act(async () => {
+            viewport.dispatchEvent(new Event('scroll'))
+            await Promise.resolve()
+        })
+        await reopenChat(user)
+
+        expect(screen.getByTestId('chat-scroll').scrollTop).toBe(BOTTOM)
+    })
+})

@@ -82,8 +82,14 @@ export async function installDesktop(
                     revision: design?.revision ?? 1,
                     ownerCallId: 'ask-1',
                     isDelegated: design?.delegated ?? false,
+                    canStopAsking: sketches === 0,
                     options:
-                        sketches === 0 ? ['Its own scene', 'Inside the HUD'] : ([] as string[]),
+                        sketches === 0 ?
+                            [
+                                'Its own scene under ui/, instanced by every level that needs it',
+                                'Inside the HUD'
+                            ]
+                        :   ([] as string[]),
                     sketches: [
                         {label: 'Centered Overlay', html: sketch('#4f8cff', 'Centered Overlay')},
                         {label: 'Side Panel', html: sketch('#ff4f7d', 'Side Panel')}

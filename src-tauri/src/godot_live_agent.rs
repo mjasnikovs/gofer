@@ -76,12 +76,12 @@ fn live_worktree(directory: &TempDir) -> PathBuf {
 /// works in is a temporary directory this file made. `GOFER_LIVE_APPROVE=refuse` answers no
 /// instead, for a run about what the agent does when it is told no.
 ///
-/// **A question is the other half, and it used to cost half an hour.** `ask_user` waits on
-/// `QUESTION_TIMEOUT`, which is thirty minutes, and this loop answered only approvals — so a turn
-/// that asked anything stopped dead until that ran out and then carried on with nothing. Measured:
+/// **A question is the other half, and it is the half that ends a run.** `ask_user` waits on an
+/// answer and on nothing else, and this loop answered only approvals — so a turn that asked anything
+/// stopped there for good. Measured before the wait was unbounded, when it still cost half an hour:
 /// `sol-12-refactor` asked "should you provide the intended player project, or should I add a new
 /// player implementation here?" at its sixth call, against a fixture that has no player script, and
-/// the run had thirty minutes of nothing left in it.
+/// the run had nothing left in it afterwards.
 ///
 /// A skip rather than an answer, because a skip is what this run actually means: the question was
 /// read and the decision is left to the implementer. Inventing prose would put words in a user's
@@ -104,6 +104,7 @@ fn answer_the_prompts_nobody_is_watching(finished: Arc<std::sync::atomic::Atomic
                     skipped: true,
                     approved: false,
                     again: false,
+                    stop_asking: false,
                 };
                 let _ = crate::ask::respond_question(skipped);
                 println!("live question {asked} -> skipped");
@@ -451,16 +452,16 @@ fn keep_the_worktree(worktree: &std::path::Path, keep: &std::path::Path) {
 /// retry was pointed at the same `GOFER_LIVE_KEEP` directory, and `copy_tree` overwrites without
 /// deleting. The kept tree then held the dead run's script beside the live run's `project.godot`
 /// and `.git`, which reads exactly like an agent whose verified edit never reached disk.
-/// A question nobody is watching is skipped, rather than waited out for half an hour.
+/// A question nobody is watching is skipped, rather than waited out.
 ///
 /// The failure this pins cost a live run its whole budget. `sol-12-refactor` asked "should you
 /// provide the intended player project, or should I add a new player implementation here?" at its
 /// sixth call, against a fixture that has no player script — and this loop answered approvals only,
-/// so the turn stopped there with `QUESTION_TIMEOUT`'s thirty minutes ahead of it.
+/// so the turn stopped there.
 ///
 /// The wait is bounded here rather than joined, because the regression is a question that is never
-/// answered: joined, this test would reproduce the defect by hanging for half an hour instead of
-/// failing.
+/// answered, and a question waits on nothing but an answer: joined, this test would reproduce the
+/// defect by hanging until the suite is killed instead of failing.
 #[test]
 fn a_question_nobody_is_watching_is_skipped_rather_than_waited_out() {
     let _gate = crate::approvals::serialize_gate_tests();
@@ -474,13 +475,12 @@ fn a_question_nobody_is_watching_is_skipped_rather_than_waited_out() {
     std::thread::spawn(move || {
         let answered = crate::ask::ask_question(
             &handle,
-            "question-nobody-is-watching",
-            "Which of these did you mean?",
-            Vec::new(),
-            Vec::new(),
-            "there is nobody to ask",
-            None,
-            false,
+            crate::ask::Asked {
+                question_id: "question-nobody-is-watching".to_owned(),
+                question: "Which of these did you mean?".to_owned(),
+                why: "there is nobody to ask".to_owned(),
+                ..crate::ask::Asked::default()
+            },
         );
         let _ = sender.send(answered);
     });

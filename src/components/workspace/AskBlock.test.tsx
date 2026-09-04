@@ -50,6 +50,7 @@ const question = (over: Partial<UserQuestionPrompt> = {}): UserQuestionPrompt =>
     revision: 1,
     ownerCallId: CALL,
     isDelegated: false,
+    canStopAsking: false,
     ...over
 })
 
@@ -96,6 +97,34 @@ describe('one question, in the feed', () => {
 
         await userEvent.click(recommended)
         expect(answer).toHaveBeenCalledWith(expect.objectContaining({answer: 'its own scene'}))
+    })
+
+    it('offers to stop the questioning only when the asker can stop', () => {
+        show(call(), [question()])
+        expect(
+            screen.queryByRole('button', {name: 'Stop asking, continue'})
+        ).not.toBeInTheDocument()
+    })
+
+    it('stops the questioning without needing anything typed', async () => {
+        const {answer} = show(call(), [question({canStopAsking: true})])
+
+        await userEvent.click(screen.getByRole('button', {name: 'Stop asking, continue'}))
+
+        expect(answer).toHaveBeenCalledWith(
+            expect.objectContaining({questionId: 'q-1', answer: '', stopAsking: true})
+        )
+    })
+
+    it('carries what was typed when the questioning is stopped', async () => {
+        const {answer} = show(call(), [question({canStopAsking: true})])
+        await userEvent.type(answerBox(), 'inside the HUD is fine')
+
+        await userEvent.click(screen.getByRole('button', {name: 'Stop asking, continue'}))
+
+        expect(answer).toHaveBeenCalledWith(
+            expect.objectContaining({answer: 'inside the HUD is fine', stopAsking: true})
+        )
     })
 
     it('marks nothing when there is only one option', () => {

@@ -400,7 +400,7 @@ fn refuse_during_turn() -> Result<ai_turn::AiProviderOperation, CommandError> {
     ai_turn::begin_provider_operation().map_err(|_| {
         CommandError::new(
             "ai_request_in_progress",
-            "Wait for the current answer to finish before opening another task",
+            "Something is still running here. Answer or cancel it — a plan waiting on a question waits as long as you do — then open another task",
         )
         .retryable()
     })
