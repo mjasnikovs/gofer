@@ -5,6 +5,7 @@ import {
     abortableWait,
     createToolEnv,
     decorateTools,
+    endedStream,
     isWorthRetrying,
     modelReadsImages,
     realTimers,
@@ -13,6 +14,7 @@ import {
 } from './agent-runtime.mjs'
 import {createWebSearchTool} from './ai-search.mjs'
 import {ASK_USER_TOOL_NAME, createAskUserTool} from './ai-ask.mjs'
+import {createProgressGuard} from './progress-guard.mjs'
 import {toolStepLine} from './tool-target.mjs'
 import {confineTool} from './workspace-confinement.mjs'
 
@@ -27,7 +29,7 @@ export const DESIGN_TOOL_NAMES = ['read', 'bash', 'ask_user']
 export const SUBAGENT_SETTINGS_DEFAULTS = {
     commandTimeoutMinutes: 5,
     streamInactivityMinutes: 10,
-    maxTurns: 24,
+    maxTurns: 0,
     maxAnswerChars: 12_000,
     retryAttempts: 2,
     retryBaseDelaySeconds: 1
@@ -93,11 +95,18 @@ const SUBAGENT_DESCRIPTION =
     + 'your conversation, so name the files, symbols and terms it should start from. Several '
     + 'independent questions can be dispatched in one turn.'
 
-export function subagentFailure(reason) {
+const FAILURE_CODAS = {
+    loop:
+        ' Do not ask this again the same way: it looped. Name the file and lines to start from, '
+        + 'or read it yourself.',
+    'model-unreachable': ' That is the connection, not the question.'
+}
+
+export function subagentFailure(reason, cause) {
     return (
         `The sub-agent did not answer: ${reason}. Nothing it read reached this conversation, so `
         + `treat the question as unanswered — ask again with a narrower, more specific question, or `
-        + `do the reading yourself with read and bash.`
+        + `do the reading yourself with read and bash.${FAILURE_CODAS[cause] ?? ''}`
     )
 }
 
@@ -237,14 +246,16 @@ export function createChildTools(
             confineTool(CONFINED_CHILD_TOOLS[name](), workspacePath)
         :   REACHING_CHILD_TOOLS[name](deps)
     )
+    const guard = createProgressGuard()
     const tools = decorateTools({
         env,
         tools: built,
         model: deps.model,
+        guard: guard.decorate,
         extras: [tool => underCommandClock(tool, {timeoutMs: bounds.commandTimeoutMs, timers})]
     })
     assertChildTools(tools, toolNames)
-    return {env, tools}
+    return {env, tools, guard}
 }
 
 export {realTimers}
@@ -263,12 +274,18 @@ export function createSilenceClock({timeoutMs, timers, onSilent}) {
                 if (fired || paused()) return
                 if (timers.now() - last < timeoutMs) return
                 fired = true
-                this.stop()
                 onSilent(timeoutMs)
             }, pollIntervalMs(timeoutMs))
         },
         note() {
             last = timers.now()
+        },
+        rearm() {
+            fired = false
+            last = timers.now()
+        },
+        running() {
+            return handle !== undefined
         },
         suspend(id) {
             running.add(id)
@@ -284,11 +301,12 @@ export function createSilenceClock({timeoutMs, timers, onSilent}) {
     }
 }
 
-export function streamStallMessage(timeoutMs) {
+export function modelUnreachableMessage(timeoutMs, baseUrl) {
     const seconds = Math.max(1, Math.round(timeoutMs / 1000))
+    const endpoint = baseUrl ? `its endpoint at ${baseUrl}` : 'its endpoint'
     return (
-        `Connection lost: the model sent nothing for ${String(seconds)} seconds and reported no `
-        + `error. The request was aborted by Gofer, not by the provider.`
+        `Connection lost: the model sent nothing for ${String(seconds)} seconds and ${endpoint} `
+        + `did not answer. The request was aborted by Gofer, not by the provider.`
     )
 }
 
@@ -347,9 +365,10 @@ async function attemptSubagent({
     bounds,
     timers,
     stopWhen,
+    probe,
     deps
 }) {
-    const {env, tools} = createChildTools(workspacePath, {
+    const {env, tools, guard} = createChildTools(workspacePath, {
         bounds,
         timers,
         toolNames,
@@ -359,7 +378,7 @@ async function attemptSubagent({
 
     let requests = 0
     let overran = false
-    let stalled = false
+    let unreachable = false
     let closedAt
     let closed = false
     const streamFn = (nextModel, context, options) => {
@@ -389,14 +408,27 @@ async function attemptSubagent({
             messages: []
         },
         streamFn,
+        shouldStopAfterTurn: () => guard.verdict() !== undefined,
         toolExecution: 'parallel'
     })
 
+    // Silence alone is never a verdict: a local model working through a long prompt says nothing
+    // for minutes. Only an endpoint that no longer answers turns silence into a lost connection.
+    let probing = false
     const silence = createSilenceClock({
-        timeoutMs: bounds.streamInactivityMs,
+        timeoutMs: probe ? bounds.streamInactivityMs : 0,
         timers,
-        onSilent: () => {
-            stalled = true
+        onSilent: async () => {
+            if (probing) return
+            probing = true
+            const alive = await probe().catch(() => true)
+            probing = false
+            if (!silence.running()) return
+            if (alive) {
+                silence.rearm()
+                return
+            }
+            unreachable = true
             agent.abort()
         }
     })
@@ -437,10 +469,13 @@ async function attemptSubagent({
         silence.start()
         await agent.prompt(prompt, pictures)
         if (signal?.aborted) throw new SubagentStopped('the turn was stopped')
-        if (stalled)
-            throw new SubagentFailed(streamStallMessage(bounds.streamInactivityMs), {
-                cause: 'stream-stall'
-            })
+        if (unreachable)
+            throw new SubagentFailed(
+                modelUnreachableMessage(bounds.streamInactivityMs, model.baseUrl),
+                {retryable: true, cause: 'model-unreachable'}
+            )
+        const looped = guard.verdict()
+        if (looped) throw new SubagentFailed(looped.reason, {retryable: false, cause: 'loop'})
         if (overran)
             throw new SubagentFailed(
                 `it used all ${String(bounds.maxTurns)} of its steps without reaching an answer`,
@@ -486,24 +521,6 @@ export class SubagentFailed extends Error {
     }
 }
 
-function endedStream(model, errorMessage) {
-    const stream = createAssistantMessageEventStream()
-    const message = {
-        role: 'assistant',
-        content: [],
-        api: model.api,
-        provider: model.provider,
-        model: model.id,
-        usage: zeroUsage(),
-        stopReason: 'error',
-        errorMessage,
-        timestamp: Date.now()
-    }
-    stream.push({type: 'error', reason: 'error', error: message})
-    stream.end(message)
-    return stream
-}
-
 function cutAnswer(text, maxChars) {
     if (!(maxChars > 0) || text.length <= maxChars) return text
     return (
@@ -528,6 +545,7 @@ export async function runSubagentOutcome({
     settings,
     timers = realTimers,
     stopWhen,
+    probe,
     deps
 }) {
     if (typeof progress !== 'function')
@@ -557,6 +575,7 @@ export async function runSubagentOutcome({
                     bounds,
                     timers,
                     stopWhen,
+                    probe,
                     deps
                 }))
             }
@@ -584,7 +603,7 @@ export async function runSubagentOutcome({
 export async function runSubagent(options) {
     const outcome = await runSubagentOutcome(options)
     if (outcome.kind === 'ok') return outcome
-    throw new Error(subagentFailure(outcome.reason))
+    throw new Error(subagentFailure(outcome.reason, outcome.cause))
 }
 
 export function usageFooter({turns, usage}, model) {
@@ -627,7 +646,8 @@ export function createSubagentTool({
     thinkingLevel,
     streamOptions,
     settings,
-    timers
+    timers,
+    probe
 }) {
     return {
         name: SUBAGENT_TOOL_NAME,
@@ -659,6 +679,7 @@ export function createSubagentTool({
                 streamOptions,
                 settings,
                 timers,
+                probe,
                 signal,
                 progress: toolProgress(onUpdate)
             })

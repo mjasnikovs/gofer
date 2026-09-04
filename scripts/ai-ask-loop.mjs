@@ -82,6 +82,7 @@ export function createAskDelegate({
     streamOptions,
     settings,
     timers,
+    probe,
     host,
     images = []
 }) {
@@ -100,6 +101,7 @@ export function createAskDelegate({
             streamOptions,
             settings,
             timers,
+            probe,
             signal,
             progress: toolProgress(onUpdate),
             stopWhen: () => agreed.approved === true,

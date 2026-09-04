@@ -171,6 +171,7 @@ export async function fetchFocused({
     settings,
     signal,
     timers,
+    probe,
     progress,
     fetchAndClean = defaultFetchAndClean
 }) {
@@ -198,6 +199,7 @@ export async function fetchFocused({
         settings,
         signal,
         timers,
+        probe,
         progress
     })
 
@@ -297,6 +299,7 @@ export function createWebFetchTool({
     streamOptions,
     settings,
     timers,
+    probe,
     fetchAndClean
 }) {
     return {
@@ -349,6 +352,7 @@ export function createWebFetchTool({
                     settings,
                     signal,
                     timers,
+                    probe,
                     progress: toolProgress(onUpdate),
                     fetchAndClean: probing ? cannedPage() : fetchAndClean
                 })

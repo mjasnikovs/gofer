@@ -1,5 +1,5 @@
 import {NodeExecutionEnv} from '@earendil-works/pi-agent-core/node'
-import {isRetryableAssistantError} from '@earendil-works/pi-ai'
+import {createAssistantMessageEventStream, isRetryableAssistantError} from '@earendil-works/pi-ai'
 import {isContextOverflow} from '@earendil-works/pi-ai/compat'
 import {withoutPictures, withoutRepeatingARefusal} from './tool-result.mjs'
 
@@ -37,14 +37,37 @@ function bindTool(tool, context) {
     }
 }
 
-export function decorateTools({env, tools, model, extras = []}) {
+// The guard sits inside the picture stripping so a screenshot is judged by its bytes, not by the
+// one fixed sentence a text-only model is handed in their place.
+export function decorateTools({env, tools, model, guard, extras = []}) {
     const context = {env}
     const sees = modelReadsImages(model)
     return tools
         .map(tool => bindTool(tool, context))
+        .map(tool => (guard ? guard(tool) : tool))
         .map(tool => (sees ? tool : withoutPictures(tool)))
         .map(withoutRepeatingARefusal)
         .map(tool => extras.reduce((wrapped, decorate) => decorate(wrapped), tool))
+}
+
+// `shouldStopAfterTurn` ends a loop after a turn's tool results. This ends it at the next request
+// instead, which is the only place a caller can first grant one more answer and then close.
+export function endedStream(model, errorMessage) {
+    const stream = createAssistantMessageEventStream()
+    const message = {
+        role: 'assistant',
+        content: [],
+        api: model.api,
+        provider: model.provider,
+        model: model.id,
+        usage: zeroUsage(),
+        stopReason: 'error',
+        errorMessage,
+        timestamp: Date.now()
+    }
+    stream.push({type: 'error', reason: 'error', error: message})
+    stream.end(message)
+    return stream
 }
 
 export const EMPTY_ANSWER = 'The model ended its turn empty: no answer, no tool call.'

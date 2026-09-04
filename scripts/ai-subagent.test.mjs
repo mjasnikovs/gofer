@@ -125,12 +125,22 @@ function streamingModels(beginnings) {
 }
 
 function hangingModels() {
-    let started
-    const first = new Promise(resolve => {
-        started = resolve
-    })
+    const starts = []
+    const arrivals = []
+    const arrival = index =>
+        new Promise(resolve => {
+            arrivals[index] = resolve
+        })
+    const first = arrival(0)
+    const second = arrival(1)
+    const started = () => {
+        const index = starts.length
+        starts.push(index)
+        arrivals[index]?.()
+    }
     return {
         first,
+        second,
         streamSimple: (requested, _context, options) => {
             const stream = createAssistantMessageEventStream()
             const message = {
@@ -404,6 +414,47 @@ test('each ending names its cause as a tag', async context => {
     assert.equal(overran.kind, 'failed')
     assert.equal(overran.cause, 'step-ceiling')
     assert.match(overran.reason, /used all 3 of its steps/u)
+
+    const looping = await runSubagentOutcome({
+        progress: noProgress,
+        prompt: 'Where is the speed set?',
+        workspacePath: workspace.path,
+        models: scriptedModels([{calls: [{name: 'read', args: {path: 'a.gd'}}]}]),
+        model,
+        settings: {...SUBAGENT_SETTINGS_DEFAULTS, retryAttempts: 0}
+    })
+    assert.equal(looping.kind, 'failed')
+    assert.equal(looping.cause, 'loop')
+    assert.match(looping.reason, /^it looped: read \{"path":"a\.gd"\} was made 10 times in a row/u)
+})
+
+test('a child that repeats one call is refused on the eighth and ended on the tenth', async context => {
+    const workspace = await temporaryWorkspace({'a.gd': 'extends Node\n'})
+    context.after(workspace.remove)
+    const models = scriptedModels([{calls: [{name: 'read', args: {path: 'a.gd'}}]}])
+
+    await assert.rejects(
+        runSubagent({
+            progress: noProgress,
+            prompt: 'Where is the speed set?',
+            workspacePath: workspace.path,
+            models,
+            model,
+            settings: {...SUBAGENT_SETTINGS_DEFAULTS, retryAttempts: 0}
+        }),
+        error => {
+            assert.match(error.message, /^The sub-agent did not answer: it looped: read/u)
+            assert.match(error.message, /was refused 3 times this turn, and was asked for again/u)
+            assert.match(error.message, /Do not ask this again the same way: it looped\./u)
+            return true
+        }
+    )
+    // The tenth call ends the child; the model is never asked an eleventh time.
+    assert.equal(models.turns, 10)
+    const heard = index => models.contexts[index].messages.at(-1)
+    assert.match(heard(7).content[0].text, /^extends Node/u)
+    assert.match(heard(8).content[0].text, /^Refused: this is the 8th read call in a row/u)
+    assert.match(heard(9).content[0].text, /^Refused: this is the 9th read call/u)
 })
 
 test('a delegation is asked about the pictures it was given', async context => {
@@ -708,6 +759,48 @@ test('the sub-agent shell is confined to the worktree like the parent’s', asyn
     )
 })
 
+// A model that says one word every `gapMs`: alive by every measure, and slow.
+function tricklingModels(timers, {gapMs, deltas}) {
+    let started
+    const first = new Promise(resolve => {
+        started = resolve
+    })
+    return {
+        first,
+        streamSimple: requested => {
+            const message = {
+                role: 'assistant',
+                content: [{type: 'text', text: 'Done.'}],
+                api: requested.api,
+                provider: requested.provider,
+                model: requested.id,
+                usage: usage(1),
+                stopReason: 'stop',
+                timestamp: Date.now()
+            }
+            const stream = createAssistantMessageEventStream()
+            const push = index => {
+                if (index < deltas) {
+                    if (index === 0) stream.push({type: 'start', partial: message})
+                    stream.push({
+                        type: index === 0 ? 'text_start' : 'text_delta',
+                        contentIndex: 0,
+                        delta: 'D',
+                        partial: message
+                    })
+                    timers.schedule(() => push(index + 1), gapMs)
+                    return
+                }
+                stream.push({type: 'done', reason: 'stop', message})
+                stream.end(message)
+            }
+            timers.schedule(() => push(0), gapMs)
+            started()
+            return stream
+        }
+    }
+}
+
 function fakeTimers() {
     let now = 0
     let nextId = 0
@@ -801,28 +894,126 @@ test('a ceiling of zero arms no clock at all', async context => {
     assert.match((await running).content[0].text, /extends Node/u)
 })
 
-test('a stream that goes silent is given up on, and worded so a retry sees it', async context => {
+test('a silent stream with a live endpoint is left alone', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
     const timers = fakeTimers()
     const models = hangingModels()
+    const stop = new AbortController()
+    let probes = 0
 
-    const running = runSubagent({
+    const running = runSubagentOutcome({
         progress: noProgress,
         prompt: 'Where is the speed set?',
         workspacePath: workspace.path,
         models,
         model,
         timers,
+        signal: stop.signal,
+        probe: async () => {
+            probes += 1
+            return true
+        },
         settings: {...SUBAGENT_SETTINGS_DEFAULTS, streamInactivityMinutes: 2, retryAttempts: 0}
     })
-    const stalled = assert.rejects(
-        running,
-        /the model sent nothing for 120 seconds and reported no error/u
-    )
     await models.first
     await timers.advance(120_000)
-    await stalled
+    assert.equal(probes, 1)
+    await timers.advance(120_000)
+    assert.equal(probes, 2)
+    await timers.advance(60_000)
+    assert.equal(probes, 2)
+
+    stop.abort()
+    assert.equal((await running).kind, 'stopped')
+})
+
+test('a silent stream with a dead endpoint is given up on, and asked again', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const timers = fakeTimers()
+    const models = hangingModels()
+
+    const running = runSubagentOutcome({
+        progress: noProgress,
+        prompt: 'Where is the speed set?',
+        workspacePath: workspace.path,
+        models,
+        model: {...model, baseUrl: 'http://127.0.0.1:8080/v1'},
+        timers,
+        probe: async () => false,
+        settings: {
+            ...SUBAGENT_SETTINGS_DEFAULTS,
+            streamInactivityMinutes: 2,
+            retryAttempts: 1,
+            retryBaseDelaySeconds: 1
+        }
+    })
+    await models.first
+    await timers.advance(120_000)
+    await timers.advance(1_000)
+    await models.second
+    await timers.advance(120_000)
+
+    const outcome = await running
+    assert.equal(outcome.kind, 'failed')
+    assert.equal(outcome.cause, 'model-unreachable')
+    assert.equal(outcome.attempts, 2)
+    assert.match(
+        outcome.reason,
+        /sent nothing for 120 seconds and its endpoint at http:\/\/127\.0\.0\.1:8080\/v1 did not answer/u
+    )
+})
+
+test('a silent stream with nobody to probe is never given up on', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const timers = fakeTimers()
+    const models = hangingModels()
+    const stop = new AbortController()
+
+    const running = runSubagentOutcome({
+        progress: noProgress,
+        prompt: 'Where is the speed set?',
+        workspacePath: workspace.path,
+        models,
+        model,
+        timers,
+        signal: stop.signal,
+        settings: {...SUBAGENT_SETTINGS_DEFAULTS, streamInactivityMinutes: 2, retryAttempts: 0}
+    })
+    await models.first
+    assert.equal(timers.armed, 0)
+    await timers.advance(600_000)
+    stop.abort()
+    assert.equal((await running).kind, 'stopped')
+})
+
+test('a slow but steady stream never fires', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const timers = fakeTimers()
+    let probes = 0
+
+    const models = tricklingModels(timers, {gapMs: 90_000, deltas: 4})
+    const result = runSubagent({
+        progress: noProgress,
+        prompt: 'Where is the speed set?',
+        workspacePath: workspace.path,
+        models,
+        model,
+        timers,
+        probe: async () => {
+            probes += 1
+            return true
+        },
+        settings: {...SUBAGENT_SETTINGS_DEFAULTS, streamInactivityMinutes: 2, retryAttempts: 0}
+    })
+    await models.first
+    for (let tick = 0; tick < 5; tick += 1) await timers.advance(90_000)
+
+    assert.equal((await result).text, 'Done.')
+    assert.equal(probes, 0)
 })
 
 test('the silence clock is paused by tools and stays paused until the last one ends', async () => {

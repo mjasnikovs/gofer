@@ -28,7 +28,7 @@ test('a stop is answered before anything else and is never a failure', () => {
 })
 
 test('being cut off mid-explore degrades and keeps what it wrote', () => {
-    for (const cause of ['step-ceiling', 'stream-stall', 'command-timeout']) {
+    for (const cause of ['step-ceiling', 'loop', 'command-timeout']) {
         const verdict = classifyWorkerOutcome(failed(cause, 'it ran out of steps'), {
             partial: '  - it found this much  '
         })

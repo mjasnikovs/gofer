@@ -370,8 +370,8 @@ pub(crate) struct SubagentSettings {
     /// Ceiling on one tool call, in minutes. 0 turns the command watchdog off.
     #[serde(default = "default_subagent_command_timeout_minutes")]
     pub(crate) command_timeout_minutes: u32,
-    /// Ceiling on silence from the model stream, in minutes, ignoring time spent inside tools.
-    /// 0 turns it off.
+    /// Silence from the model stream, in minutes, ignoring time spent inside tools, before the
+    /// endpoint is probed. Only an endpoint that does not answer ends the run. 0 turns it off.
     #[serde(default = "default_subagent_stream_inactivity_minutes")]
     pub(crate) stream_inactivity_minutes: u32,
     /// Ceiling on model requests one delegation may make. 0 turns it off.
@@ -1917,7 +1917,7 @@ type SubagentBound = (&'static str, fn(&SubagentSettings) -> u32, u32, u32);
 /// was validated, and was obeyed. The top of each range is the largest value that is still a
 /// ceiling rather than an absence of one, and every range starts where "off" is a real answer —
 /// except the retry wait, which is only read when a retry happens and has no meaning at zero.
-// GENERATED-BEGIN subagent-bounds sha256:7b34b4c670eb5c90
+// GENERATED-BEGIN subagent-bounds sha256:7d342edd130bbc31
 const SUBAGENT_BOUNDS: [SubagentBound; 6] = [
     (
         "commandTimeoutMinutes",
@@ -1952,22 +1952,25 @@ fn default_subagent_command_timeout_minutes() -> u32 {
     5
 }
 
-/// Longest the model stream may say nothing while no tool is running, in minutes.
+/// Silence from the model stream, time inside tools excluded, before Gofer asks the endpoint
+/// whether it is still there, in minutes.
 ///
-/// Generous on purpose. A local model processing a long prompt emits nothing for minutes, and that
-/// is work, not a hang. This exists to turn hours of dead air into minutes, not to police slowness.
+/// Silence is never a verdict on its own. A local model processing a long prompt emits nothing for
+/// minutes, and that is work, not a hang. After this long Gofer probes the endpoint: one that
+/// answers is left to work and the clock starts over; one that does not is a lost connection. The
+/// number only decides how soon a dead server is noticed.
 fn default_subagent_stream_inactivity_minutes() -> u32 {
     10
 }
 
 /// How many model requests one delegation may make.
 ///
-/// The clocks bound a child that has stopped. This bounds one that has not: a child happily reading
-/// its way through a repository is making progress by every other measure. Two to four requests is
-/// what the work is for — read and answer, or grep, read the hits, answer — so twenty-four leaves
-/// room to guess wrong several times and still land.
+/// Off. A child that repeats itself is caught by the progress guard, which counts identical calls
+/// and results that teach nothing and needs no number sized to a repository. This is a cost cap for
+/// a user who wants one; any shipped value is a guess about how large a codebase is, and
+/// twenty-four was too few for a large one.
 fn default_subagent_max_turns() -> u32 {
-    24
+    0
 }
 
 /// Longest answer the sub-agent may hand back.
@@ -3137,7 +3140,7 @@ mod tests {
 
         assert_eq!(loaded.ai.subagent, SubagentSettings::default());
         assert_eq!(loaded.ai.subagent.command_timeout_minutes, 5);
-        assert_eq!(loaded.ai.subagent.max_turns, 24);
+        assert_eq!(loaded.ai.subagent.max_turns, 0);
 
         let mut partial = serde_json::to_value(GoferSettings::default()).expect("settings as json");
         partial["ai"]["subagent"]

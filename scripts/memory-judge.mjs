@@ -104,7 +104,7 @@ export async function runMemoryJudge({
     if (typeof memory?.content !== 'string' || memory.content.trim() === '') {
         throw new Error('The judge was given no memory to check')
     }
-    const {models, model, subagent, streamOptions} = world.createModelContext({
+    const {models, model, subagent, streamOptions, probe} = world.createModelContext({
         settings,
         secrets,
         oauthCredential,
@@ -136,6 +136,7 @@ export async function runMemoryJudge({
             thinkingLevel: subagent.thinkingLevel,
             streamOptions,
             settings: settings?.subagent,
+            probe,
             deps: childDeps,
             progress: eventProgress(emit, judgeStep, {memoryId: memory.id}),
             signal

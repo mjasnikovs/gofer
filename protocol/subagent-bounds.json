@@ -20,18 +20,18 @@
             "min": 0,
             "max": 30,
             "step": 1,
-            "summary": "Longest the model stream may say nothing while no tool is running, in minutes.",
-            "defaultNote": "Generous on purpose. A local model processing a long prompt emits nothing for minutes, and that is work, not a hang. This exists to turn hours of dead air into minutes, not to police slowness."
+            "summary": "Silence from the model stream, time inside tools excluded, before Gofer asks the endpoint whether it is still there, in minutes.",
+            "defaultNote": "Silence is never a verdict on its own. A local model processing a long prompt emits nothing for minutes, and that is work, not a hang. After this long Gofer probes the endpoint: one that answers is left to work and the clock starts over; one that does not is a lost connection. The number only decides how soon a dead server is noticed."
         },
         {
             "name": "maxTurns",
             "field": "max_turns",
-            "default": 24,
+            "default": 0,
             "min": 0,
             "max": 40,
             "step": 1,
             "summary": "How many model requests one delegation may make.",
-            "defaultNote": "The clocks bound a child that has stopped. This bounds one that has not: a child happily reading its way through a repository is making progress by every other measure. Two to four requests is what the work is for — read and answer, or grep, read the hits, answer — so twenty-four leaves room to guess wrong several times and still land."
+            "defaultNote": "Off. A child that repeats itself is caught by the progress guard, which counts identical calls and results that teach nothing and needs no number sized to a repository. This is a cost cap for a user who wants one; any shipped value is a guess about how large a codebase is, and twenty-four was too few for a large one."
         },
         {
             "name": "maxAnswerChars",

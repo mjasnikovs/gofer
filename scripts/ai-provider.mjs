@@ -23,10 +23,10 @@ import {openaiCodexProvider} from '@earendil-works/pi-ai/providers/openai-codex'
 import {createGodotTools} from './godot-tools.mjs'
 import {turnContextText, withTurnContext} from './turn-context.mjs'
 import {
-    EMPTY_ANSWER,
     abortableWait,
     createToolEnv,
     decorateTools,
+    EMPTY_ANSWER,
     isWorthRetrying,
     realTimers,
     textContent,
@@ -54,6 +54,7 @@ import {probeTools} from './ai-reachability.mjs'
 import {createAskUserTool} from './ai-ask.mjs'
 import {createAskDelegate} from './ai-ask-loop.mjs'
 import {createSubagentTool} from './ai-subagent.mjs'
+import {createProgressGuard} from './progress-guard.mjs'
 import {createWebFetchTool} from './ai-fetch.mjs'
 import {createWebSearchTool} from './ai-search.mjs'
 import {createTranscript, withoutTrailingAnswer} from './ai-transcript.mjs'
@@ -376,13 +377,33 @@ export function createAgentTools(workspacePath, domains, host, extra = [], model
         createEditTool(),
         createBashTool()
     ].map(tool => confineTool(tool, workspacePath, frozen))
+    const guard = createProgressGuard()
     return {
         env,
+        guard,
         tools: decorateTools({
             env,
             tools: [...confined, ...(host ? createGodotTools(domains, host) : []), ...extra],
-            model
+            model,
+            guard: guard.decorate
         })
+    }
+}
+
+// Any answer at all, a 401 or a 404 included, is a host that is up. Only a request that never
+// comes back is a host that is gone.
+export async function probeEndpoint({baseUrl, apiKey, timeoutMs, signal}) {
+    const signals = [signal, timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined].filter(
+        Boolean
+    )
+    try {
+        await fetch(new URL('models', `${baseUrl.replace(/\/+$/u, '')}/`), {
+            headers: apiKey ? {authorization: `Bearer ${apiKey}`} : {},
+            ...(signals.length > 0 && {signal: AbortSignal.any(signals)})
+        })
+        return true
+    } catch {
+        return false
     }
 }
 
@@ -500,10 +521,25 @@ export function createModelContext({
         maxRetryDelayMs: 15_000,
         sessionId
     }
-    return {isChatGpt, models, model, subagent, streamOptions}
+    const subagentDriver = settings.subagent?.connection?.connectionType ?? settings.connectionType
+    const probe =
+        subagent.model.baseUrl ?
+            () =>
+                probeEndpoint({
+                    baseUrl: subagent.model.baseUrl,
+                    apiKey: keyFor(subagentDriver),
+                    timeoutMs: streamOptions.timeoutMs,
+                    signal
+                })
+        :   undefined
+    return {isChatGpt, models, model, subagent, streamOptions, probe}
 }
 
 export const LIVE_WORLD = {createModelContext}
+
+export function turnLooped({reason}) {
+    return `The turn was ended because ${reason}.`
+}
 
 export async function runAgent({
     settings,
@@ -529,7 +565,7 @@ export async function runAgent({
     retry: retryOverride,
     world = LIVE_WORLD
 }) {
-    const {isChatGpt, models, model, subagent, streamOptions} = world.createModelContext({
+    const {isChatGpt, models, model, subagent, streamOptions, probe} = world.createModelContext({
         settings,
         secrets,
         oauthCredential,
@@ -537,7 +573,7 @@ export async function runAgent({
         sessionId,
         signal
     })
-    const {env, tools} = createAgentTools(
+    const {env, tools, guard} = createAgentTools(
         workspacePath,
         domains,
         host,
@@ -548,7 +584,8 @@ export async function runAgent({
                 model: subagent.model,
                 thinkingLevel: subagent.thinkingLevel,
                 streamOptions,
-                settings: settings.subagent
+                settings: settings.subagent,
+                probe
             }),
             createWebSearchTool({
                 provider: settings.web?.searchProvider ?? DEFAULT_SEARCH_PROVIDER,
@@ -560,7 +597,8 @@ export async function runAgent({
                 model: subagent.model,
                 thinkingLevel: subagent.thinkingLevel,
                 streamOptions,
-                settings: settings.subagent
+                settings: settings.subagent,
+                probe
             }),
             ...(host ?
                 [
@@ -573,6 +611,7 @@ export async function runAgent({
                             thinkingLevel: subagent.thinkingLevel,
                             streamOptions,
                             settings: settings.subagent,
+                            probe,
                             host,
                             images: askedAbout(messages)
                         })
@@ -589,6 +628,8 @@ export async function runAgent({
         await env.cleanup()
         throw error
     }
+    // The probes went through the guard too; the model's own calls start from nothing seen.
+    guard.reset()
     const promptMessage = messages.at(-1)
     if (!promptMessage || (!promptMessage.text && promptMessage.images.length === 0)) {
         throw new Error('The agent request does not contain a user prompt or image')
@@ -662,6 +703,7 @@ export async function runAgent({
         transformContext: async messages => withTurnContext(messages, turnText, turnAnchor),
         streamFn: (nextModel, context, options) =>
             models.streamSimple(nextModel, context, {...options, ...streamOptions}),
+        shouldStopAfterTurn: () => guard.verdict() !== undefined,
         sessionId,
         toolExecution: 'parallel'
     })
@@ -849,6 +891,8 @@ export async function runAgent({
      * one value with three names now, and the loop is the fold over it.
      */
     const nextStep = async () => {
+        const looped = guard.verdict()
+        if (looped) throw new Error(turnLooped(looped))
         await recoverOverflow(state)
         const verdict = await gateOnVerifyPoints(
             state,

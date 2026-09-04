@@ -697,7 +697,7 @@ export function useAiTab(view: SettingsView): AiTabView {
                                     }}
                                 />
                                 <Slider
-                                    label='Give up on a silent model after'
+                                    label='Check on a silent model after'
                                     value={draft.ai.subagent.streamInactivityMinutes}
                                     {...SUBAGENT_RANGES.streamInactivityMinutes}
                                     valueDisplay='text'
@@ -707,7 +707,7 @@ export function useAiTab(view: SettingsView): AiTabView {
                                         {value: 15, label: '15m'},
                                         {value: 30, label: '30m'}
                                     ]}
-                                    description='Time spent running a tool does not count. A local model reading a long prompt is legitimately silent for minutes, so keep this above the slowest answer you see.'
+                                    description='Time spent running a tool does not count. After this long without output Gofer asks the endpoint whether it is still there, and gives up only if it is not, so a slow local model is left to work.'
                                     onChange={(streamInactivityMinutes: number) => {
                                         updateSubagent({streamInactivityMinutes})
                                     }}
@@ -723,7 +723,7 @@ export function useAiTab(view: SettingsView): AiTabView {
                                         {value: 20, label: '20'},
                                         {value: 40, label: '40'}
                                     ]}
-                                    description='Requests one sub-agent may make to the model. The clocks above bound a sub-agent that has stopped; this bounds one that is busy and getting nowhere.'
+                                    description='A cost cap, off by default. A sub-agent that repeats itself is stopped without it; set this only to bound what one delegation may spend.'
                                     onChange={(maxTurns: number) => {
                                         updateSubagent({maxTurns})
                                     }}

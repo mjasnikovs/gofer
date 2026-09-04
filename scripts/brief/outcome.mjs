@@ -1,6 +1,6 @@
 export const WORKER_KINDS = ['ok', 'empty', 'runaway', 'fatal', 'stopped']
 
-const RUNAWAY_CAUSES = new Set(['step-ceiling', 'stream-stall', 'command-timeout'])
+const RUNAWAY_CAUSES = new Set(['step-ceiling', 'loop', 'command-timeout'])
 
 const BARE_NONE =
     /^[-*\s]*\(?\s*(?:none|n\/?a|nothing|no (?:content|entries|response|items|results))\s*\.?\s*\)?\s*$/iu

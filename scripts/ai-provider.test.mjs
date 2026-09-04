@@ -2500,3 +2500,77 @@ test('a provider is sent the key of its own slot, whichever seat pointed at it',
     }
     assert.equal(checked, 2, 'both seats registered a provider to check')
 })
+
+test('the eighth identical call in a turn is refused and the model told why', async context => {
+    const workspace = await temporaryWorkspace({'package.json': '{"name":"gofer"}'})
+    context.after(workspace.remove)
+    const again = {calls: [{name: 'read', args: {path: 'package.json'}}]}
+    const mock = startScriptedServer([
+        ...Array.from({length: 8}, () => again),
+        {text: 'Read complete'}
+    ])
+    const url = await baseUrl(context, mock.server)
+    const events = []
+
+    const completion = await runAgent({
+        settings: servedBy(url),
+        messages: [{sender: 'user', text: 'Read package.json', timestamp: 1}],
+        workspacePath: workspace.path,
+        emit: event => events.push(event)
+    })
+
+    assert.equal(completion.text, 'Read complete')
+    assert.equal(mock.bodies.length, 9)
+    const ends = events.filter(event => event.type === 'tool-end')
+    assert.deepEqual(
+        ends.map(event => event.isError),
+        [false, false, false, false, false, false, false, true]
+    )
+    const told = mock.bodies[8].messages.at(-1)
+    assert.equal(told.role, 'tool')
+    assert.match(told.content, /Refused: this is the 8th read call in a row/u)
+    assert.match(told.content, /2 more will end this turn/u)
+})
+
+test('six edits to one file are ordinary', async context => {
+    const workspace = await temporaryWorkspace({'notes.md': 'draft\n'})
+    context.after(workspace.remove)
+    const words = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot']
+    const mock = startScriptedServer([
+        ...words.map(word => ({calls: [{name: 'write', args: {path: 'notes.md', content: word}}]})),
+        {text: 'Edited'}
+    ])
+    const url = await baseUrl(context, mock.server)
+    const events = []
+
+    const completion = await runAgent({
+        settings: servedBy(url),
+        messages: [{sender: 'user', text: 'Rewrite notes.md six times', timestamp: 1}],
+        workspacePath: workspace.path,
+        emit: event => events.push(event)
+    })
+
+    assert.equal(completion.text, 'Edited')
+    assert.ok(events.filter(event => event.type === 'tool-end').every(event => !event.isError))
+    assert.equal(await readFile(`${workspace.path}/notes.md`, 'utf8'), 'foxtrot')
+})
+
+test('a turn that repeats past every warning ends and says so', async context => {
+    const workspace = await temporaryWorkspace({'package.json': '{"name":"gofer"}'})
+    context.after(workspace.remove)
+    const mock = startScriptedServer([{calls: [{name: 'read', args: {path: 'package.json'}}]}])
+    const url = await baseUrl(context, mock.server)
+    const events = []
+
+    await assert.rejects(
+        runAgent({
+            settings: servedBy(url),
+            messages: [{sender: 'user', text: 'Read package.json', timestamp: 1}],
+            workspacePath: workspace.path,
+            emit: event => events.push(event)
+        }),
+        /^Error: The turn was ended because it looped: read \{"path":"package\.json"\} was made 10 times in a row, was refused 3 times this turn, and was asked for again\.$/u
+    )
+    assert.equal(mock.bodies.length, 10)
+    assert.equal(events.filter(event => event.type === 'retry-scheduled').length, 0)
+})

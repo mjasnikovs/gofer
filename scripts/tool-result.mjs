@@ -36,7 +36,7 @@ function withoutTheirPixels(result) {
     return {described: {...result, ops: described}, images}
 }
 
-function withExecute(tool, handle) {
+export function withExecute(tool, handle) {
     return {...tool, execute: (...args) => handle(tool.execute, ...args)}
 }
 
@@ -64,7 +64,7 @@ export function withoutPictures(tool) {
 
 const REFUSALS_BEFORE_SAYING_SO = 2
 
-function sameWhateverTheOrder(value) {
+export function sameWhateverTheOrder(value) {
     return (
         JSON.stringify(value, (_, held) =>
             held && typeof held === 'object' && !Array.isArray(held) ?

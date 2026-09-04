@@ -193,11 +193,11 @@ export function keepThinkingLevel(model: ThinkingCapable, level: ThinkingLevel):
     return EFFORT_LEVELS.find(cheapest => offered.includes(cheapest)) ?? offered[0] ?? 'off'
 }
 
-// GENERATED-BEGIN subagent-bounds sha256:2907fc05bb4e4e15
+// GENERATED-BEGIN subagent-bounds sha256:e53302d81d27c140
 export const DEFAULT_SUBAGENT_SETTINGS: SubagentSettings = {
     commandTimeoutMinutes: 5,
     streamInactivityMinutes: 10,
-    maxTurns: 24,
+    maxTurns: 0,
     maxAnswerChars: 12_000,
     retryAttempts: 2,
     retryBaseDelaySeconds: 1

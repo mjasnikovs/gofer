@@ -93,7 +93,7 @@ export async function runBrief({
     if (typeof prompt !== 'string' || prompt.trim().length === 0) {
         throw new Error('The brief was given no task to work from')
     }
-    const {models, model, subagent, streamOptions} = world.createModelContext({
+    const {models, model, subagent, streamOptions, probe} = world.createModelContext({
         settings,
         secrets,
         oauthCredential,
@@ -137,6 +137,7 @@ export async function runBrief({
             thinkingLevel: subagent.thinkingLevel,
             streamOptions,
             settings: settings?.subagent,
+            probe,
             deps: childDeps,
             signal
         })
