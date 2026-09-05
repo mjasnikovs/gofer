@@ -160,8 +160,20 @@ describe('packaged desktop application', () => {
         )
         const stopButton = browser.$('button[aria-label*="Stop"]')
         await stopButton.click()
+        // A chat message carries `content-visibility: auto`, so Chromium lays out nothing inside
+        // one that is below the fold and the Retry button inside it measures 0x0. Aborting adds
+        // the button without adding a message, so nothing re-sticks the list to the bottom.
         try {
-            await expect(browser.$('button*=Retry')).toBeDisplayed()
+            await browser.waitUntil(
+                async () => {
+                    await browser.execute(() => {
+                        const scroll = document.querySelector('[data-testid="chat-scroll"]')
+                        if (scroll) scroll.scrollTop = scroll.scrollHeight
+                    })
+                    return await browser.$('button*=Retry').isDisplayed()
+                },
+                {timeoutMsg: 'the aborted turn never showed a Retry button'}
+            )
         } catch (failure) {
             const chat = await command<{messages: {text: string; status?: string}[]}>(
                 'load_chat',
@@ -176,8 +188,20 @@ describe('packaged desktop application', () => {
                 const size = await candidate.getSize()
                 const displayed = await candidate.isDisplayed()
                 const html = await candidate.getHTML({includeSelectorTag: true})
+                const place = await browser.execute(element => {
+                    const box = element.getBoundingClientRect()
+                    const scroll = document.querySelector('[data-testid="chat-scroll"]')
+                    return `top=${String(Math.round(box.top))} bottom=${String(
+                        Math.round(box.bottom)
+                    )} viewport=${String(window.innerHeight)} scrollTop=${String(
+                        scroll?.scrollTop ?? -1
+                    )} scrollHeight=${String(scroll?.scrollHeight ?? -1)} clientHeight=${String(
+                        scroll?.clientHeight ?? -1
+                    )}`
+                }, candidate)
                 described.push(
                     `displayed=${String(displayed)} ${String(size.width)}x${String(size.height)} `
+                        + `${place} `
                         + html.slice(0, 300)
                 )
             }
