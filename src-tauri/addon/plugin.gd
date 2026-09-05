@@ -2003,6 +2003,11 @@ func _run_scan_sweep() -> void:
         if bool(pending["walked"]):
             if _scans_completed > int(pending["scans"]):
                 var missing := _paths_not_loadable(pending["paths"])
+                for path: String in pending.get("unloadable", []):
+                    if missing.has(path):
+                        continue
+                    if FileAccess.file_exists(path) and not FileAccess.file_exists(path + ".import"):
+                        missing.append(path)
                 if missing.is_empty():
                     _respond_result(pending["id"], _rescan_result(pending))
                 else:
@@ -2033,6 +2038,10 @@ func _run_scan_sweep() -> void:
         if not bool(pending.get("walk", false)) and not paths.is_empty() and _import_batch(paths):
             _respond_result(pending["id"], _rescan_result(pending))
             continue
+        # The discard takes away the only record that these failed, and the walk after it is not
+        # guaranteed to write another: macOS answered a rescan of an unreadable PNG `scanned: true`
+        # because nothing re-imported the file and no sidecar was left to judge it by.
+        pending["unloadable"] = _paths_not_loadable(paths)
         for path: String in paths:
             _discard_failed_import(path)
         filesystem.scan()
