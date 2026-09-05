@@ -189,15 +189,28 @@ describe('packaged desktop application', () => {
                 const displayed = await candidate.isDisplayed()
                 const html = await candidate.getHTML({includeSelectorTag: true})
                 const place = await browser.execute(element => {
-                    const box = element.getBoundingClientRect()
-                    const scroll = document.querySelector('[data-testid="chat-scroll"]')
-                    return `top=${String(Math.round(box.top))} bottom=${String(
-                        Math.round(box.bottom)
-                    )} viewport=${String(window.innerHeight)} scrollTop=${String(
-                        scroll?.scrollTop ?? -1
-                    )} scrollHeight=${String(scroll?.scrollHeight ?? -1)} clientHeight=${String(
-                        scroll?.clientHeight ?? -1
-                    )}`
+                    const lines: string[] = [`viewport=${String(window.innerHeight)}`]
+                    let node: Element | null = element
+                    while (node && node !== document.documentElement) {
+                        const box = node.getBoundingClientRect()
+                        const style = getComputedStyle(node)
+                        const name = `${node.tagName.toLowerCase()}${
+                            node.getAttribute('data-testid') ?
+                                `#${String(node.getAttribute('data-testid'))}`
+                            :   ''
+                        }.${(node.getAttribute('class') ?? '').split(' ').slice(0, 2).join('.')}`
+                        lines.push(
+                            `${name} box=${String(Math.round(box.width))}x${String(
+                                Math.round(box.height)
+                            )} client=${String(node.clientHeight)} scroll=${String(
+                                node.scrollHeight
+                            )} ${style.display}/${style.flexDirection} flex=${style.flex} `
+                                + `minH=${style.minHeight} h=${style.height} ov=${style.overflowY} `
+                                + `cv=${style.contentVisibility}`
+                        )
+                        node = node.parentElement
+                    }
+                    return lines.join('\n  ')
                 }, candidate)
                 described.push(
                     `displayed=${String(displayed)} ${String(size.width)}x${String(size.height)} `
