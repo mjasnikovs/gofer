@@ -18,10 +18,13 @@ const FRAME_AWAITING_OPS: Array[String] = ["input", "capture", "wait"]
 ## failure. A benchmark ends: that is the outcome it was run for, and a caller told `not running`
 ## loses the rest of the list it sent — the `get_state` and the log read that carried the numbers.
 const EXIT_ANSWERING_OPS: Array[String] = ["wait"]
-## The operations a paused game cannot serve. A debugger break stops the scene tree, and only
-## these two wait on it; the renderer keeps drawing through a break, so a capture answers from a
-## breakpoint in about a tenth of a second, and every read - tree, node, monitors - answers too.
-const PROCESS_AWAITING_OPS: Array[String] = ["input", "wait"]
+## The operations a paused game cannot serve. A debugger break stops the scene tree, and every read
+## - tree, node, monitors - still answers through it.
+##
+## Capture is here because only Linux draws through a break. The same breakpoint on Windows never
+## produces another frame, and macOS produces one only sometimes, so the capture that answered in a
+## tenth of a second here spent its whole timeout there and then said the game was slow.
+const PROCESS_AWAITING_OPS: Array[String] = ["capture", "input", "wait"]
 
 ## What one sweep of the queue decided.
 ##

@@ -833,7 +833,7 @@ fn a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits() {
         refused.message
     );
     assert!(
-        refused.message.contains("capture") && refused.message.contains("get_tree"),
+        refused.message.contains("inspect_node") && refused.message.contains("get_tree"),
         "the sentence must name what a halted game still answers: {}",
         refused.message
     );

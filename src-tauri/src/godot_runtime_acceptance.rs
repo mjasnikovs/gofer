@@ -1481,10 +1481,13 @@ fn dap_client(dap_port: u16, session: &Session) -> DapClient {
 /// cleared the state was the call the state refused. The debugger's `continued` is the signal that
 /// ends it, and nothing else can.
 ///
-/// What the break stops is the scene tree, and only `input` and `wait` sit on it. Measured at a
-/// live breakpoint on 4.7.2: capture answered in 140ms with a real PNG, and tree, node and monitor
-/// reads all answered too — the renderer draws through a break. Refusing them cost the agent the
-/// one look at the frozen frame that a breakpoint is for.
+/// What the break stops is the scene tree and the drawing, and the reads sit on neither. Measured
+/// at a live breakpoint on 4.7.2: tree, node and monitor reads all answer through a break, so
+/// refusing them costs the agent the one look at the frozen game that a breakpoint is for.
+///
+/// A capture is refused. It answered in 140ms on Linux, which is why it used to be allowed, but
+/// the same breakpoint on Windows draws no further frame at all and the call spent its whole
+/// timeout before saying the game was slow.
 #[test]
 fn a_break_refuses_only_the_calls_it_stops() {
     let directory = TempDir::new().expect("temporary directory");
@@ -1538,9 +1541,13 @@ fn a_break_refuses_only_the_calls_it_stops() {
         paused_tree.get("root").is_some(),
         "a paused game still answers a read: {paused_tree}"
     );
-    // The renderer draws through a break; only the scene tree stops.
-    let paused_frame = session.call("runtime.capture", json!({}));
-    assert_frame(&paused_frame["frame"]);
+    let no_frame = session
+        .try_call("runtime.capture", json!({}), None)
+        .expect_err("a break draws no frame on every platform, so a capture cannot wait for one");
+    assert!(
+        no_frame.starts_with("runtime_broke"),
+        "a paused game must refuse a capture for the pause: {no_frame}"
+    );
 
     client
         .set_breakpoints(&script, &[])

@@ -1626,9 +1626,8 @@ fn refusing_a_halted_game(
                 "The game is stopped in the debugger, so it runs no frame and godot_runtime {op} \
                  cannot be answered. Waiting will not change that. godot_debug continue lets it \
                  run on, and godot_debug stack_trace says where it is stopped. godot_runtime \
-                 capture, get_tree, inspect_node and get_monitors are not refused here — a break \
-                 stops the scene tree and not the renderer, so a stopped game still photographs \
-                 and still answers a read."
+                 get_tree, inspect_node and get_monitors are not refused here — a break stops the \
+                 scene tree and not the reads, so a stopped game still answers one."
             ),
         )
     })
@@ -3432,7 +3431,7 @@ mod tests {
         assert_eq!(alone.message, "The game did not answer in time");
     }
 
-    /// The two operations a halted game cannot serve are the addon's list, not a second copy of it.
+    /// The operations a halted game cannot serve are the addon's list, not a second copy of it.
     ///
     /// A drift here is silent and costs a working call: an operation this list gained that Rust
     /// never heard of would go on spending its deadline, and one Rust invented would be refused
@@ -3441,7 +3440,7 @@ mod tests {
     fn the_process_awaiting_operations_are_the_addons_own() {
         assert_eq!(
             *PROCESS_AWAITING_OPS,
-            vec!["input".to_owned(), "wait".to_owned()],
+            vec!["capture".to_owned(), "input".to_owned(), "wait".to_owned()],
             "runtime_queue.gd's PROCESS_AWAITING_OPS is what this reads, and the parse answered otherwise"
         );
     }

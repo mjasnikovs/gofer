@@ -1085,7 +1085,7 @@ func _runtime_forward(id: String, op: String, params: Dictionary) -> void:
             _respond_error(id, "runtime_not_running", "No game with the Gofer runtime helper is running", true)
         return
     if _runtime_broke and RuntimeQueue.PROCESS_AWAITING_OPS.has(op):
-        _respond_error(id, "runtime_broke", "The game is paused in the debugger, so it runs no frames and this call would wait forever. Capture, get_tree, inspect_node and get_monitors all answer while it is paused. godot_debug continue lets it go, and godot_debug stack_trace says where it is stopped. If it stopped while starting, what stopped it is in the session output - read that, fix it, and run again", true)
+        _respond_error(id, "runtime_broke", "The game is paused in the debugger, so it runs no frames and this call would wait forever. get_tree, inspect_node and get_monitors all answer while it is paused. godot_debug continue lets it go, and godot_debug stack_trace says where it is stopped. If it stopped while starting, what stopped it is in the session output - read that, fix it, and run again", true)
         return
     _runtime_pending.append({
         "id": id,
@@ -1175,10 +1175,13 @@ func _fail_pending(kinds: Array, code: String, message: String) -> void:
             kept.append(pending)
     _runtime_pending = kept
 
+## A message from the game says the helper is alive; it does not say the game is running. The
+## debugger serves reads through a break, so a `get_tree` answered here used to clear the break and
+## let the next capture wait out its timeout against a game that draws nothing. Only `continued`
+## and a new or ended session clear it.
 func _on_runtime_debugger_message(message: String, data: Array, session_id: int) -> void:
     if data.is_empty() or typeof(data[0]) != TYPE_DICTIONARY:
         return
-    _runtime_broke = false
     var payload: Dictionary = data[0]
     if message == "gofer:ready":
         var first := not _runtime_ready
