@@ -30,13 +30,24 @@ const built = cargo(
     ],
     {stdio: ['inherit', 'pipe', 'inherit']}
 )
-if (built.status !== 0) process.exit(built.status ?? 1)
-
-const binary = built.stdout
+const messages = built.stdout
     .split('\n')
     .filter(line => line.startsWith('{'))
     .map(line => JSON.parse(line))
-    .findLast(message => message.executable && message.target?.name === 'gofer_lib')?.executable
+
+// --message-format json puts the diagnostics on the piped stdout, so a failed build
+// otherwise reports only cargo's summary line and none of the errors it counted.
+if (built.status !== 0) {
+    for (const message of messages) {
+        if (message.reason === 'compiler-message' && message.message?.rendered)
+            process.stderr.write(message.message.rendered)
+    }
+    process.exit(built.status ?? 1)
+}
+
+const binary = messages.findLast(
+    message => message.executable && message.target?.name === 'gofer_lib'
+)?.executable
 if (!binary) throw new Error('The Godot acceptance build produced no library test binary')
 
 const listed = spawnSync(binary, ['--list'], {encoding: 'utf8', cwd: PACKAGE})

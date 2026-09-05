@@ -2822,6 +2822,7 @@ mod tests {
 
     /// A file becoming a symlink is `T`, which is neither an add nor a modification, and a listing
     /// that had no arm for it would report something untrue.
+    #[cfg(unix)]
     #[test]
     fn a_file_that_changed_type_is_named_rather_than_guessed_at() {
         let repository = repository();
@@ -3139,6 +3140,7 @@ mod tests {
     /// A symlink is an ordinary added file to Git, so the copy on disk has to be read through the
     /// workspace's guard rather than by joining the path: otherwise whatever it points at is what
     /// gets drawn in the diff editor.
+    #[cfg(unix)]
     #[test]
     fn a_symlink_out_of_the_worktree_is_refused_rather_than_followed() {
         let repository = repository();
