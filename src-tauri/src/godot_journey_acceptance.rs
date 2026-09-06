@@ -184,6 +184,27 @@ fn write(root: &Path, path: &str, contents: &str) {
         .unwrap_or_else(|error| panic!("write {}: {error}", target.display()));
 }
 
+/// Every path still under a directory the stop was supposed to take away, so a failure names what
+/// held it rather than only that something did.
+fn remaining_under(root: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return vec![format!("{} is unreadable or gone", root.display())];
+    };
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(remaining_under(&path));
+        } else {
+            found.push(path.display().to_string());
+        }
+    }
+    if found.is_empty() {
+        found.push(format!("{} (empty)", root.display()));
+    }
+    found
+}
+
 fn read(root: &Path, path: &str) -> String {
     std::fs::read_to_string(root.join(path))
         .unwrap_or_else(|error| panic!("read {}/{path}: {error}", root.display()))
@@ -900,7 +921,8 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
     journey.call("godot_session", "stop", json!({}));
     assert!(
         !worktree.join("addons").exists(),
-        "stopping must remove everything staging introduced"
+        "stopping must remove everything staging introduced, and left {}",
+        remaining_under(&worktree.join("addons")).join(", ")
     );
     let project = read(&worktree, "project.godot");
     assert!(
