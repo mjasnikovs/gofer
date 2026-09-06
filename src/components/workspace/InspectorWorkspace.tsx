@@ -42,6 +42,7 @@ import {
     EXPLORER_MIN,
     INSPECTOR_MAX,
     INSPECTOR_MIN,
+    THREE_PANEL_MIN,
     nodeStillChosen
 } from '../../models/ui-state'
 import type {CenterTab, LayoutAction, ScriptViews, WorkspaceLayout} from '../../models/ui-state'
@@ -77,7 +78,7 @@ type FrameRegionsProps = Omit<InspectorFrameProps, 'onError'>
         failure?: string | undefined
     }>
 
-const NARROW_QUERY = '(max-width: 1024px)'
+const NARROW_QUERY = `(max-width: ${String(THREE_PANEL_MIN - 1)}px)`
 const BOTTOM_HEIGHT = 240
 
 const STATE_VARIANT: Readonly<

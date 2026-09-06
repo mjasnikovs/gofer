@@ -18,6 +18,16 @@ export const SIDE_NAV_WIDTH = 280
 export const SIDE_NAV_MIN = 220
 export const SIDE_NAV_MAX = 400
 
+// The narrowest the centre column may be. Astryx puts comfortable prose at 40-60 characters,
+// which is about this wide at the body size; the two divider pixels come out of it.
+export const CENTER_MIN = 360
+
+// The narrowest window that holds every panel at its budget and still leaves the centre column
+// readable. Under it the inspector is a toolbar button: measured at 1080 the three panels each
+// kept their width and the conversation was left 158px, which laid the composer out so tall that
+// the transcript above it had no height at all.
+export const THREE_PANEL_MIN = SIDE_NAV_WIDTH + EXPLORER_WIDTH + INSPECTOR_WIDTH + CENTER_MIN
+
 export type SideNavLayout = Readonly<{
     isCollapsed: boolean
     width: number
