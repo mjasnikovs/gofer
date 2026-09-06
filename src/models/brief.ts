@@ -100,9 +100,17 @@ export type UserQuestionPrompt = Readonly<{
     canStopAsking: boolean
 }>
 
+/** A picture sent back with an answer. `data` is base64, without the data-URL prefix. */
+export type AnsweredImage = Readonly<{
+    name: string
+    mimeType: string
+    data: string
+}>
+
 export type UserQuestionResponse = Readonly<{
     questionId: string
     answer?: string
+    images?: readonly AnsweredImage[]
     picked?: number
     blocked?: readonly string[]
     skipped?: boolean

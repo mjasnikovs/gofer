@@ -262,6 +262,8 @@ pub struct Reply {
     /// Orthogonal to `skipped`, and usually alongside it. A skip is about this question; this is
     /// about every question after it.
     pub stop_asking: bool,
+    /// Pictures they attached. Answering with a screenshot and no words is a whole answer.
+    pub images: Vec<AnsweredImage>,
 }
 
 /// How a question ended.
@@ -462,6 +464,15 @@ pub fn ask_question<R: Runtime>(app: &AppHandle<R>, asked: Asked) -> Answer {
     }
 }
 
+/// A picture the user attached to their answer. `data` is base64, with no data-URL prefix.
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnsweredImage {
+    pub name: String,
+    pub mime_type: String,
+    pub data: String,
+}
+
 /// What the renderer sends back.
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -469,6 +480,8 @@ pub struct QuestionResponse {
     pub question_id: String,
     #[serde(default)]
     pub answer: Option<String>,
+    #[serde(default)]
+    pub images: Vec<AnsweredImage>,
     #[serde(default)]
     pub picked: Option<usize>,
     #[serde(default)]
@@ -504,8 +517,11 @@ pub fn respond_question(response: QuestionResponse) -> Result<(), QuestionError>
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .unwrap_or_default();
-    let empty =
-        text.is_empty() && response.picked.is_none() && !response.approved && !response.again;
+    let empty = text.is_empty()
+        && response.images.is_empty()
+        && response.picked.is_none()
+        && !response.approved
+        && !response.again;
     // `stop_asking` stays out of `empty` and is carried through the skip branch by hand. Pressing
     // the button with an empty box is the normal way to press it, so it has to stay a skip — but
     // `..Reply::default()` would drop the one thing that press actually said.
@@ -525,6 +541,7 @@ pub fn respond_question(response: QuestionResponse) -> Result<(), QuestionError>
             approved: response.approved,
             again: response.again,
             stop_asking: response.stop_asking,
+            images: response.images,
         }
     };
     QUESTIONS
@@ -719,6 +736,11 @@ fn reply_answer(
         "sketches": sketches.len(),
         "blocked": reply.blocked,
         "unresolved": unresolved,
+        "images": reply.images.iter().map(|image| json!({
+            "name": image.name,
+            "mimeType": image.mime_type,
+            "data": image.data,
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -1150,6 +1172,50 @@ mod tests {
         .expect_err("nothing is waiting anymore");
         assert_eq!(late.code, "unknown_question");
         assert!(!late.retryable);
+    }
+
+    /// A screenshot with nothing typed beside it is a whole answer, not an empty box.
+    #[test]
+    fn a_picture_with_no_words_is_an_answer_rather_than_a_skip() {
+        let _guard = serialize_question_tests();
+        let receiver = QUESTIONS.register("question-shown").expect("registered");
+        respond_question(QuestionResponse {
+            question_id: "question-shown".to_owned(),
+            images: vec![AnsweredImage {
+                name: "editor-screenshot.png".to_owned(),
+                mime_type: "image/png".to_owned(),
+                data: "AAAA".to_owned(),
+            }],
+            ..QuestionResponse::default()
+        })
+        .expect("answered");
+
+        let reply = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("a reply");
+        assert!(!reply.skipped, "a picture is a decision, not an absence");
+        assert_eq!(reply.images.len(), 1);
+        assert_eq!(reply.images[0].name, "editor-screenshot.png");
+    }
+
+    /// The pictures reach the worker beside the words, in the shape its tool result builds from.
+    #[test]
+    fn the_pictures_the_user_attached_are_carried_out_to_the_worker() {
+        let reply = Reply {
+            text: "like this one".to_owned(),
+            images: vec![AnsweredImage {
+                name: "game-screenshot.png".to_owned(),
+                mime_type: "image/png".to_owned(),
+                data: "BBBB".to_owned(),
+            }],
+            ..Reply::default()
+        };
+        let answer = reply_answer("question-1", &[], &reply, Vec::new());
+        assert_eq!(
+            answer["images"][0]["mimeType"],
+            serde_json::json!("image/png")
+        );
+        assert_eq!(answer["images"][0]["data"], serde_json::json!("BBBB"));
     }
 
     /// Pressing skip discards whatever was typed, rather than sending it as the decision.
@@ -1667,6 +1733,7 @@ mod tests {
             approved: false,
             again: false,
             stop_asking: false,
+            images: Vec::new(),
         };
 
         assert!(
@@ -1705,6 +1772,7 @@ mod tests {
             approved: false,
             again: false,
             stop_asking: false,
+            images: Vec::new(),
         };
 
         let (source, drawn) =

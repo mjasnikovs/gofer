@@ -216,7 +216,7 @@ const REACHING_CHILD_TOOLS = {
     },
     web_search: ({searchProvider = 'exa', braveApiKey}) =>
         createWebSearchTool({provider: searchProvider, apiKey: braveApiKey}),
-    ask_user: ({host, ownerCallId, agreed}) => {
+    ask_user: ({host, ownerCallId, agreed, model}) => {
         if (!host) {
             throw new Error(
                 'A child was asked for ask_user without the tool host that answers it. '
@@ -231,7 +231,7 @@ const REACHING_CHILD_TOOLS = {
                     + 'unrelated question. Pass `ownerCallId` to createChildTools.'
             )
         }
-        return createAskUserTool({host, ownerCallId, agreed})
+        return createAskUserTool({host, ownerCallId, agreed, model})
     }
 }
 

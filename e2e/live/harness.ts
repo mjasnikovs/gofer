@@ -523,10 +523,26 @@ export async function fillInput(selector: string, value: string) {
     )
 }
 
+/** A contenteditable has no `value`, so it is filled by typing and read back as its text. */
+async function fillField(selector: string, value: string) {
+    const field = browser.$(selector)
+    await field.waitForDisplayed({timeout: 15_000})
+    const isEditable = await field.getAttribute('contenteditable')
+    if (isEditable !== 'true') return fillInput(selector, value)
+    for (let attempt = 0; attempt < 5; attempt++) {
+        await field.click()
+        await field.setValue(value)
+        if ((await field.getText()).includes(value)) return
+    }
+    throw new Error(
+        `${selector} would not take ${JSON.stringify(value)}; the window shows: ${await pageText()}`
+    )
+}
+
 async function labelledInputId(label: string): Promise<string> {
     return browser.execute((wanted: string) => {
         const fields = Array.from(
-            document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input, textarea')
+            document.querySelectorAll<HTMLElement>('input, textarea, [contenteditable="true"]')
         )
         const nameOf = (field: Element) => {
             const direct = field.getAttribute('aria-label')
@@ -573,7 +589,7 @@ export async function fillLabelledInput(label: string, value: string) {
         const id = await labelledInputIdWhenReady(label)
         if (id === '') break
         try {
-            await fillInput(`#${id}`, value)
+            await fillField(`#${id}`, value)
             return
         } catch {}
     }
@@ -585,11 +601,11 @@ export async function fillLabelledInput(label: string, value: string) {
 export async function labelledInputValue(label: string): Promise<string> {
     const id = await labelledInputIdWhenReady(label)
     if (id === '') throw new Error(`no field is labelled “${label}”`)
-    return browser.execute(
-        (fieldId: string) =>
-            document.querySelector<HTMLInputElement>(`#${fieldId}`)?.value ?? '(missing)',
-        id
-    )
+    return browser.execute((fieldId: string) => {
+        const field = document.querySelector<HTMLInputElement>(`#${fieldId}`)
+        if (!field) return '(missing)'
+        return field.isContentEditable ? field.textContent : field.value
+    }, id)
 }
 
 export async function labelledInputIsDisabled(label: string): Promise<boolean> {
@@ -598,7 +614,9 @@ export async function labelledInputIsDisabled(label: string): Promise<boolean> {
     return browser.execute((fieldId: string) => {
         const field = document.querySelector<HTMLInputElement>(`#${fieldId}`)
         if (!field) return false
-        return field.disabled || field.readOnly || field.getAttribute('aria-disabled') === 'true'
+        if (field.getAttribute('aria-disabled') === 'true') return true
+        if (field.hasAttribute('contenteditable')) return !field.isContentEditable
+        return field.disabled || field.readOnly
     }, id)
 }
 

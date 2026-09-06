@@ -99,6 +99,7 @@ fn answer_the_prompts_nobody_is_watching(finished: Arc<std::sync::atomic::Atomic
                 let skipped = crate::ask::QuestionResponse {
                     question_id: asked.clone(),
                     answer: None,
+                    images: Vec::new(),
                     picked: None,
                     blocked: Vec::new(),
                     skipped: true,

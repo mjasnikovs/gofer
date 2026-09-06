@@ -274,7 +274,7 @@ test('question with one sketch', async ({page}) => {
 // ellipsis while the badge beside it was cut off too.
 test('question in words', async ({page}) => {
     await askDuringATurn(page, 0)
-    await expect(page.getByRole('textbox', {name: /Your answer/u})).toBeVisible()
+    await expect(page.getByRole('combobox', {name: /Your answer/u})).toBeVisible()
     const longest = page.getByRole('button', {
         name: 'Its own scene under ui/, instanced by every level that needs it (recommended)'
     })

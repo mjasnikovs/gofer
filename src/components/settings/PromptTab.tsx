@@ -4,9 +4,9 @@ import {Icon} from '@astryxdesign/core/Icon'
 import {LayoutFooter} from '@astryxdesign/core/Layout'
 import {HStack, VStack} from '@astryxdesign/core/Stack'
 import {Heading, Text} from '@astryxdesign/core/Text'
-import {TextArea} from '@astryxdesign/core/TextArea'
 import ArrowUturnLeftIcon from '@heroicons/react/24/outline/ArrowUturnLeftIcon'
 import ChatBubbleLeftRightIcon from '@heroicons/react/24/outline/ChatBubbleLeftRightIcon'
+import {TextField} from '../TextField'
 import {invoke} from '../../services/desktop'
 import {agentPromptIsDefault, agentPromptIsUnsaved} from '../../models/settings-draft'
 import {SETTINGS_GRID_COLUMNS, settingsBanner} from './settings-view'
@@ -55,7 +55,8 @@ export function usePromptTab(view: SettingsView): SettingsTabView {
                     </VStack>
 
                     {draft ?
-                        <TextArea
+                        <TextField
+                            kind='plain'
                             label='System prompt'
                             value={state.agentPrompt}
                             rows={18}

@@ -8,7 +8,6 @@ import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {Spinner} from '@astryxdesign/core/Spinner'
 import {StatusDot} from '@astryxdesign/core/StatusDot'
 import {Text} from '@astryxdesign/core/Text'
-import {TextArea} from '@astryxdesign/core/TextArea'
 import {Token} from '@astryxdesign/core/Token'
 import {
     deleteProjectMemory,
@@ -41,6 +40,7 @@ import type {
 } from '../../models/memory'
 import type {CommandError} from '../../models/errors'
 import {PanelState} from './PanelState'
+import {TextField} from '../TextField'
 
 const PREVIEW_LENGTH = 110
 
@@ -613,7 +613,8 @@ function MemoryEditor({
                     {`The judge did not finish: ${judgeFailure}`}
                 </Text>
             )}
-            <TextArea
+            <TextField
+                kind='plain'
                 label='What is remembered'
                 size='sm'
                 rows={8}

@@ -604,6 +604,7 @@ export async function runAgent({
                 [
                     createAskUserTool({
                         host,
+                        model,
                         delegate: createAskDelegate({
                             workspacePath,
                             models,

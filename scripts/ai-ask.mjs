@@ -1,3 +1,5 @@
+import {modelReadsImages} from './agent-runtime.mjs'
+
 export const ASK_USER_TOOL_NAME = 'ask_user'
 
 export const ASK_PROBE_ANSWER = 'ask-user-reachable'
@@ -208,7 +210,7 @@ export function answerText(answer, {inDesign = false} = {}) {
     return parts.join(' ') + trailing
 }
 
-export function createAskUserTool({host, ownerCallId, delegate, agreed}) {
+export function createAskUserTool({host, ownerCallId, delegate, agreed, model}) {
     const delegating = delegate !== undefined
     const inDesign = ownerCallId !== undefined
     if (agreed !== undefined) {
@@ -265,26 +267,56 @@ export function createAskUserTool({host, ownerCallId, delegate, agreed}) {
             const answer = await host.call(ASK_USER_TOOL_NAME, request, signal)
             if (agreed !== undefined) {
                 agreed.rounds = (agreed.rounds ?? 0) + 1
-                if (agreed.approved === true) return answered(answer, {inDesign})
+                if (agreed.approved === true) return answered(answer, {inDesign, model})
                 if (answer?.sketch?.html) {
                     agreed.label = answer.sketch.label
                     agreed.html = answer.sketch.html
                 }
                 if (answer?.approved === true) agreed.approved = true
             }
-            return answered(answer, {inDesign})
+            return answered(answer, {inDesign, model})
         }
     }
 }
 
-function answered(answer, {inDesign}) {
+function answered(answer, {inDesign, model}) {
+    const pictures = Array.isArray(answer?.images) ? answer.images : []
+    const readable = modelReadsImages(model)
     return {
-        content: [{type: 'text', text: answerText(answer, {inDesign})}],
+        content: [
+            {
+                type: 'text',
+                text: answerText(answer, {inDesign}) + unreadPictures(pictures, readable)
+            },
+            ...(readable ?
+                pictures.map(image => ({
+                    type: 'image',
+                    data: image.data,
+                    mimeType: image.mimeType
+                }))
+            :   [])
+        ],
         details: {
             questionId: answer?.questionId,
             skipped: answer?.skipped === true,
             approved: answer?.approved === true,
-            again: answer?.again === true
+            again: answer?.again === true,
+            images: pictures.length
         }
     }
+}
+
+// A picture handed to a model that cannot read one is silently nothing, and the user is left
+// believing they showed it something.
+function unreadPictures(pictures, readable) {
+    if (pictures.length === 0 || readable) return ''
+    const count = String(pictures.length)
+    const plural = pictures.length === 1 ? '' : 's'
+    return (
+        `\n\nThey attached ${count} picture${plural}, and the model answering this cannot read `
+        + `one. Say so before you act, and ask them to describe what the picture${plural} `
+        + 'show'
+        + (pictures.length === 1 ? 's' : '')
+        + '.'
+    )
 }

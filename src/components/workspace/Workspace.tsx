@@ -15,14 +15,13 @@ import {invoke, isTauri} from '../../services/desktop'
 import {commandErrorMessage, toCommandError} from '../../utils/command-error'
 import type {TaskSummary} from '../../models/app'
 import type {CommandError} from '../../models/errors'
-import type {AnnotationShape} from '../../models/annotation'
-import type {ChatAttachment, DraftAttachment} from '../../models/chat'
+import type {ChatAttachment} from '../../models/chat'
 import {messageUsage} from '../../utils/chat-format'
-import {attachmentData, pngFile} from '../../services/chat-storage'
 import {draftKey} from '../../services/ui-state'
 import {isTurnRunning, watchTurn} from '../../services/turn-activity'
 import {NO_THINKING_LEVELS, activeModel, thinkingLevelsFor} from '../../models/settings'
 import {useAiConnection} from '../../hooks/useAiConnection'
+import {useAttachmentPool} from '../../hooks/useAttachmentPool'
 import {useAttachmentPreviews} from '../../hooks/useAttachmentPreviews'
 import {useConversation} from '../../hooks/useConversation'
 import {COMPACT_COMMAND} from '../../hooks/useCompactCommandTrigger'
@@ -103,9 +102,6 @@ function conflictPrompt(conflicts: readonly string[]): string {
     ].join('\n')
 }
 
-const CHAT_ATTACHMENT_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
-const MAX_CHAT_ATTACHMENTS = 5
-const MAX_CHAT_ATTACHMENT_BYTES = 10 * 1024 * 1024
 const DEFAULT_CONTEXT_WINDOW = 120_064
 const CHAT_COLUMN = <ChatColumn />
 
@@ -118,10 +114,17 @@ export function Workspace({
     onResolveMerge,
     onAbandonMerge
 }: WorkspaceProps) {
-    const [draftAttachments, setDraftAttachments] = useState<readonly DraftAttachment[]>([])
+    const [workspaceError, setWorkspaceError] = useState<string>()
+    const {
+        attachments: draftAttachments,
+        clear: clearAttachments,
+        select: selectAttachments,
+        attachClipboardImage,
+        edit: editAttachment,
+        remove: removeAttachment
+    } = useAttachmentPool(setWorkspaceError)
     const composerAppendRef = useRef<ComposerAppend | null>(null)
     const [isSavingAttachments, setIsSavingAttachments] = useState(false)
-    const [workspaceError, setWorkspaceError] = useState<string>()
     const [mergeOffered, setMergeOffered] = useState<MergeOffer>(NOTHING_TO_OFFER)
     const [unsaved, setUnsaved] = useState<readonly string[]>([])
     const [messageScroll, setMessageScroll] = useState<HTMLElement | null>(null)
@@ -252,7 +255,7 @@ export function Workspace({
         addPreviews(
             Object.fromEntries(taken.map(attachment => [attachment.id, attachment.previewUrl]))
         )
-        setDraftAttachments([])
+        clearAttachments()
         return taken.map(attachment => ({
             id: attachment.id,
             name: attachment.name,
@@ -308,45 +311,6 @@ export function Workspace({
             setWorkspaceError(`The images could not be attached: ${commandErrorMessage(error)}`)
         } finally {
             setIsSavingAttachments(false)
-        }
-    }
-
-    const selectAttachments = async (files: FileList | readonly File[] | null) => {
-        if (!files) return
-        const available = MAX_CHAT_ATTACHMENTS - draftAttachments.length
-        const selected = Array.from(files).slice(0, available)
-        const invalid = selected.find(
-            file =>
-                !CHAT_ATTACHMENT_TYPES.has(file.type)
-                || file.size === 0
-                || file.size > MAX_CHAT_ATTACHMENT_BYTES
-        )
-        if (files.length > available) {
-            setWorkspaceError(`You can attach up to ${String(MAX_CHAT_ATTACHMENTS)} images.`)
-            return
-        }
-        if (invalid) {
-            setWorkspaceError(
-                invalid.size === 0 ? `${invalid.name} is empty.`
-                : CHAT_ATTACHMENT_TYPES.has(invalid.type) ? `${invalid.name} is larger than 10 MiB.`
-                : `${invalid.name} is not a supported image.`
-            )
-            return
-        }
-        try {
-            const attachments = await Promise.all(
-                selected.map(async file => ({
-                    id: crypto.randomUUID(),
-                    name: file.name,
-                    mimeType: file.type,
-                    size: file.size,
-                    ...(await attachmentData(file))
-                }))
-            )
-            setDraftAttachments(previous => [...previous, ...attachments])
-            setWorkspaceError(undefined)
-        } catch (error) {
-            setWorkspaceError(`The images could not be read: ${commandErrorMessage(error)}`)
         }
     }
 
@@ -414,40 +378,6 @@ export function Workspace({
     const model = activeModel(settings)
     const supportsImages = Boolean(model?.input.includes('image'))
 
-    const editAttachment = async (
-        attachmentId: string,
-        file: File,
-        shapes: readonly AnnotationShape[]
-    ) => {
-        if (file.size > MAX_CHAT_ATTACHMENT_BYTES) {
-            setWorkspaceError(`${file.name} is larger than 10 MiB once drawn on.`)
-            return
-        }
-        try {
-            const stored = await attachmentData(file)
-            setDraftAttachments(previous =>
-                previous.map(attachment =>
-                    attachment.id === attachmentId ?
-                        {
-                            ...attachment,
-                            name: file.name,
-                            mimeType: file.type,
-                            size: file.size,
-                            ...stored,
-                            annotation: {
-                                src: attachment.annotation?.src ?? attachment.previewUrl,
-                                shapes
-                            }
-                        }
-                    :   attachment
-                )
-            )
-            setWorkspaceError(undefined)
-        } catch (error) {
-            setWorkspaceError(`The drawing could not be saved: ${commandErrorMessage(error)}`)
-        }
-    }
-
     const planMessage = async (value: string) => {
         const prompt = value.trim()
         if (!prompt || isBusy || !isTauri()) return
@@ -461,21 +391,6 @@ export function Workspace({
             setWorkspaceError(`The images could not be attached: ${commandErrorMessage(error)}`)
         } finally {
             setIsSavingAttachments(false)
-        }
-    }
-
-    const removeAttachment = useCallback((attachmentId: string) => {
-        setDraftAttachments(previous => previous.filter(item => item.id !== attachmentId))
-    }, [])
-
-    const attachClipboardImage = async () => {
-        if (!isTauri()) return
-        try {
-            const image = await invoke('read_clipboard_image')
-            if (!image) return
-            await selectAttachments([pngFile(image.pngBase64, 'pasted-image.png')])
-        } catch (error) {
-            setWorkspaceError(`The pasted image could not be read: ${commandErrorMessage(error)}`)
         }
     }
 

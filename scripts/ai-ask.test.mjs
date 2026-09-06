@@ -146,6 +146,49 @@ test('an ordinary question is owned by the call that asked it', async () => {
     assert.equal('isDelegated' in sent[0], false)
 })
 
+test('the pictures the user answered with reach a model that can read one', async () => {
+    const picture = {name: 'shot.png', mimeType: 'image/png', data: 'AAAA'}
+    const host = {
+        call: () =>
+            Promise.resolve({questionId: 'question-1', answer: 'this one', images: [picture]})
+    }
+    const tool = createAskUserTool({host, model: {...model, input: ['text', 'image']}})
+
+    const result = await tool.execute('call-1', {question: 'which?'})
+
+    assert.deepEqual(
+        result.content.filter(part => part.type === 'image'),
+        [{type: 'image', data: 'AAAA', mimeType: 'image/png'}]
+    )
+})
+
+test('a model that cannot read a picture is told one was attached', async () => {
+    const host = {
+        call: () =>
+            Promise.resolve({
+                questionId: 'question-1',
+                answer: 'this one',
+                images: [{name: 'shot.png', mimeType: 'image/png', data: 'AAAA'}]
+            })
+    }
+    const tool = createAskUserTool({host, model})
+
+    const result = await tool.execute('call-1', {question: 'which?'})
+
+    assert.equal(result.content.filter(part => part.type === 'image').length, 0)
+    assert.match(result.content[0].text, /cannot read one/u)
+})
+
+test('an answer with no picture says nothing about pictures', async () => {
+    const host = {call: () => Promise.resolve({questionId: 'question-1', answer: 'this one'})}
+    const tool = createAskUserTool({host, model: {...model, input: ['text', 'image']}})
+
+    const result = await tool.execute('call-1', {question: 'which?'})
+
+    assert.equal(result.content.length, 1)
+    assert.doesNotMatch(result.content[0].text, /picture/u)
+})
+
 test('a delegated question carries the call it is asking on behalf of', async () => {
     const sent = []
     const host = {

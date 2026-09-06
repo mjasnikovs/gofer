@@ -1,11 +1,18 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
-import {cleanup, render, screen} from '@testing-library/react'
+import {cleanup, render, screen, waitFor, within} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {AskBlock, UnownedAsk} from './AskBlock'
 import {AskedQuestionsContext} from '../../hooks/useUserQuestions'
 import {OpenCenterTabContext} from '../../hooks/useCenterTab'
 import type {CenterTab} from '../../models/ui-state'
 import {AGREED_SKETCH_MARK} from '../../models/sketch'
+import {ComposerAppendContext} from '../../hooks/useComposerAppend'
+import type {ComposerAppendRef} from '../../hooks/useComposerAppend'
+import {ComposerContext} from '../../hooks/useComposer'
+import type {Composer} from '../../hooks/useComposer'
+import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../../test/desktop-driver'
+import {installBackend} from '../../test/backend'
+import {flush} from '../../test/flush'
 import type {UserQuestionPrompt, UserQuestionResponse} from '../../models/brief'
 import type {ToolActivity} from '../../models/chat'
 
@@ -59,23 +66,222 @@ const TWO = [
     {label: 'Side rail', html: '<p>b</p>'}
 ]
 
+/** Only `meta.supportsImages` is read from here; the rest is what the type asks for. */
+const seeingComposer = (): Composer => ({
+    state: {
+        draft: '',
+        draftAttachments: [],
+        selectedModel: 'test-model',
+        thinkingLevel: 'off',
+        usage: {context: 0, total: 0}
+    },
+    actions: {
+        applyModel: vi.fn(),
+        attachClipboardImage: vi.fn(),
+        applyThinkingLevel: vi.fn(),
+        changeDraft: vi.fn(),
+        clearError: vi.fn(),
+        compact: vi.fn(),
+        editAttachment: vi.fn(),
+        plan: vi.fn(),
+        removeAttachment: vi.fn(),
+        selectAttachments: vi.fn(),
+        stop: vi.fn(),
+        submit: vi.fn()
+    },
+    meta: {
+        canAttachImages: true,
+        canCompact: false,
+        canQueue: false,
+        contextWindow: 1000,
+        isSavingAttachments: false,
+        isPlanOffered: false,
+        isStreaming: false,
+        models: [],
+        supportsImages: true,
+        thinkingLevels: []
+    }
+})
+
 const show = (
     tool: ToolActivity,
     questions: readonly UserQuestionPrompt[] = [],
-    answer = vi.fn<(response: UserQuestionResponse) => void>()
+    answer = vi.fn<(response: UserQuestionResponse) => void>(),
+    appendRef: ComposerAppendRef = {current: null}
 ) => {
     const openTab = vi.fn<(tab: CenterTab) => void>()
     const view = render(
-        <OpenCenterTabContext value={openTab}>
-            <AskedQuestionsContext value={{questions, answer}}>
-                <AskBlock tool={tool} />
-            </AskedQuestionsContext>
-        </OpenCenterTabContext>
+        <ComposerAppendContext value={appendRef}>
+            <ComposerContext value={seeingComposer()}>
+                <OpenCenterTabContext value={openTab}>
+                    <AskedQuestionsContext value={{questions, answer}}>
+                        <AskBlock tool={tool} />
+                    </AskedQuestionsContext>
+                </OpenCenterTabContext>
+            </ComposerContext>
+        </ComposerAppendContext>
     )
-    return {answer, openTab, view}
+    return {answer, appendRef, openTab, view}
 }
 
-const answerBox = () => screen.getByRole('textbox', {name: /Your answer/u})
+const answerBox = () => screen.getByRole('combobox', {name: /Your answer/u})
+
+const answerText = () => answerBox().textContent
+
+const tauri = createDesktopFake()
+
+const FILES = [
+    {path: 'assets/hero.png', bytes: 900},
+    {path: 'scripts/player.gd', bytes: 200}
+]
+
+describe('answering with a file decorator', () => {
+    beforeEach(() => {
+        installDesktopFake(tauri)
+        installBackend(tauri, {files: FILES, thumbnails: {}})
+    })
+
+    afterEach(() => {
+        removeDesktopFake()
+        tauri.invoke.mockReset()
+    })
+
+    it('opens the workspace file menu on @, the same as the composer does', async () => {
+        show(call(), [question()])
+        await flush()
+        const user = userEvent.setup()
+
+        await user.click(answerBox())
+        await user.type(answerBox(), '@player')
+
+        expect(
+            within(screen.getByRole('listbox')).getByRole('option', {name: /player\.gd/u})
+        ).toBeInTheDocument()
+    })
+
+    it('turns the file the user picked into the path the agent reads', async () => {
+        const {answer} = show(call(), [question()])
+        await flush()
+        const user = userEvent.setup()
+
+        await user.click(answerBox())
+        await user.type(answerBox(), '@player{Enter}')
+        await user.click(screen.getByRole('button', {name: 'Send'}))
+
+        expect(answer).toHaveBeenCalledWith(expect.objectContaining({answer: '@scripts/player.gd'}))
+    })
+
+    it('sends on Enter once something has been typed', async () => {
+        const {answer} = show(call(), [question()])
+        await flush()
+        const user = userEvent.setup()
+
+        await user.click(answerBox())
+        await user.type(answerBox(), 'its own scene{Enter}')
+
+        expect(answer).toHaveBeenCalledWith(
+            expect.objectContaining({questionId: 'q-1', answer: 'its own scene'})
+        )
+    })
+
+    it('keeps Enter as a newline while the box is empty', async () => {
+        const {answer} = show(call(), [question()])
+        await flush()
+        const user = userEvent.setup()
+
+        await user.click(answerBox())
+        await user.type(answerBox(), '{Enter}')
+
+        expect(answer).not.toHaveBeenCalled()
+    })
+
+    it('writes a new line rather than sending on shift+Enter', async () => {
+        const {answer} = show(call(), [question()])
+        await flush()
+        const user = userEvent.setup()
+
+        await user.click(answerBox())
+        await user.type(answerBox(), 'first{Shift>}{Enter}{/Shift}second')
+
+        expect(answer).not.toHaveBeenCalled()
+        expect(answerText()).toContain('first')
+        expect(answerText()).toContain('second')
+    })
+})
+
+const filePicker = (container: HTMLElement) => {
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')
+    if (!input) throw new Error('the answer offers no way to attach an image')
+    return input
+}
+
+describe('a reference sent while a question is waiting', () => {
+    beforeEach(() => {
+        installDesktopFake(tauri)
+        installBackend(tauri, {files: FILES, thumbnails: {}})
+    })
+
+    afterEach(() => {
+        removeDesktopFake()
+        tauri.invoke.mockReset()
+    })
+
+    it('lands in the answer, not in a draft nobody can see', async () => {
+        const held: ComposerAppendRef = {current: null}
+        const {appendRef} = show(call(), [question()], undefined, held)
+        await flush()
+
+        expect(appendRef.current).not.toBeNull()
+        const landed = appendRef.current?.(() => '@assets/hero.png ', true)
+
+        expect(landed).toBe(true)
+        await waitFor(() => {
+            expect(answerText()).toContain('@assets/hero.png')
+        })
+    })
+})
+
+describe('answering with a picture', () => {
+    beforeEach(() => {
+        installDesktopFake(tauri)
+        installBackend(tauri, {files: FILES, thumbnails: {}})
+    })
+
+    afterEach(() => {
+        removeDesktopFake()
+        tauri.invoke.mockReset()
+    })
+
+    it('sends the attached image beside the words', async () => {
+        const {answer, view} = show(call(), [question()])
+        await flush()
+        const user = userEvent.setup()
+        const shot = new File([new Uint8Array([1, 2, 3])], 'shot.png', {type: 'image/png'})
+
+        await user.upload(filePicker(view.container), shot)
+        await screen.findByRole('img', {name: /Attached image: shot\.png/u})
+        await user.click(screen.getByRole('button', {name: 'Send'}))
+
+        expect(answer).toHaveBeenCalledWith(
+            expect.objectContaining({
+                images: [expect.objectContaining({name: 'shot.png', mimeType: 'image/png'})]
+            })
+        )
+    })
+
+    it('lets a picture alone be the whole answer', async () => {
+        const {view} = show(call(), [question()])
+        await flush()
+        const user = userEvent.setup()
+        const shot = new File([new Uint8Array([1, 2, 3])], 'shot.png', {type: 'image/png'})
+
+        expect(screen.getByRole('button', {name: 'Send'})).toBeDisabled()
+        await user.upload(filePicker(view.container), shot)
+        await screen.findByRole('img', {name: /Attached image: shot\.png/u})
+
+        expect(screen.getByRole('button', {name: 'Send'})).toBeEnabled()
+    })
+})
 
 describe('one question, in the feed', () => {
     it('sends an option the moment it is pressed', async () => {
@@ -148,7 +354,7 @@ describe('one question, in the feed', () => {
         )
 
         expect(screen.getByText('Round 2')).toBeInTheDocument()
-        expect(answerBox()).toHaveValue('')
+        expect(answerText()).toBe('')
     })
 
     it('leaves the caret where the user is typing, and takes it when nobody is', () => {
@@ -184,7 +390,7 @@ describe('one question, in the feed', () => {
         )
 
         expect(screen.getByText('And where does the HUD sit?')).toBeInTheDocument()
-        expect(answerBox()).toHaveValue('')
+        expect(answerText()).toBe('')
     })
 
     it('offers another round on an ordinary question', async () => {

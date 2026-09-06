@@ -41,7 +41,10 @@ async function shoot(name: string) {
 async function sendChat(prompt: string) {
     await releaseModifiers()
     await expectText(['Ask anything'], {allow: ['could not be read'], limitMs: 120_000})
-    const composer = browser.$('[role="combobox"]')
+    // A waiting question puts a second rich input on screen; only the composer sits in the footer.
+    const composer = browser.$(
+        '.astryx-chat-composer [role="combobox"], .astryx-chat-composer [role="textbox"]'
+    )
     await composer.waitForDisplayed({timeout: 15_000})
     for (let attempt = 0; attempt < 3; attempt++) {
         await composer.click()

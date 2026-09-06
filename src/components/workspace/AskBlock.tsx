@@ -1,4 +1,4 @@
-import {useEffect, useMemo, useRef, useState} from 'react'
+import {use, useEffect, useMemo, useRef, useState} from 'react'
 import {Badge} from '@astryxdesign/core/Badge'
 import {Banner} from '@astryxdesign/core/Banner'
 import {Button} from '@astryxdesign/core/Button'
@@ -10,8 +10,16 @@ import {Heading} from '@astryxdesign/core/Text'
 import {Spinner} from '@astryxdesign/core/Spinner'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {Text} from '@astryxdesign/core/Text'
-import {TextArea} from '@astryxdesign/core/TextArea'
 import {Token} from '@astryxdesign/core/Token'
+import type {ChatComposerInputHandle} from '@astryxdesign/core/Chat'
+import {TextField} from '../TextField'
+import {AttachmentPicker, AttachmentThumbnails, GameCapturePicker} from './AttachmentControls'
+import {clipboardItemImages, imageFiles} from '../../utils/chat-images'
+import {useAppendTarget} from '../../hooks/useAppendTarget'
+import {useAttachmentPool} from '../../hooks/useAttachmentPool'
+import {useFileMentionTrigger} from '../../hooks/useFileMentionTrigger'
+import {ComposerContext} from '../../hooks/useComposer'
+import {isTauri} from '../../services/desktop'
 import {useAskedQuestion, useUnownedQuestion} from '../../hooks/useUserQuestions'
 import {useOpenCenterTab} from '../../hooks/useCenterTab'
 import {SKETCH_CANVAS, holdsAgreedSketch} from '../../models/sketch'
@@ -213,6 +221,13 @@ type AskingProps = Readonly<{
 
 function Asking({prompt, onAnswer, canAskAgain = true}: AskingProps) {
     const block = useRef<HTMLDivElement>(null)
+    const answerInput = useRef<ChatComposerInputHandle>(null)
+    const fileMentions = useFileMentionTrigger()
+    const keepRoot = useAppendTarget(answerInput)
+    const [attachError, setAttachError] = useState<string>()
+    const pictures = useAttachmentPool(setAttachError)
+    const supportsImages = use(ComposerContext)?.meta.supportsImages ?? false
+    const canAttach = supportsImages && isTauri()
     const [draft, setDraft] = useState('')
     const [picked, setPicked] = useState<number>()
     const [opened, setOpened] = useState<number>()
@@ -224,6 +239,8 @@ function Asking({prompt, onAnswer, canAskAgain = true}: AskingProps) {
         setPicked(undefined)
         setOpened(undefined)
         setBlocked([])
+        pictures.clear()
+        setAttachError(undefined)
     }
 
     const answer = draft.trim()
@@ -239,12 +256,16 @@ function Asking({prompt, onAnswer, canAskAgain = true}: AskingProps) {
         [blocked, sketches]
     )
     const zoomed = opened === undefined ? undefined : sketches[opened]
-    const hasAnswer = answer.length > 0 || picked !== undefined
+    const hasAnswer = answer.length > 0 || picked !== undefined || pictures.attachments.length > 0
     const canApprove = !isVisual || picked !== undefined
 
     useEffect(() => {
         block.current?.scrollIntoView({block: 'end', behavior: 'smooth'})
     }, [prompt.questionId, prompt.revision, prompt.sketches])
+
+    useEffect(() => {
+        if (takesFocus) answerInput.current?.focus()
+    }, [takesFocus])
 
     const isRecommended = (index: number) => index === 0 && prompt.options.length > 1
 
@@ -257,6 +278,13 @@ function Asking({prompt, onAnswer, canAskAgain = true}: AskingProps) {
         onAnswer({
             questionId: prompt.questionId,
             answer,
+            ...(pictures.attachments.length > 0 && {
+                images: pictures.attachments.map(attachment => ({
+                    name: attachment.name,
+                    mimeType: attachment.mimeType,
+                    data: attachment.data
+                }))
+            }),
             ...(picked !== undefined && {picked}),
             blocked: refused,
             ...extra
@@ -390,13 +418,81 @@ function Asking({prompt, onAnswer, canAskAgain = true}: AskingProps) {
                             description={`Nothing outside Gofer is allowed to load here, so ${refused.join(', ')} never arrived. The agent is told, so it can inline them instead — judge the layout, not the missing pieces.`}
                         />
                     )}
-                    <TextArea
-                        label='Your answer'
-                        rows={2}
-                        value={draft}
-                        hasAutoFocus={takesFocus}
-                        onChange={setDraft}
-                    />
+                    <VStack gap={1}>
+                        <HStack
+                            gap={2}
+                            align='center'
+                        >
+                            <StackItem size='fill'>
+                                <Text type='supporting'>Your answer</Text>
+                            </StackItem>
+                            <AttachmentPicker
+                                canAttach={canAttach}
+                                supportsImages={supportsImages}
+                                onSelect={files => {
+                                    void pictures.select(files)
+                                }}
+                            />
+                            <GameCapturePicker
+                                canAttach={canAttach}
+                                supportsImages={supportsImages}
+                                onSelect={files => {
+                                    void pictures.select(files)
+                                }}
+                                onError={setAttachError}
+                            />
+                        </HStack>
+                        <TextField
+                            kind='rich'
+                            label='Your answer'
+                            value={draft}
+                            maxRows={6}
+                            handleRef={answerInput}
+                            rootRef={keepRoot}
+                            triggers={[fileMentions.trigger]}
+                            canSubmit={hasAnswer}
+                            onKeyDown={fileMentions.onKeyDown}
+                            onSubmit={() => {
+                                send(prompt.isDelegated ? {again: true} : {})
+                            }}
+                            onChange={setDraft}
+                            onFiles={files => {
+                                const images = imageFiles(files)
+                                if (!canAttach || images.length === 0) return
+                                void pictures.select(images)
+                            }}
+                            onPaste={(event, text) => {
+                                if (!canAttach) return undefined
+                                const images = clipboardItemImages(event.clipboardData)
+                                if (images.length > 0) {
+                                    void pictures.select(images)
+                                    return true
+                                }
+                                if (text !== '') return undefined
+                                void pictures.attachClipboardImage()
+                                return true
+                            }}
+                        />
+                        {pictures.attachments.length > 0 && (
+                            <AttachmentThumbnails
+                                attachments={pictures.attachments}
+                                isDisabled={false}
+                                onEdit={pictures.edit}
+                                onRemove={pictures.remove}
+                            />
+                        )}
+                        {attachError !== undefined && (
+                            <Banner
+                                status='error'
+                                title='That image could not be attached'
+                                description={attachError}
+                                isDismissable
+                                onDismiss={() => {
+                                    setAttachError(undefined)
+                                }}
+                            />
+                        )}
+                    </VStack>
                     <HStack
                         gap={2}
                         justify='end'

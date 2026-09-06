@@ -47,7 +47,10 @@ async function newTask(ask: string, mode: 'basic' | 'planned') {
     await endTurn()
     await clickText('New task', 60_000)
     await clickButton('Create task')
-    const composer = browser.$('[role="combobox"]')
+    // A waiting question puts a second rich input on screen; only the composer sits in the footer.
+    const composer = browser.$(
+        '.astryx-chat-composer [role="combobox"], .astryx-chat-composer [role="textbox"]'
+    )
     await composer.waitForDisplayed({timeout: 60_000})
     await composer.click()
     await composer.setValue(ask)
