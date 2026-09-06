@@ -673,8 +673,12 @@ export async function invokeCommand<Answer>(
     ) as Promise<Answer>
 }
 
+// Asking the DOM, not a media query: the frame's breakpoint has moved once already and a copy
+// of it here silently reports the wrong layout for every width in between.
 export async function isNarrowLayout(): Promise<boolean> {
-    return browser.execute(() => window.matchMedia('(max-width: 1024px)').matches)
+    return browser.execute(
+        () => document.querySelector('[role="complementary"][aria-label="Inspector"]') === null
+    )
 }
 
 export async function regionText(label: string): Promise<string> {
