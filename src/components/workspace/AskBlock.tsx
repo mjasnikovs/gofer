@@ -445,6 +445,7 @@ function Asking({prompt, onAnswer, canAskAgain = true}: AskingProps) {
                         <TextField
                             kind='rich'
                             label='Your answer'
+                            placeholder=''
                             value={draft}
                             maxRows={6}
                             handleRef={answerInput}
