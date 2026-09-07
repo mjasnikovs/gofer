@@ -100,7 +100,7 @@ export function apisPrompt(refined, {inventory, files, canSearch} = {}) {
     )
 }
 
-export function contextPrompt(refined, {inventory} = {}) {
+export function contextPrompt(refined, {inventory, files} = {}) {
     return (
         `${WORKER_RULES}\n\n`
         + 'Your job is HOW THIS PROJECT WORKS where the task touches it. Structure, conventions, and '
@@ -112,6 +112,7 @@ export function contextPrompt(refined, {inventory} = {}) {
         + '- every scene under levels/ instances player/player.tscn rather than its own\n'
         + '- unverified: input actions look like they are defined in the project settings, not code\n\n'
         + block('PROJECT FILES', inventory)
+        + block('FILES THIS TASK TOUCHES — start here rather than looking for them again:', files)
         + `TASK\n${refined}`
     )
 }

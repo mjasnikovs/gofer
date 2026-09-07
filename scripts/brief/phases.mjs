@@ -95,7 +95,8 @@ export const RESEARCH_WORKERS = [
         section: 'CONTEXT',
         label: 'context',
         toolNames: ['read', 'bash'],
-        build: (refined, deps) => contextPrompt(refined, {inventory: deps.inventory})
+        build: (refined, deps, done) =>
+            contextPrompt(refined, {inventory: deps.inventory, files: done.FILES})
     },
     {
         section: 'TOOLING',

@@ -170,6 +170,13 @@ test('the APIS worker is handed the finished FILES map', async () => {
     assert.match(worker.calls[1].prompt, /src\/player\.gd {2}moves/u)
 })
 
+/** It read Gofer's own addon for want of anywhere to start. */
+test('the CONTEXT worker is handed the finished FILES map', async () => {
+    const worker = scriptedWorker([ok('FILES\n  src/menu.gd  paused'), ok('b'), ok('c'), ok('d')])
+    await research(REFINED, {runWorker: worker.run})
+    assert.match(worker.calls[2].prompt, /src\/menu\.gd {2}paused/u)
+})
+
 test('the tooling worker is not shown the per-file checklist', () => {
     const bulleted = 'GOAL\nMake the HUD work.\n- edit a.gd\n- edit b.gd\n\nCONSTRAINTS\n- none\n'
     assert.equal(scopedGoal(bulleted), 'Make the HUD work.')
