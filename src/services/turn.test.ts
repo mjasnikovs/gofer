@@ -500,6 +500,35 @@ describe('createTurnRunner', () => {
             expect(sent[1]?.messages.map(message => message.text)).toEqual(['go'])
         })
 
+        it('answers below the divider rather than streaming in above it', async () => {
+            const {runner, answerCompact, idle} = harness(
+                {events: [{type: 'text-delta', delta: 'first time'}]},
+                {events: [{type: 'text-delta', delta: 'second time'}]}
+            )
+            answerCompact({
+                agentMessages: [{role: 'compactionSummary'}],
+                summarised: 4,
+                tokensBefore: 900,
+                tokensAfter: 120
+            })
+
+            runner.start('go')
+            await idle()
+            await runner.compact()
+            const summarised = reply(runner.state())
+
+            runner.retry(summarised.id)
+            await idle()
+
+            const {messages} = runner.state()
+            expect(messages).toHaveLength(3)
+            expect(messages[1]?.id).toBe(summarised.id)
+            expect(messages[1]?.text).toBe('first time')
+            expect(messages[1]?.compaction?.messages).toBe(4)
+            expect(messages[2]?.text).toBe('second time')
+            expect(messages[2]?.compaction).toBeUndefined()
+        })
+
         it('refuses a reply that is not the last one', async () => {
             const {runner, sent, idle} = harness({}, {})
 

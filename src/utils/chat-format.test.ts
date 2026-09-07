@@ -53,6 +53,17 @@ describe('context usage', () => {
         expect(messageUsage([compacted, answered(2, 9_000)]).context).toBe(9_000)
     })
 
+    // A retry reopens the message the compaction was stamped on, so both numbers sit on one
+    // message and only the order they were written in says which is current.
+    it('lets a reopened message report the context again', () => {
+        const retried: Message = {
+            ...answered(2, 60_000),
+            context: 60_000,
+            compaction: {messages: 6, tokensBefore: 121_211, tokensAfter: 111_493}
+        }
+        expect(messageUsage([answered(1, 4_000), retried]).context).toBe(60_000)
+    })
+
     it('warns before the wall and not on it', () => {
         expect(contextProgressVariant(21_000, WINDOW)).toBe('success')
         expect(contextProgressVariant(96_051, WINDOW)).toBe('success')

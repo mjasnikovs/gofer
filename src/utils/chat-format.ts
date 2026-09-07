@@ -5,13 +5,10 @@ export function messageUsage(messages: readonly Message[]) {
     let context = 0
     for (const message of messages) {
         const tokens = message.usage?.totalTokens
-        if (tokens !== undefined) {
-            total += tokens
-            context = tokens
-        }
-        // A compaction adds no message of its own, so the one it is stamped on still reports the
-        // size it just shrank. Read after the usage, because the cut happened after the answer.
-        if (message.compaction) context = message.compaction.tokensAfter
+        if (tokens !== undefined) total += tokens
+        // `compaction` is the fallback for chats stored before `context` existed.
+        const size = message.context ?? message.compaction?.tokensAfter ?? tokens
+        if (size !== undefined) context = size
     }
     return {total, context}
 }

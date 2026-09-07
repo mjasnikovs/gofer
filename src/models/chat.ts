@@ -16,6 +16,9 @@ export type Message = Readonly<{
     tools?: readonly ToolActivity[]
     parts?: readonly MessagePart[]
     usage?: TokenUsage
+    // What the transcript measures right now. A usage reports it, a compaction predicts it, and
+    // whichever wrote last is the truth — which `usage` alone cannot say, both landing on one message.
+    context?: number
     model?: string
     status?: 'streaming' | 'complete' | 'error' | 'aborted' | 'queued'
     activity?: string

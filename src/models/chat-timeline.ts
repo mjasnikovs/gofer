@@ -301,7 +301,12 @@ export function applyStreamEvent(message: Message, event: AiStreamEvent): Messag
                 })
             }
         case 'usage':
-            return {...message, usage: event.usage, model: event.model}
+            return {
+                ...message,
+                usage: event.usage,
+                context: event.usage.totalTokens,
+                model: event.model
+            }
         case 'tool-cost': {
             if (event.ids.length === 0) return message
             const share = Math.floor(event.tokens / event.ids.length)
@@ -334,6 +339,7 @@ export function applyStreamEvent(message: Message, event: AiStreamEvent): Messag
                     )
                 ),
                 usage: event.usage,
+                context: event.usage.totalTokens,
                 model: event.model,
                 status: event.stopReason === 'aborted' ? 'aborted' : 'complete',
                 ...(thinking !== undefined && {thinking})

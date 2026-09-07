@@ -175,8 +175,19 @@ export function createTurnRunner({send, cancel, steer, compact}: TurnDependencie
         // One turn now answers more than once: a steered message opens a fresh assistant beneath it.
         let assistantId = turn.assistantId
 
+        // The divider is drawn under the message it is stamped on, so reopening that message would
+        // stream the new answer above the line and leave it pinned over the composer. The
+        // summarised answer is left as it was and this one opens below the line instead.
+        const summarised = current.messages.find(message => message.id === assistantId)
+        let conversation = turn.conversation
+        if (summarised?.compaction) {
+            const opened = streamingAssistant()
+            conversation = [...turn.conversation.slice(0, -1), settle(summarised), opened]
+            assistantId = opened.id
+        }
+
         activeRequestId = requestId
-        publish({...cleared(current), messages: turn.conversation, isStreaming: true})
+        publish({...cleared(current), messages: conversation, isStreaming: true})
 
         // The steered message reached the model, so it stops being queued, and the answer it
         // interrupted settles. Its tools have all ended by this point, so nothing is errored.
@@ -420,6 +431,7 @@ export function createTurnRunner({send, cancel, steer, compact}: TurnDependencie
                     message.id === last.id ?
                         {
                             ...message,
+                            context: settled.tokensAfter,
                             compaction: {
                                 messages: settled.summarised,
                                 tokensBefore: settled.tokensBefore,
