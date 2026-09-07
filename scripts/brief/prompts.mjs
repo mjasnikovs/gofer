@@ -151,7 +151,7 @@ export function scopedGoal(refined) {
     return bullet === -1 ? goal : goal.slice(0, bullet).trim()
 }
 
-export function grillPrompt(refined, research, {asked} = {}) {
+export function grillPrompt(refined, research, {decisions} = {}) {
     return (
         'You are finding the questions that must be settled before this task can be specified. Ask '
         + 'only what the research below does not already answer and what would change what gets '
@@ -162,7 +162,14 @@ export function grillPrompt(refined, research, {asked} = {}) {
         + 'B: <the realistic alternative>\n'
         + 'WHY: <one sentence on what turns on this>\n\n'
         + 'If everything that matters is already settled, answer exactly `NONE` and nothing else.\n\n'
-        + block('ALREADY ASKED — do not ask any of these again, in any wording:', asked)
+        + block(
+            'DECISIONS SO FAR — every question already put and how it came back. Never ask one of '
+                + 'these again, in any wording. Read the ANSWERS, not only the questions: an answer '
+                + 'that picked something the task did not anticipate opens the next question, an '
+                + 'answer that asked you for options is not settled, and an answer can make a question '
+                + 'you were about to ask irrelevant.',
+            decisions
+        )
         + `RESEARCH\n${research}\n\n`
         + `TASK\n${refined}`
     )
@@ -236,5 +243,50 @@ export function composePrompt(refined, research, answers) {
         + `RESEARCH\n${research}\n\n`
         + block('DECISIONS — settled, and binding:', answers)
         + `TASK\n${refined}`
+    )
+}
+
+export function verifyToolingPrompt(commands) {
+    return (
+        'Run each command below in this project, exactly as written, and report which of them work. '
+        + 'You are checking the COMMANDS, not the project: a command that runs and reports a real '
+        + 'failure in the code still works.\n\n'
+        + 'Run every one of them before you answer. A command you did not run is rejected.\n\n'
+        + 'Answer in exactly these two sections, with the headings bare on their own lines and '
+        + 'nothing before the first one. Either section may be empty:\n\n'
+        + 'VERIFIED\n'
+        + '  <the command, exactly as it was given>  <what running it proved>\n\n'
+        + 'REJECTED\n'
+        + '  <the command, exactly as it was given>  <what went wrong>\n\n'
+        + 'Reject a command that does not exist, that cannot start, that never finishes, or that '
+        + 'answers differently on two runs. A flaky command is worse than an absent one: it fails '
+        + 'work that is correct.\n\n'
+        + `COMMANDS\n${commands.join('\n')}`
+    )
+}
+
+export function critiquePrompt(spec, refined, research, answers) {
+    return (
+        'Correct one implementation specification. It was written from the task, the research and '
+        + 'the decisions below, all of which are authoritative; the specification is not.\n\n'
+        + 'Look for these four faults, in this order:\n'
+        + '- A CONSTRAINT that none of the task, the decisions or the research supports. It was '
+        + 'invented. Delete it.\n'
+        + '- A CONSTRAINT that contradicts the research. The research wins. Delete it.\n'
+        + '- A VERIFY check that proves a step rather than the goal. The goal names what a person '
+        + 'ends up able to do; if it names an action — a click, a key, a drag — the check has to '
+        + 'perform that action and assert what it produced. A check that calls the code directly '
+        + 'passes on a feature nobody can reach.\n'
+        + '- A STEP or a check naming a file or command that is in neither the research nor the '
+        + 'task. Replace it with one that is, or delete it.\n\n'
+        + 'Answer with the WHOLE corrected specification and nothing else: the same four sections, '
+        + 'in the same order, with the headings bare on their own lines. Do not add a section, do '
+        + 'not explain what you changed, and do not write the implementation.\n\n'
+        + 'Change nothing you cannot fault. A specification with no fault comes back exactly as it '
+        + 'went in.\n\n'
+        + `RESEARCH\n${research}\n\n`
+        + block('DECISIONS — settled, and binding:', answers)
+        + `TASK\n${refined}\n\n`
+        + `SPECIFICATION\n${spec}`
     )
 }

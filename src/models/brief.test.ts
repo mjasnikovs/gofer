@@ -164,8 +164,9 @@ describe('reading what arrived', () => {
 
     it('rejects a phase it cannot draw a row for', () => {
         expect(isBriefEvent({type: 'brief-phase-start', phase: 'grill'})).toBe(true)
-        expect(isBriefEvent({type: 'brief-phase-start', phase: 'critique'})).toBe(false)
-        expect(isBriefEvent({type: 'brief-phase', phase: 'critique', field: 'x', value: 'y'})).toBe(
+        expect(isBriefEvent({type: 'brief-phase-start', phase: 'critique'})).toBe(true)
+        expect(isBriefEvent({type: 'brief-phase-start', phase: 'rehearse'})).toBe(false)
+        expect(isBriefEvent({type: 'brief-phase', phase: 'rehearse', field: 'x', value: 'y'})).toBe(
             false
         )
     })

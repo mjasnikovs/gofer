@@ -2,7 +2,8 @@ export const BRIEF_PHASES = [
     {name: 'refine', field: 'refined'},
     {name: 'research', field: 'research'},
     {name: 'grill', field: 'qa'},
-    {name: 'compose', field: 'spec'}
+    {name: 'compose', field: 'spec'},
+    {name: 'critique', field: 'spec'}
 ]
 
 export const BRIEF_STATUSES = ['running', 'done', 'failed', 'stopped']

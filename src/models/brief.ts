@@ -1,6 +1,6 @@
 import type {Sketch} from './sketch'
 
-export const BRIEF_PHASES = ['refine', 'research', 'grill', 'compose'] as const
+export const BRIEF_PHASES = ['refine', 'research', 'grill', 'compose', 'critique'] as const
 
 export type BriefPhase = (typeof BRIEF_PHASES)[number]
 
@@ -10,7 +10,8 @@ export const BRIEF_PHASE_FIELDS: Readonly<Record<BriefPhase, string>> = {
     refine: 'refined',
     research: 'research',
     grill: 'qa',
-    compose: 'spec'
+    compose: 'spec',
+    critique: 'spec'
 }
 
 type LastPhase =
@@ -24,7 +25,8 @@ export const BRIEF_PHASE_LABELS: Readonly<Record<BriefPhase, string>> = {
     refine: 'Sharpening the ask',
     research: 'Reading the project',
     grill: 'Settling the questions',
-    compose: 'Writing the spec'
+    compose: 'Writing the spec',
+    critique: 'Checking the spec'
 }
 
 export const RESEARCH_SECTIONS = ['FILES', 'APIS', 'CONTEXT', 'TOOLING'] as const

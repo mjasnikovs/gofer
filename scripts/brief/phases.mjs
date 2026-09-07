@@ -1,15 +1,24 @@
 import {classifyWorkerOutcome, degradedSection, emptySection} from './outcome.mjs'
+import {findPhantomPaths, formatPathCorrections} from './phantom.mjs'
+import {applyRefutations} from './refuted.mjs'
+import {
+    extractToolingCommands,
+    parseVerifyToolingOutput,
+    replaceToolingWithVerified
+} from './tooling.mjs'
 import {
     NO_COMMANDS,
     apisPrompt,
     autoAnswerPrompt,
     composePrompt,
     contextPrompt,
+    critiquePrompt,
     filesPrompt,
     grillPrompt,
     refinePrompt,
     scopedGoal,
-    toolingPrompt
+    toolingPrompt,
+    verifyToolingPrompt
 } from './prompts.mjs'
 
 export class PhaseFailed extends Error {
@@ -120,7 +129,58 @@ export async function research(refined, deps = {}) {
         done[worker.section] = text
         deps.onWorker?.(worker.section, verdict.kind)
     }
-    return RESEARCH_WORKERS.map(worker => done[worker.section]).join('\n\n')
+    const assembled = RESEARCH_WORKERS.map(worker => done[worker.section]).join('\n\n')
+    return await correctPaths(await verifyTooling(assembled, deps), refined, deps)
+}
+
+/**
+ * A worker that may degrade the phase rather than end it.
+ *
+ * `ask` throws on any cause, which is right for a research section — a missing one is a
+ * hole in the spec. These two run AFTER the sections are in hand, so their failure costs
+ * a correction, not the plan. Only a stop still propagates; nothing survives that.
+ */
+async function attempt(deps, spec) {
+    const verdict = classifyWorkerOutcome(await deps.runWorker(spec))
+    if (verdict.kind === 'stopped') throw new PhaseStopped('research')
+    return verdict.kind === 'ok' ? verdict.text : null
+}
+
+/**
+ * Run the commands TOOLING claims, and keep only the ones that ran.
+ *
+ * TOOLING is the one research section that is a claim about the future rather than a
+ * report of something read, and compose picks its VERIFY block out of it. An unrun
+ * command reaches the implementer as a step that always fails.
+ */
+export async function verifyTooling(research, deps = {}) {
+    const commands = extractToolingCommands(research)
+    if (commands.length === 0) return research
+    const answer = await attempt(deps, {
+        label: 'verify-tooling',
+        toolNames: ['read', 'bash'],
+        prompt: verifyToolingPrompt(commands)
+    })
+    if (answer === null) {
+        deps.log?.('the tooling commands could not be run; they reach the spec unverified')
+        return research
+    }
+    const {verified, rejected} = parseVerifyToolingOutput(answer)
+    for (const line of rejected) deps.log?.(`tooling rejected: ${line}`)
+    deps.onWorker?.('TOOLING', verified.length > 0 ? 'ok' : 'empty')
+    return replaceToolingWithVerified(research, verified)
+}
+
+/** Say so where the task names a file of this project that the project does not have. */
+async function correctPaths(research, refined, deps) {
+    if (!deps.workspacePath) return research
+    const missing = await findPhantomPaths(refined, deps.workspacePath, deps.pathExists)
+    const corrections = formatPathCorrections(missing)
+    if (corrections.length === 0) return research
+    deps.log?.(
+        `the task names ${String(missing.length)} path this project does not have: ${missing.join(', ')}`
+    )
+    return `${research}\n\n${corrections}`
 }
 
 export function parseQuestion(text) {
@@ -153,6 +213,10 @@ async function answerFromResearch(question, refined, research, deps) {
     return attempted.kind === 'ok' ? parseAutoAnswer(attempted.text) : null
 }
 
+export function formatAnswers(settled) {
+    return settled.map(entry => `- ${entry.question}\n  ${entry.answer}`).join('\n')
+}
+
 const sameQuestion = text =>
     text
         .toLowerCase()
@@ -161,13 +225,16 @@ const sameQuestion = text =>
 
 export async function grill(refined, research, deps = {}) {
     const settled = []
-    const asked = []
     const alreadyAsked = new Set()
     for (;;) {
+        // The whole Q&A goes forward, not the questions alone: a question is adaptive only
+        // if the model can see what the last answer decided, what it opened, and what it
+        // left unsettled. Feeding back the questions by themselves made every round after
+        // the first ask into a vacuum.
         const generated = await ask('grill', deps, {
             label: 'grill',
             toolNames: ['read'],
-            prompt: grillPrompt(refined, research, {asked: asked.join('\n')})
+            prompt: grillPrompt(refined, research, {decisions: formatAnswers(settled)})
         })
         if (generated.kind !== 'ok') break
         const question = parseQuestion(generated.text)
@@ -177,7 +244,6 @@ export async function grill(refined, research, deps = {}) {
         // and with the answering setting on, no user sees it happening.
         if (alreadyAsked.has(sameQuestion(question.question))) break
         alreadyAsked.add(sameQuestion(question.question))
-        asked.push(`- ${question.question}`)
 
         const automatic = await answerFromResearch(question, refined, research, deps)
         if (automatic) {
@@ -207,10 +273,6 @@ export async function grill(refined, research, deps = {}) {
         if (stopAsking) break
     }
     return settled
-}
-
-export function formatAnswers(settled) {
-    return settled.map(entry => `- ${entry.question}\n  ${entry.answer}`).join('\n')
 }
 
 function verifyBlockBody(spec) {
@@ -304,7 +366,9 @@ const NEEDS_VERIFY =
     + 'fill the block. Nothing else about the draft needs to change.\n\n'
 
 export async function compose(refined, researchText, settled, deps = {}) {
-    const prompt = composePrompt(refined, researchText, formatAnswers(settled ?? []))
+    const dropped = applyRefutations(refined, researchText)
+    for (const line of dropped.trail) deps.log?.(line)
+    const prompt = composePrompt(dropped.refined, researchText, formatAnswers(settled ?? []))
     for (const attempt of [prompt, `${NEEDS_VERIFY}${prompt}`]) {
         const verdict = await ask('compose', deps, {
             label: 'compose',
@@ -317,4 +381,38 @@ export async function compose(refined, researchText, settled, deps = {}) {
         deps.log?.('compose wrote a specification with no VERIFY block; asking again')
     }
     throw new PhaseFailed('compose', 'it could not write a specification that can be verified')
+}
+
+const CRITIQUE_KEPT = 'the critique could not be read as a specification; the composed one stands'
+
+/**
+ * Read the finished spec back against the task, the research and the decisions.
+ *
+ * Compose writes in one pass with no tools and everything it needs in the prompt, so it
+ * cannot notice that it hardened an invention or that its VERIFY block proves a step
+ * instead of the goal. This is the only phase whose input is a spec.
+ *
+ * It can only ever return a spec: a critique that comes back unreadable, or does not come
+ * back, leaves the composed one exactly as it was. A correction step must not be able to
+ * cost the plan the answer it already had.
+ */
+export async function critique(refined, researchText, settled, spec, deps = {}) {
+    const verdict = classifyWorkerOutcome(
+        await deps.runWorker({
+            label: 'critique',
+            toolNames: [],
+            prompt: critiquePrompt(spec, refined, researchText, formatAnswers(settled ?? []))
+        })
+    )
+    if (verdict.kind === 'stopped') throw new PhaseStopped('critique')
+    if (verdict.kind !== 'ok') {
+        deps.log?.('the critique did not answer; the composed specification stands')
+        return spec
+    }
+    const corrected = stripPreamble(verdict.text)
+    if (!parseVerifyBlock(corrected) && !declaresNoCommands(corrected)) {
+        deps.log?.(CRITIQUE_KEPT)
+        return spec
+    }
+    return corrected
 }

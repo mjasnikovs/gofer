@@ -5,6 +5,7 @@ import {
     PhaseStopped,
     RESEARCH_WORKERS,
     compose,
+    critique,
     declaresNoCommands,
     formatAnswers,
     grill,
@@ -14,7 +15,8 @@ import {
     parseVerifyPoints,
     refine,
     research,
-    stripPreamble
+    stripPreamble,
+    verifyTooling
 } from './phases.mjs'
 import {scopedGoal} from './prompts.mjs'
 
@@ -63,13 +65,14 @@ test('research assembles its four sections in a fixed order', async () => {
         ok('FILES\n  a.gd  changed'),
         ok('APIS\n  Node.ready()'),
         ok('CONTEXT\n- it is a project'),
-        ok('TOOLING\n  npm test  runs')
+        ok('TOOLING\n  npm test  runs'),
+        ok('VERIFIED\n  npm test  the suite runs')
     ])
     const text = await research(REFINED, {runWorker: worker.run})
 
     assert.deepEqual(
         worker.calls.map(call => call.label),
-        ['worker:files', 'worker:apis', 'worker:context', 'worker:tooling']
+        ['worker:files', 'worker:apis', 'worker:context', 'worker:tooling', 'verify-tooling']
     )
     assert.ok(text.indexOf('FILES') < text.indexOf('APIS'))
     assert.ok(text.indexOf('APIS') < text.indexOf('CONTEXT'))
@@ -82,11 +85,12 @@ test('a worker with nothing to say is retried once, then recorded as empty', asy
         failed('no-answer'),
         ok('APIS\n  x'),
         ok('CONTEXT\n- y'),
-        ok('TOOLING\n  z')
+        ok('TOOLING\n  z'),
+        ok('VERIFIED\n  z  it runs')
     ])
     const text = await research(REFINED, {runWorker: worker.run})
 
-    assert.equal(worker.calls.length, 5)
+    assert.equal(worker.calls.length, 6)
     assert.match(worker.calls[1].prompt, /^STOP\. Your previous attempt returned an EMPTY answer/u)
     assert.match(text, /\(none — the FILES worker ran and reported nothing/u)
 })
@@ -243,12 +247,14 @@ test('turned on, it answers from research where it can and asks where it cannot'
     assert.deepEqual(asked, ['When does the menu live?'])
 })
 
-test('what has been asked already travels into the next question', async () => {
+test('the whole Q&A travels into the next question, answers included', async () => {
     const worker = scriptedWorker([ok(QUESTION), ok('NONE')])
     await grill(REFINED, 'RESEARCH', {runWorker: worker.run, askUser: said('inside the HUD')})
-    assert.doesNotMatch(worker.calls[0].prompt, /ALREADY ASKED/u)
-    assert.match(worker.calls[1].prompt, /ALREADY ASKED/u)
+    assert.doesNotMatch(worker.calls[0].prompt, /DECISIONS SO FAR/u)
+    assert.match(worker.calls[1].prompt, /DECISIONS SO FAR/u)
     assert.match(worker.calls[1].prompt, /Where does the menu live\?/u)
+    // The answer is the half that was missing: without it a later question cannot react.
+    assert.match(worker.calls[1].prompt, /inside the HUD/u)
 })
 
 test('a skip is recorded as a decision, not as a missing answer', async () => {
@@ -469,4 +475,96 @@ test('a line that only looks like a tool call stays a shell command', () => {
     assert.deepEqual(parseVerifyPoints(broken), [
         {name: 'broken json', command: 'godot_runtime {"ops": ['}
     ])
+})
+
+const TOOLING_RESEARCH = [
+    'CONTEXT',
+    '- a project',
+    '',
+    'TOOLING',
+    '  npm test  runs',
+    '  make ship  ships'
+].join('\n')
+
+test('only the commands that ran reach the spec', async () => {
+    const worker = scriptedWorker([
+        ok('VERIFIED\n  npm test  0 failures\n\nREJECTED\n  make ship  no such target')
+    ])
+    const logged = []
+    const out = await verifyTooling(TOOLING_RESEARCH, {
+        runWorker: worker.run,
+        log: line => logged.push(line)
+    })
+
+    assert.equal(worker.calls[0].label, 'verify-tooling')
+    assert.deepEqual(worker.calls[0].toolNames, ['read', 'bash'])
+    assert.match(out, /npm test {2}0 failures/u)
+    assert.doesNotMatch(out, /make ship/u)
+    assert.match(logged.join('\n'), /tooling rejected: make ship/u)
+})
+
+test('a verifier that cannot answer degrades to the unverified list rather than ending the phase', async () => {
+    const worker = scriptedWorker([failed('model-error', 'the endpoint refused')])
+    const out = await verifyTooling(TOOLING_RESEARCH, {runWorker: worker.run})
+    assert.equal(out, TOOLING_RESEARCH)
+})
+
+test('a stop during verification is never degraded past', async () => {
+    const worker = scriptedWorker([stopped])
+    await assert.rejects(verifyTooling(TOOLING_RESEARCH, {runWorker: worker.run}), PhaseStopped)
+})
+
+test('nothing to run costs no worker at all', async () => {
+    const worker = scriptedWorker([ok('never asked')])
+    assert.equal(
+        await verifyTooling('CONTEXT\n- a project', {runWorker: worker.run}),
+        'CONTEXT\n- a project'
+    )
+    assert.equal(worker.calls.length, 0)
+})
+
+test('a research bullet that refutes a constraint deletes it before compose reads it', async () => {
+    const worker = scriptedWorker([ok(SPEC)])
+    const logged = []
+    await compose(
+        'GOAL\nPlace a unit.\n\nCONSTRAINTS\n- refuse the cell when `is_open` is true\n- keep the input map\n',
+        'CONTEXT\n- no `is_open` check is needed; every cell accepts a unit\n',
+        [],
+        {runWorker: worker.run, log: line => logged.push(line)}
+    )
+    assert.doesNotMatch(worker.calls[0].prompt, /refuse the cell/u)
+    assert.match(worker.calls[0].prompt, /keep the input map/u)
+    assert.match(logged.join('\n'), /dropped constraint/u)
+})
+
+const CRITIQUED = SPEC.replace('npm run test:godot', 'godot_runtime {"ops": [{"op": "input"}]}')
+
+test('the critique replaces the composed spec when it comes back as one', async () => {
+    const worker = scriptedWorker([ok(CRITIQUED)])
+    assert.equal(
+        await critique(REFINED, 'RESEARCH', [], SPEC, {runWorker: worker.run}),
+        CRITIQUED.trim()
+    )
+    assert.equal(worker.calls[0].label, 'critique')
+    assert.deepEqual(worker.calls[0].toolNames, [])
+    assert.match(worker.calls[0].prompt, /SPECIFICATION/u)
+})
+
+test('a critique that is not a specification cannot cost the plan the one it had', async () => {
+    for (const answer of [
+        ok('Looks fine to me.'),
+        failed('model-error', 'refused'),
+        failed('no-answer')
+    ]) {
+        const worker = scriptedWorker([answer])
+        assert.equal(await critique(REFINED, 'RESEARCH', [], SPEC, {runWorker: worker.run}), SPEC)
+    }
+})
+
+test('a stop during the critique is never swallowed by the fallback', async () => {
+    const worker = scriptedWorker([stopped])
+    await assert.rejects(
+        critique(REFINED, 'RESEARCH', [], SPEC, {runWorker: worker.run}),
+        PhaseStopped
+    )
 })
