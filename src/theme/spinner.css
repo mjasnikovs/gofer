@@ -1,0 +1,5 @@
+/* The spinner is a fixed box with `overflow: hidden`, so a flex row that shrinks it clips the
+   ring into a static half circle rather than making it smaller. */
+.astryx-spinner {
+    flex-shrink: 0;
+}

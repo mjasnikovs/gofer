@@ -286,6 +286,41 @@ test('question in words', async ({page}) => {
     await stableScreenshot(page, 'question-in-words.png')
 })
 
+// The spinner clips its own ring: it is a fixed box with `overflow: hidden`, so a flex row that
+// shrinks it draws a static half circle instead of a smaller one. The question this card carries is
+// long enough to squeeze it.
+test('the pending question keeps its spinner round', async ({page}) => {
+    await installDesktop(page, 'streaming')
+    await page.goto('/')
+    await expect(page.getByRole('img', {name: 'Local AI connected'})).toBeVisible()
+    await page.evaluate(() => {
+        window.__GOFER_TEST_HOLD_TURN__ = true
+    })
+    await page.getByRole('combobox', {name: 'Message input'}).fill('Design the pause menu')
+    await page.getByRole('combobox', {name: 'Message input'}).press('Enter')
+    await page.evaluate(() => {
+        window.__GOFER_TEST_EMIT_STREAM__?.({
+            type: 'tool-start',
+            id: 'ask-pending',
+            name: 'ask_user',
+            target:
+                'Should I build the proposed grouped-block HUD: one 36px stat bar at top-left and '
+                + 'one 64px objective panel at top-right, leaving the squad bench unchanged?',
+            startedAt: 1_800_000_003_000
+        })
+    })
+    await expect(page.getByText('Should I build the proposed')).toBeVisible()
+    const ring = await page.evaluate(() => {
+        const spinner = document.querySelector('.astryx-spinner')
+        const box = spinner?.getBoundingClientRect()
+        return {width: box?.width ?? 0, height: box?.height ?? 0}
+    })
+    expect(ring.height, 'the pending question draws no spinner').toBeGreaterThan(0)
+    expect(ring.width, 'the spinner is squeezed narrower than its ring and clipped').toBe(
+        ring.height
+    )
+})
+
 test('a sketch chosen', async ({page}) => {
     await askDuringATurn(page, 2, {delegated: true})
     await page.getByRole('button', {name: 'Choose Side Panel'}).click()
