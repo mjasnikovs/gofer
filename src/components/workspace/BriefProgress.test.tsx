@@ -45,6 +45,15 @@ describe('what a plan is doing while it does it', () => {
         expect(screen.getByText('↳ bash: rg -n "MainMenu"')).toBeInTheDocument()
     })
 
+    it('gives a long worker step more than one line to show itself in', () => {
+        const long =
+            "bash: python3 - <<'EOF' from PIL import Image # crop first idle frame of each soldier "
+            + 'sheet, scale up 8x, save to temp import os os.makedirs(out, exist_ok=True)'
+        show({isRunning: true, phase: 'research', running: 'APIS', step: long})
+
+        expect(screen.getByText(`↳ ${long}`)).toHaveStyle({'-webkit-line-clamp': '3'})
+    })
+
     it('says the same for a phase that has no workers to hang it on', () => {
         show({isRunning: true, phase: 'compose', step: 'thinking…'})
         expect(screen.getByText('↳ thinking…')).toBeInTheDocument()

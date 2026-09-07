@@ -496,6 +496,27 @@ describe('one question, in the feed', () => {
         expect(screen.getByText(/read res:\/\/ui\/pause_menu\.tscn/u)).toBeInTheDocument()
     })
 
+    it('gives a flattened heredoc step more than one line to show itself in', () => {
+        const heredoc =
+            "bash: python3 - <<'EOF' from PIL import Image # crop first idle frame (16x16 top-left) "
+            + 'of each soldier sheet, scale up 8x, save to temp import os os.makedirs(out, exist_ok=True)'
+        show(call({step: heredoc}), [])
+
+        expect(screen.getByText(`↳ ${heredoc}`)).toHaveStyle({'-webkit-line-clamp': '3'})
+    })
+
+    it('shows a pending question whole rather than clamping it mid-word', () => {
+        const asked =
+            'Which deploy-menu design should I build? (1) Pennant cards: squad-insignia pennant badge '
+            + 'on the left, unit sprite, short name, orange frame. (2) Numbered slots: square slots with '
+            + 'the unit sprite, a green pixel digit 1-6 in the corner, short name under, orange/green/blue.'
+        show(call({target: asked}), [])
+
+        expect(screen.getByRole('heading', {name: asked})).not.toHaveStyle({
+            '-webkit-line-clamp': '2'
+        })
+    })
+
     it('takes only the question that names its own call', () => {
         show(call(), [question({ownerCallId: 'call-2'})])
 

@@ -28,7 +28,7 @@ function StepLine({step}: Readonly<{step: string}>) {
     return (
         <Text
             type='supporting'
-            maxLines={1}
+            maxLines={3}
         >
             {`↳ ${step}`}
         </Text>

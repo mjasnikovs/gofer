@@ -99,7 +99,7 @@ function StepLine({step}: Readonly<{step: string}>) {
     return (
         <Text
             type='supporting'
-            maxLines={1}
+            maxLines={3}
         >
             {`↳ ${step}`}
         </Text>
@@ -120,12 +120,7 @@ function Working({tool}: Readonly<{tool: ToolActivity}>) {
                 >
                     <Spinner size='sm' />
                     <StackItem size='fill'>
-                        <Heading
-                            level={4}
-                            maxLines={2}
-                        >
-                            {tool.target ?? 'Asking you something'}
-                        </Heading>
+                        <Heading level={4}>{tool.target ?? 'Asking you something'}</Heading>
                     </StackItem>
                 </HStack>
                 {tool.step && (
