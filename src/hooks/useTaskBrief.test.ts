@@ -430,3 +430,37 @@ describe('a plan that is running', () => {
         expect(startTurn).toHaveBeenCalledTimes(1)
     })
 })
+
+describe('a plan that ends without a specification', () => {
+    it('sends nothing when the user stops it after the spec was composed', async () => {
+        const {answers, endRun} = heldRun()
+        backend({answers})
+        const {startTurn, view} = mount('task-1')
+        await plan(view)
+
+        deliver({type: 'brief-phase', phase: 'compose', field: 'spec', value: 'GOAL\nA menu.'})
+        deliver({type: 'brief-stopped', phase: 'critique'})
+        await flush()
+
+        endRun()
+        await flush()
+
+        expect(startTurn).not.toHaveBeenCalled()
+    })
+
+    it('sends nothing when a phase after the spec fails', async () => {
+        const {answers, endRun} = heldRun()
+        backend({answers})
+        const {startTurn, view} = mount('task-1')
+        await plan(view)
+
+        deliver({type: 'brief-phase', phase: 'compose', field: 'spec', value: 'GOAL\nA menu.'})
+        deliver({type: 'brief-failed', phase: 'critique', reason: 'the endpoint refused'})
+        await flush()
+
+        endRun()
+        await flush()
+
+        expect(startTurn).not.toHaveBeenCalled()
+    })
+})

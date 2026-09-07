@@ -183,15 +183,21 @@ export function applyBriefEvent(state: BriefState, event: BriefEvent): BriefStat
             return {...state, running: sectionOfWorker(event.label), step: undefined}
         case 'brief-worker-step':
             return {...state, step: event.line || undefined}
-        case 'brief-worker-done':
-            return state.research.some(worker => worker.section === event.section) ?
-                    state
-                :   {
-                        ...state,
-                        running: undefined,
-                        step: undefined,
-                        research: [...state.research, {section: event.section, kind: event.kind}]
-                    }
+        case 'brief-worker-done': {
+            // A section can report twice — the tooling verdict lands again once the commands
+            // have actually been run. It stays one worker, and the later verdict is the true one.
+            const done = {section: event.section, kind: event.kind}
+            const at = state.research.findIndex(worker => worker.section === event.section)
+            return {
+                ...state,
+                running: undefined,
+                step: undefined,
+                research:
+                    at === -1 ?
+                        [...state.research, done]
+                    :   state.research.map((worker, index) => (index === at ? done : worker))
+            }
+        }
         case 'brief-stopped':
             return state.ended ? state : (
                     {

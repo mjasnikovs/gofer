@@ -23,6 +23,9 @@ const CREATES =
 
 const strip = path => path.replace(/^res:\/\//u, '').replace(/^\.\//u, '')
 
+/// A `user://` path is written at runtime and a glob names no one file, so neither is ever on disk.
+const NOT_A_FILE = /^user:\/\/|[*?[\]]/u
+
 /** Paths named as files of this project: a real extension, and not a bare class name. */
 export function namedPaths(text) {
     const found = new Map()
@@ -30,6 +33,7 @@ export function namedPaths(text) {
         if (CREATES.test(line)) continue
         for (const match of line.matchAll(TOKEN)) {
             const path = strip(match[1])
+            if (NOT_A_FILE.test(match[1])) continue
             if (!SOURCE.test(path)) continue
             if (isAbsolute(path) || normalize(path).startsWith('..')) continue
             // Keyed by the resolved path, valued by the spelling the task used: a

@@ -81,21 +81,31 @@ const CHILD_TOOL_SENTENCES = {
 }
 
 function inWords(parts) {
-    if (parts.length === 0) return 'nothing'
     if (parts.length === 1) return parts[0]
     return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
 }
 
+function held(toolNames) {
+    const sentences = toolNames.map(name => CHILD_TOOL_SENTENCES[name]).filter(Boolean)
+    if (sentences.length === 0)
+        return (
+            'You have no tools. Everything the question needs is already in this prompt; answer '
+            + 'from it and do not go looking for more.\n'
+        )
+    return (
+        `You can ${inWords(sentences)}. You cannot change anything: you have no write tool and no `
+        + 'edit tool, and every tool you do hold only reads. Do not try to acquire more, and do '
+        + 'not use the shell to modify, move or delete anything.\n'
+    )
+}
+
 export function childSystemPrompt(toolNames = SUBAGENT_TOOL_NAMES) {
-    const held = toolNames.map(name => CHILD_TOOL_SENTENCES[name]).filter(Boolean)
     return (
         'You are a research sub-agent. You have been given one question by another agent that is '
         + 'working in this same checkout, and it will see nothing you read — only what you write in '
         + 'your final message.\n'
         + '\n'
-        + `You can ${inWords(held)}. You cannot change anything: you have no write tool and no `
-        + 'edit tool, and every tool you do hold only reads. Do not try to acquire more, and do '
-        + 'not use the shell to modify, move or delete anything.\n'
+        + held(toolNames)
         + '\n'
         + 'Work as briefly as the question allows, then answer it. Your answer must stand on its '
         + 'own: state the conclusion, name the files and line numbers it rests on, and quote only '

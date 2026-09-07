@@ -1225,3 +1225,10 @@ test('a child holding godot_script gets the operations that only ask, and not on
     assert.doesNotMatch(script.description, /\bedit\b/u)
     assert.doesNotMatch(script.description, /\bsave\b/u)
 })
+
+test('a child with no tools is told so in a sentence, not "You can nothing"', () => {
+    const toolless = childSystemPrompt([])
+    assert.doesNotMatch(toolless, /You can nothing/u)
+    assert.doesNotMatch(toolless, /no write tool and no edit tool/u)
+    assert.match(toolless, /You have no tools\./u)
+})

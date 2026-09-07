@@ -300,10 +300,14 @@ export function declaresNoCommands(spec) {
     return lines !== null && lines.length === 1 && lines[0] === NO_COMMANDS
 }
 
-/// A verification line that reaches the editor instead of the shell: a tool name, then one JSON
+/// A verification line that reaches the editor instead of the shell: the tool name, then one JSON
 /// object. `contains` is the parser's own key — the text the answer must hold — so it never
 /// reaches the tool.
-const TOOL_POINT = /^(godot_[a-z_]+)[ \t]+(\{[\s\S]*\})$/u
+///
+/// Only the running game. A point runs unattended and skips the operation allowlist a child tool
+/// goes through, and `godot_node` delete and `godot_scene` save are auto-allowed; a check would be
+/// able to edit the project it exists to measure.
+const TOOL_POINT = /^(godot_runtime)[ \t]+(\{[\s\S]*\})$/u
 
 function toolPoint(line) {
     const match = TOOL_POINT.exec(line)
@@ -385,6 +389,15 @@ export async function compose(refined, researchText, settled, deps = {}) {
 
 const CRITIQUE_KEPT = 'the critique could not be read as a specification; the composed one stands'
 
+const SPEC_SECTIONS = ['GOAL', 'CONSTRAINTS', 'STEPS', 'VERIFY']
+
+/// Every section, not just a verifiable block: a critique that answers with the VERIFY fragment it
+/// was faulting would otherwise replace the whole specification with that fragment.
+function isWholeSpec(text) {
+    if (!parseVerifyBlock(text) && !declaresNoCommands(text)) return false
+    return SPEC_SECTIONS.every(name => new RegExp(`^${name}[ \\t]*$`, 'mu').test(text))
+}
+
 /**
  * Read the finished spec back against the task, the research and the decisions.
  *
@@ -410,7 +423,7 @@ export async function critique(refined, researchText, settled, spec, deps = {}) 
         return spec
     }
     const corrected = stripPreamble(verdict.text)
-    if (!parseVerifyBlock(corrected) && !declaresNoCommands(corrected)) {
+    if (!isWholeSpec(corrected)) {
         deps.log?.(CRITIQUE_KEPT)
         return spec
     }

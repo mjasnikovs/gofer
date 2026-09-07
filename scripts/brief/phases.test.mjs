@@ -568,3 +568,43 @@ test('a stop during the critique is never swallowed by the fallback', async () =
         PhaseStopped
     )
 })
+
+test('only the running game can be reached from a verification line', () => {
+    const spec =
+        'VERIFY\n```sh\n'
+        + '# the node is gone\n'
+        + 'godot_node {"ops": [{"op": "delete", "path": "Main/Enemy"}]}\n'
+        + '```\n'
+
+    assert.deepEqual(parseVerifyPoints(spec), [
+        {
+            name: 'the node is gone',
+            command: 'godot_node {"ops": [{"op": "delete", "path": "Main/Enemy"}]}'
+        }
+    ])
+})
+
+test('a critique that answers with a fragment cannot replace the whole specification', async () => {
+    const fragment = 'The VERIFY block proves a step.\n\nVERIFY\n```sh\nnpm run test:godot\n```\n'
+    const worker = scriptedWorker([ok(fragment)])
+    const logged = []
+    assert.equal(
+        await critique(REFINED, 'RESEARCH', [], SPEC, {
+            runWorker: worker.run,
+            log: line => logged.push(line)
+        }),
+        SPEC
+    )
+    assert.match(logged.join('\n'), /the composed one stands/u)
+})
+
+test('a verdict re-reported after its section reaches the panel', () => {
+    const worker = scriptedWorker([ok('VERIFIED\n\nREJECTED\n  npm test  no such script')])
+    const seen = []
+    return verifyTooling('TOOLING\n  npm test  runs', {
+        runWorker: worker.run,
+        onWorker: (section, kind) => seen.push([section, kind])
+    }).then(() => {
+        assert.deepEqual(seen, [['TOOLING', 'empty']])
+    })
+})

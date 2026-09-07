@@ -68,3 +68,18 @@ test('nothing to refute leaves the task byte-identical', () => {
     assert.equal(applyRefutations(refined, context(['- it is a project'])).refined, refined)
     assert.equal(applyRefutations(refined, '').refined, refined)
 })
+
+test('a rule nothing refuted survives the clause that was refuted', () => {
+    const research = context(['- no `is_open` check is needed; every cell accepts a unit'])
+    const {refined: out, trail} = applyRefutations(
+        'GOAL\nPlace a unit.\n\nCONSTRAINTS\n'
+            + '- keep `is_open` in sync and always call `spawn_bullet()`\n'
+            + '- keep the input map\n',
+        research
+    )
+
+    assert.equal(trail.length, 1)
+    assert.doesNotMatch(out, /is_open/u)
+    assert.match(out, /spawn_bullet\(\)/u)
+    assert.match(out, /keep the input map/u)
+})

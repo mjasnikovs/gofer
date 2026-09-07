@@ -36,3 +36,8 @@ test('the correction is its own section, and nothing missing writes nothing', ()
     )
     assert.equal(formatPathCorrections([]), '')
 })
+
+test('a runtime path and a glob are not files this project is missing', () => {
+    const found = namedPaths('- write `user://save.json`, and every `*.gd` under `scripts/ui/`')
+    assert.deepEqual([...found.keys()], [])
+})

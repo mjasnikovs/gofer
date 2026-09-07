@@ -30,6 +30,11 @@ function refusedPoint(error) {
     )
 }
 
+/// The answer is JSON, so text the spec wrote plainly — a quote, a backslash, an accent — is
+/// escaped in it and never matches itself. Both spellings are tried.
+const holds = (answered, wanted) =>
+    answered.includes(wanted) || answered.includes(JSON.stringify(wanted).slice(1, -1))
+
 /// A point that names a godot tool, run through the same channel the model's own calls take.
 ///
 /// It carries no clock of its own. What it waits for is the router, which serialises every call to
@@ -45,7 +50,7 @@ async function runToolPoint(point, host, signal) {
     }
     try {
         const answered = JSON.stringify((await host.call(point.tool, point.params, signal)) ?? null)
-        if (point.contains && !answered.includes(point.contains)) {
+        if (point.contains && !holds(answered, point.contains)) {
             return {
                 passed: false,
                 output:

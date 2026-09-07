@@ -72,6 +72,24 @@ export function refutedTokens(research) {
     return found
 }
 
+const BULLET = /^(\s*(?:[-*]|\d+\.)\s*)?([\s\S]*)$/u
+
+/**
+ * The line without the clause that named a refuted token, or null when nothing survives.
+ *
+ * "One rule per line" is what refine is asked for and not always what it writes. Deleting a
+ * whole line for one refuted token takes the rules beside it with it, and those are gone with
+ * no note in CONSTRAINTS at all. Splitting reads worse than refine wrote; it loses less.
+ */
+function withoutRefutedClause(line, refuted) {
+    const [, marker = '', body] = BULLET.exec(line)
+    const kept = body
+        .split(/\s*;\s*|\s+and\s+/u)
+        .filter(clause => !tokensIn(clause).some(token => refuted.has(token)))
+        .filter(clause => clause.trim().length > 0)
+    return kept.length === 0 ? null : `${marker}${kept.join(' and ')}`
+}
+
 /**
  * Drop every refine CONSTRAINTS line naming a refuted token, and say which and why.
  *
@@ -100,9 +118,13 @@ export function applyRefutations(refined, research) {
             continue
         }
         const {shape, bullet} = refuted.get(hit)
-        trail.push(
-            `refutation (${shape}): dropped constraint ${line.trim()} — research says ${bullet}`
-        )
+        const rest = withoutRefutedClause(line, refuted)
+        if (rest !== null) kept.push(rest)
+        const what =
+            rest === null ?
+                `dropped constraint ${line.trim()}`
+            :   `cut ${line.trim()} to ${rest.trim()}`
+        trail.push(`refutation (${shape}): ${what} — research says ${bullet}`)
     }
     if (trail.length === 0) return {refined, trail: []}
     return {refined: [...lines.slice(0, at + 1), ...kept, ...lines.slice(last)].join('\n'), trail}

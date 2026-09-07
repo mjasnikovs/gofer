@@ -49,6 +49,10 @@ export function useTaskBrief({taskId, onStartTurn, onError}: TaskBriefOptions) {
                 specification = event.value
                 sendSpecification()
             }
+            // A later phase writes the same field, so a spec is in hand while the run can
+            // still be stopped. Sending it then starts the turn the user just cancelled.
+            if (event.type === 'brief-stopped' || event.type === 'brief-failed')
+                specification = undefined
         }).then(unlisten => {
             if (isCancelled) unlisten()
             else dispose = unlisten

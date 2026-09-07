@@ -177,3 +177,14 @@ describe('reading what arrived', () => {
         )
     })
 })
+
+describe('a worker that reports twice', () => {
+    it('keeps the count at one and takes the newer verdict', () => {
+        const state = fold([
+            {type: 'brief-phase-start', phase: 'research'},
+            {type: 'brief-worker-done', section: 'TOOLING', kind: 'ok'},
+            {type: 'brief-worker-done', section: 'TOOLING', kind: 'empty'}
+        ])
+        expect(state.research).toEqual([{section: 'TOOLING', kind: 'empty'}])
+    })
+})

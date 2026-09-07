@@ -229,3 +229,13 @@ test('a tool line the shell would refuse is never handed to the shell', async ()
     assert.equal(results[0].passed, true)
     assert.equal(host.calls[0].params.ops[0].scene, 'scenes/main.tscn')
 })
+
+test('a contains holding a quote matches the answer that holds it', async () => {
+    const host = {call: () => Promise.resolve({name: 'the "Bullet" node'})}
+    const points = [
+        {name: 'quoted', command: 'x', tool: 'godot_runtime', params: {}, contains: '"Bullet"'}
+    ]
+
+    const [result] = await runVerifyPoints({points, host, emit: () => undefined})
+    assert.equal(result.passed, true)
+})
