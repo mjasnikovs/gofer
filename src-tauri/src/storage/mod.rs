@@ -319,6 +319,60 @@ PRAGMA user_version = 7;
 COMMIT;
 "#;
 
+/// Deleting a task deletes the memories it made.
+///
+/// They used to survive it: `task_id` was `ON DELETE SET NULL`, so a deleted task's decisions and
+/// facts were silently promoted to project scope and went on steering every other task. Nobody
+/// asked for that promotion, and nothing in the interface said it had happened.
+///
+/// SQLite cannot alter a foreign key, so the table is rebuilt. Foreign keys are off around it
+/// because that is what keeps `ALTER TABLE RENAME` from rewriting the `REFERENCES memory_items`
+/// clauses in `memory_embeddings` and in this table's own `superseded_by`. Rowids are copied
+/// explicitly: `memory_fts` is an external-content index keyed on them, and a rebuild that let
+/// SQLite assign new ones would leave every existing memory unsearchable by text.
+///
+/// The triggers are recreated rather than carried over — `DROP TABLE` takes them with it.
+const PROJECT_SCHEMA_V8: &str = r#"
+PRAGMA foreign_keys = OFF;
+BEGIN;
+CREATE TABLE memory_items_rebuilt (
+    id TEXT PRIMARY KEY,
+    task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('decision', 'preference', 'fact', 'issue', 'summary')),
+    state TEXT NOT NULL CHECK (state IN ('candidate', 'confirmed', 'superseded')),
+    content TEXT NOT NULL,
+    provenance_json TEXT NOT NULL,
+    superseded_by TEXT REFERENCES memory_items(id) ON DELETE SET NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+) STRICT;
+INSERT INTO memory_items_rebuilt
+    (rowid, id, task_id, kind, state, content, provenance_json, superseded_by, created_at, updated_at)
+SELECT rowid, id, task_id, kind, state, content, provenance_json, superseded_by, created_at, updated_at
+FROM memory_items;
+DROP TABLE memory_items;
+ALTER TABLE memory_items_rebuilt RENAME TO memory_items;
+CREATE INDEX memory_items_task_state ON memory_items(task_id, state, updated_at DESC);
+CREATE TRIGGER memory_items_ai AFTER INSERT ON memory_items BEGIN
+    INSERT INTO memory_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+CREATE TRIGGER memory_items_ad AFTER DELETE ON memory_items BEGIN
+    INSERT INTO memory_fts(memory_fts, rowid, content)
+    VALUES ('delete', old.rowid, old.content);
+END;
+CREATE TRIGGER memory_items_au AFTER UPDATE OF content ON memory_items BEGIN
+    INSERT INTO memory_fts(memory_fts, rowid, content)
+    VALUES ('delete', old.rowid, old.content);
+    INSERT INTO memory_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+CREATE TRIGGER memory_items_ad_vectors AFTER DELETE ON memory_items BEGIN
+    DELETE FROM memory_vectors WHERE memory_id = old.id;
+END;
+PRAGMA user_version = 8;
+COMMIT;
+PRAGMA foreign_keys = ON;
+"#;
+
 /// One task's brief, as the panel and a resume read it.
 ///
 /// Every phase output is optional because a run that stopped part way through has only the ones it
@@ -1118,9 +1172,9 @@ fn migrate_project(connection: &Connection) -> Result<(), CommandError> {
     let current = connection
         .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
         .map_err(database_error)?;
-    if current > 7 {
+    if current > 8 {
         return Err(format!(
-            "The database schema version {current} is newer than supported version 7"
+            "The database schema version {current} is newer than supported version 8"
         )
         .into());
     }
@@ -1157,6 +1211,11 @@ fn migrate_project(connection: &Connection) -> Result<(), CommandError> {
     if current <= 6 {
         connection
             .execute_batch(PROJECT_SCHEMA_V7)
+            .map_err(database_error)?;
+    }
+    if current <= 7 {
+        connection
+            .execute_batch(PROJECT_SCHEMA_V8)
             .map_err(database_error)?;
     }
     Ok(())
@@ -1571,7 +1630,7 @@ mod tests {
             .query_row("SELECT vec_version()", [], |row| row.get::<_, String>(0))
             .expect("sqlite-vec version");
 
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
         assert_eq!(vec_version, "v0.1.9");
     }
 
@@ -1601,7 +1660,7 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .expect("schema version");
         assert_eq!(title, "Existing task");
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
         connection
             .execute_batch(
                 "INSERT INTO sketches (id, task_id, question_id, question, label, is_approved, saved_at)
@@ -1655,6 +1714,70 @@ mod tests {
             )
             .expect("indexed history");
         assert_eq!(indexed, 1, "the full-text index must survive the migration");
+    }
+
+    /// The rebuild that gives `memory_items` its cascade must not cost a database its memories.
+    ///
+    /// Two things it could quietly break: `memory_fts` is an external-content index keyed on rowid,
+    /// so a rebuild that renumbers rows leaves every existing memory unfindable by text; and the
+    /// four triggers live on the table `DROP TABLE` removes.
+    #[test]
+    fn recorded_memories_survive_the_cascade_migration_and_then_cascade() {
+        register_sqlite_vec();
+        let connection = Connection::open_in_memory().expect("in-memory database");
+        for schema in [PROJECT_SCHEMA_V1, PROJECT_SCHEMA_V2] {
+            connection.execute_batch(schema).expect("earlier schema");
+        }
+        connection
+            .execute_batch(
+                "INSERT INTO tasks (id, title, status, created_at, updated_at)
+                     VALUES ('task-1', 'Doomed', 'active', 1, 1);
+                 INSERT INTO memory_items
+                     (id, task_id, kind, state, content, provenance_json, created_at, updated_at)
+                 VALUES
+                     ('memory-1', 'task-1', 'fact', 'confirmed', 'The player uses CharacterBody2D', '{}', 1, 1),
+                     ('memory-2', NULL, 'fact', 'confirmed', 'The level instances the player', '{}', 1, 1);",
+            )
+            .expect("existing memories");
+
+        migrate_project(&connection).expect("migrate project");
+
+        let indexed = |term: &str| {
+            connection
+                .query_row(
+                    "SELECT count(*) FROM memory_items
+                     WHERE rowid IN (SELECT rowid FROM memory_fts WHERE memory_fts MATCH ?1)",
+                    [term],
+                    |row| row.get::<_, u32>(0),
+                )
+                .expect("indexed memories")
+        };
+        assert_eq!(
+            indexed("CharacterBody2D"),
+            1,
+            "the full-text index still lines up"
+        );
+
+        connection
+            .execute("DELETE FROM tasks WHERE id = 'task-1'", [])
+            .expect("delete the task");
+
+        let remaining = connection
+            .query_row("SELECT count(*) FROM memory_items", [], |row| {
+                row.get::<_, u32>(0)
+            })
+            .expect("remaining memories");
+        assert_eq!(remaining, 1, "the task's memory went with it");
+        assert_eq!(
+            indexed("CharacterBody2D"),
+            0,
+            "and the delete trigger kept the index honest"
+        );
+        assert_eq!(
+            indexed("instances"),
+            1,
+            "the project's own memory is untouched"
+        );
     }
 
     /// The regression: a recorded base branch that Git has since lost must not fold two tasks.

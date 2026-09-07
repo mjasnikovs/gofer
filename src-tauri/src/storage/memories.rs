@@ -479,12 +479,12 @@ impl Memories<'_> {
     /// rather than merely mis-ranked. It is written once, by [`Memories::write_embedding`], and the
     /// only thing that invalidates it on a scope change is [`Memories::upsert`].
     ///
-    /// Which leaves the case nothing was watching. `memory_items.task_id` is `ON DELETE SET NULL`,
-    /// so deleting a task rewrites its memories to project scope without going through `upsert` at
-    /// all: the rows survive, the vectors stay filed under a task id nothing can name any more, and
-    /// the memories are lexical-only from then on. Permanently — `missing_embeddings` keys on
-    /// `memory_embeddings`, which is still there, so the backfill never looks at them, and the
-    /// orphan sweep above only removes vectors whose memory is gone.
+    /// Which leaves what a database written before schema V8 kept. `memory_items.task_id` was
+    /// `ON DELETE SET NULL` then, so deleting a task rewrote its memories to project scope without
+    /// going through `upsert` at all: the rows survived, their vectors stayed filed under a task id
+    /// nothing can name any more, and the memories are lexical-only from then on. Permanently —
+    /// `missing_embeddings` keys on `memory_embeddings`, which is still there, so the backfill
+    /// never looks at them, and the orphan sweep above only removes vectors whose memory is gone.
     ///
     /// Re-filed from the stored embedding rather than re-embedded: the vector is the same vector,
     /// only the partition it sits in is wrong, and the worker is a subprocess round trip away. A
@@ -1011,15 +1011,17 @@ mod tests {
         assert!(!still_missing.contains(&kept.id));
     }
 
-    /// Deleting a task moves its memories to project scope, and the vectors have to move with them.
+    /// Deleting a task deletes the memories it made, and every trace of them.
     ///
-    /// `memory_items.task_id` is `ON DELETE SET NULL`, which rewrites the row without going through
-    /// `upsert` — the only place that drops a vector on a scope change. `scope_key` is a partition
-    /// key, so the vector stays filed under a task id nothing can name any more and the search,
-    /// which asks for one scope, never sees it again. Nothing noticed: the embedding row is still
-    /// there, so the backfill skips it, and the memory is still there, so the orphan sweep skips it.
+    /// The regression: `memory_items.task_id` was `ON DELETE SET NULL`, so the rows survived the
+    /// task and were promoted to project scope, where they went on steering every other task. The
+    /// vectors were worse off still — `scope_key` is a partition key, so they stayed filed under a
+    /// task id nothing could name and only a maintenance sweep ever moved them.
+    ///
+    /// `memory_vectors` is a vec0 virtual table and outside the cascade, so it is the one the check
+    /// has to name: the trigger is what removes it.
     #[test]
-    fn the_memories_view_refiles_vectors_whose_task_was_deleted() {
+    fn deleting_a_task_deletes_the_memories_it_made() {
         let directory = TempDir::new().expect("temporary directory");
         let workspace = committed_repository(directory.path());
         let storage =
@@ -1052,6 +1054,18 @@ mod tests {
                 vector: vector.clone(),
             })
             .expect("save embedding");
+        let survivor = storage
+            .memory()
+            .upsert(&UpsertMemoryRequest {
+                id: None,
+                task_id: None,
+                kind: "fact".to_owned(),
+                state: "confirmed".to_owned(),
+                content: "The player scene is instanced by the level".to_owned(),
+                provenance: serde_json::json!({"source": "user"}),
+                superseded_by: None,
+            })
+            .expect("save project memory");
         storage
             .tasks()
             .delete(
@@ -1060,37 +1074,53 @@ mod tests {
             )
             .expect("delete the task");
 
-        let found = |storage: &ProjectStorage| {
-            storage
-                .memory()
-                .search(&SearchMemoryRequest {
-                    query: "player scene".to_owned(),
-                    task_id: None,
-                    vector: Some(vector.clone()),
-                    limit: Some(5),
-                })
-                .expect("search")
-        };
-        let stranded = found(&storage);
-        assert_eq!(stranded.len(), 1, "the memory itself survived the task");
-        assert!(
-            stranded[0].vector_distance.is_none(),
-            "and its vector is filed where the search cannot reach it"
+        let found = storage
+            .memory()
+            .search(&SearchMemoryRequest {
+                query: "player scene".to_owned(),
+                task_id: None,
+                vector: Some(vector.clone()),
+                limit: Some(5),
+            })
+            .expect("search")
+            .into_iter()
+            .map(|memory| memory.memory.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            found,
+            vec![survivor.id],
+            "the task's memory is gone and the project's own is untouched"
         );
+        let connection = storage.connection().expect("connection");
+        let counts = |table: &str| {
+            connection
+                .query_row(
+                    &format!("SELECT count(*) FROM {table} WHERE memory_id = ?1"),
+                    [&memory.id],
+                    |row| row.get::<_, u32>(0),
+                )
+                .expect("count")
+        };
+        assert_eq!(counts("memory_embeddings"), 0, "the embedding cascaded");
+        assert_eq!(
+            counts("memory_vectors"),
+            0,
+            "and the trigger took the vector"
+        );
+        drop(connection);
 
         let collected = storage
             .memory()
             .collect(&everything_is_old(), &[])
             .expect("collect");
 
-        assert_eq!(collected.memory_vectors_refiled, 1);
         assert_eq!(
-            collected.memory_vectors_removed, 0,
-            "the vector was moved rather than thrown away"
-        );
-        assert!(
-            found(&storage)[0].vector_distance.is_some(),
-            "the same vector, under the scope the memory is in now"
+            (
+                collected.memory_vectors_removed,
+                collected.memory_vectors_refiled
+            ),
+            (0, 0),
+            "the sweep has nothing left to find"
         );
     }
 

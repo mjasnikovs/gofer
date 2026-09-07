@@ -141,8 +141,9 @@ impl Tasks<'_> {
     /// is what keeps the removal from leaving either behind. It then moves the checkout onto the task
     /// that takes over, because a task is only the active one on paper until its files are on disk.
     ///
-    /// Unmerged work on the task branch goes with it — that is what deleting a task means. Project
-    /// memory and recorded runs are kept: they outlive the task that produced them, and their task
+    /// Unmerged work on the task branch goes with it — that is what deleting a task means, and so
+    /// do the memories the task made: the schema cascades them. Recorded runs are the exception.
+    /// They are a log of what the engine did, not something the agent reasons from, and their task
     /// reference is cleared by the schema instead.
     pub fn delete(&self, task_id: &str, switch: &Switch<'_>) -> Result<StoredChat, CommandError> {
         self.delete_record(task_id, switch)
