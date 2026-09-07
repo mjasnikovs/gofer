@@ -70,6 +70,9 @@ export function useTaskBrief({taskId, onStartTurn, onError}: TaskBriefOptions) {
                 if (isCancelled) return
                 const reason = commandErrorMessage(error)
                 report.current(`The plan could not run: ${reason}`)
+                // A rejection never reaches the watch handler, so its guard never fires. A
+                // compose spec already in hand would start the turn the failed plan owed.
+                specification = undefined
                 setBriefState(previous =>
                     applyBriefEvent(previous, {type: 'brief-failed', phase: 'startup', reason})
                 )

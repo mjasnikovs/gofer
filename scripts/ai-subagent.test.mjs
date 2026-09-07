@@ -1226,6 +1226,33 @@ test('a child holding godot_script gets the operations that only ask, and not on
     assert.doesNotMatch(script.description, /\bsave\b/u)
 })
 
+test('the godot_script a child holds does not carry the catalogue line telling it to write', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const domains = [
+        {
+            name: 'godot_script',
+            description:
+                'write GDScript here rather than with the file tools. `edit` changes a script '
+                + 'that exists; `save` creates one.',
+            operations: [
+                {op: 'hover', summary: 'what is this'},
+                {op: 'save', summary: 'write a script'}
+            ]
+        }
+    ]
+
+    const {env, tools} = createChildTools(workspace.path, {
+        toolNames: ['godot_script'],
+        deps: {domains, host: {call: () => Promise.resolve({})}}
+    })
+    context.after(() => env.cleanup())
+
+    assert.doesNotMatch(tools[0].description, /write GDScript here/u)
+    assert.doesNotMatch(tools[0].description, /creates one/u)
+    assert.match(tools[0].description, /read-only/u)
+})
+
 test('a child with no tools is told so in a sentence, not "You can nothing"', () => {
     const toolless = childSystemPrompt([])
     assert.doesNotMatch(toolless, /You can nothing/u)

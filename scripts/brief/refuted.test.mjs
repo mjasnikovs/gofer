@@ -73,7 +73,7 @@ test('a rule nothing refuted survives the clause that was refuted', () => {
     const research = context(['- no `is_open` check is needed; every cell accepts a unit'])
     const {refined: out, trail} = applyRefutations(
         'GOAL\nPlace a unit.\n\nCONSTRAINTS\n'
-            + '- keep `is_open` in sync and always call `spawn_bullet()`\n'
+            + '- keep `is_open` in sync; always call `spawn_bullet()`\n'
             + '- keep the input map\n',
         research
     )
@@ -82,4 +82,29 @@ test('a rule nothing refuted survives the clause that was refuted', () => {
     assert.doesNotMatch(out, /is_open/u)
     assert.match(out, /spawn_bullet\(\)/u)
     assert.match(out, /keep the input map/u)
+})
+
+test('"and" is not a clause boundary, so a refuted rule is dropped whole rather than cut apart', () => {
+    const joined = [
+        'GOAL',
+        'Place a unit.',
+        '',
+        'CONSTRAINTS',
+        '- refuse a cell when `is_open` is false and the grid is full'
+    ].join('\n')
+    const research = context(['- no `is_open` check is needed; every cell accepts a unit'])
+    const {refined: out, trail} = applyRefutations(joined, research)
+
+    assert.equal(trail.length, 1)
+    assert.match(trail[0], /dropped constraint/u)
+    assert.doesNotMatch(out, /the grid is full/u)
+})
+
+test('a semicolon still splits, and rejoins as a semicolon', () => {
+    const two = ['CONSTRAINTS', '- the panel calls `is_open`; the menu lives on a layer'].join('\n')
+    const research = context(['- `is_open` is not required'])
+    const {refined: out} = applyRefutations(two, research)
+
+    assert.match(out, /- the menu lives on a layer/u)
+    assert.doesNotMatch(out, /is_open/u)
 })

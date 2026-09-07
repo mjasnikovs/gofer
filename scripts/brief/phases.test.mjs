@@ -608,3 +608,44 @@ test('a verdict re-reported after its section reaches the panel', () => {
         assert.deepEqual(seen, [['TOOLING', 'empty']])
     })
 })
+
+test('a verdict in no readable shape leaves TOOLING as claimed rather than saying it all failed', async () => {
+    const worker = scriptedWorker([ok('I ran them all and they were fine')])
+    const logged = []
+    const out = await verifyTooling(TOOLING_RESEARCH, {
+        runWorker: worker.run,
+        log: line => logged.push(line)
+    })
+
+    assert.equal(out, TOOLING_RESEARCH)
+    assert.doesNotMatch(out, /every command this task named failed/u)
+    assert.match(logged.join('\n'), /could not be read/u)
+})
+
+test('a verified line naming a command nobody handed out is dropped, never promoted', async () => {
+    const worker = scriptedWorker([
+        ok('VERIFIED\n  npm test -- --run  0 failures\n\nREJECTED\n  make ship  no such target')
+    ])
+    const logged = []
+    const out = await verifyTooling(TOOLING_RESEARCH, {
+        runWorker: worker.run,
+        log: line => logged.push(line)
+    })
+
+    assert.doesNotMatch(out, /npm test -- --run/u)
+    assert.match(logged.join('\n'), /a command nobody ran/u)
+})
+
+test('the critique reads the same refuted task compose did', async () => {
+    const worker = scriptedWorker([ok(CRITIQUED)])
+    await critique(
+        'GOAL\nPlace a unit.\n\nCONSTRAINTS\n- refuse the cell when `is_open` is true\n- keep the input map\n',
+        'CONTEXT\n- no `is_open` check is needed; every cell accepts a unit\n',
+        [],
+        SPEC,
+        {runWorker: worker.run}
+    )
+
+    assert.doesNotMatch(worker.calls[0].prompt, /refuse the cell/u)
+    assert.match(worker.calls[0].prompt, /keep the input map/u)
+})

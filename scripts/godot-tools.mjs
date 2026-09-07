@@ -2,12 +2,22 @@ import {normalizeToolCalls} from './tool-call-repair.mjs'
 import {toolResult} from './tool-result.mjs'
 import {jsonSchemaOfEntry, signatureOf} from './tool-schema.mjs'
 
+const elsewhereIn = domains => op =>
+    domains
+        .filter(other => other.operations.some(operation => operation.op === op))
+        .map(other => other.name)
+
+/// A call written by hand rather than by the model — a verification point — takes the same
+/// repairs. A wrapper shape the repair layer fixes must not fail here and pass there.
+export function normalizeGodotCall(domains, name, args) {
+    const found = (Array.isArray(domains) ? domains : []).find(domain => domain.name === name)
+    if (!found) return args
+    return normalizeToolCalls(found.operations, args, elsewhereIn(domains))
+}
+
 export function createGodotTools(domains, host) {
     if (!Array.isArray(domains)) return []
-    const elsewhere = op =>
-        domains
-            .filter(other => other.operations.some(operation => operation.op === op))
-            .map(other => other.name)
+    const elsewhere = elsewhereIn(domains)
     return domains.map(domain => {
         const exclusive = domain.operations.filter(
             operation => operation.alone?.scope === 'exclusive'

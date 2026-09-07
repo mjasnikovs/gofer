@@ -258,7 +258,16 @@ const ASKS_THE_LANGUAGE_SERVER = new Set([
     'workspace_symbols'
 ])
 
-function childGodotTool(name, {domains, host}, keep) {
+/// The catalogue's own godot_script description tells the model to write GDScript with this tool
+/// rather than the file tools. A research child holds no operation that writes, so it has to be
+/// told what it actually has, or it spends turns being refused by `save`.
+const READS_THE_LANGUAGE_SERVER =
+    "GDScript intelligence through Godot's language server, read-only: it answers questions about "
+    + 'a script and cannot change or create one. Positions are {line, character}, zero-based. Open '
+    + 'a script before querying it. Paths may be named either way, `scripts/mario.gd` or '
+    + 'res://scripts/mario.gd.'
+
+function childGodotTool(name, {domains, host}, keep, description) {
     if (!host || !Array.isArray(domains)) {
         throw new Error(
             `A child was asked for ${name} without the tool host that answers it. `
@@ -278,12 +287,16 @@ function childGodotTool(name, {domains, host}, keep) {
                 + 'catalogue the backend offered.'
         )
     }
-    return createGodotTools([{...found, operations}], host)[0]
+    return createGodotTools(
+        [{...found, operations, ...(description ? {description} : {})}],
+        host
+    )[0]
 }
 
 const REACHING_CHILD_TOOLS = {
     godot_docs_search: deps => childGodotTool('godot_docs_search', deps),
-    godot_script: deps => childGodotTool('godot_script', deps, ASKS_THE_LANGUAGE_SERVER),
+    godot_script: deps =>
+        childGodotTool('godot_script', deps, ASKS_THE_LANGUAGE_SERVER, READS_THE_LANGUAGE_SERVER),
     web_search: ({searchProvider = 'exa', braveApiKey}) =>
         createWebSearchTool({provider: searchProvider, apiKey: braveApiKey}),
     ask_user: ({host, ownerCallId, agreed, model}) => {

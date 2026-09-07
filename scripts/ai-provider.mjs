@@ -829,6 +829,7 @@ export async function runAgent({
             points: verifyPoints,
             env,
             host,
+            domains,
             emit,
             signal
         })

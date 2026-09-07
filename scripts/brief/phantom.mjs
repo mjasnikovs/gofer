@@ -18,8 +18,9 @@ const TOKEN = /`([^`\s]+)`/gu
 const SOURCE = /\.(?:gd|tscn|tres|gdshader|godot|cfg|json|import|uid|png|md|ts|mjs)$/iu
 
 /** Words that make a line a plan to write the file rather than a claim it is there. */
-const CREATES =
-    /\b(?:create[sd]?|creating|new|scaffold|generate[sd]?|does not exist|not exist yet)\b/iu
+/// "new" alone is not one of them: the word appears in prose about files that already exist,
+/// and matching it exempted every line holding it from the check.
+const CREATES = /\b(?:create[sd]?|creating|scaffold|generate[sd]?|does not exist|not exist yet)\b/iu
 
 const strip = path => path.replace(/^res:\/\//u, '').replace(/^\.\//u, '')
 

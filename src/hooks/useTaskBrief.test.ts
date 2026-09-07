@@ -448,6 +448,30 @@ describe('a plan that ends without a specification', () => {
         expect(startTurn).not.toHaveBeenCalled()
     })
 
+    it('sends nothing when the run itself rejects after the spec was composed', async () => {
+        let fail: (reason: unknown) => void = () => undefined
+        backend({
+            answers: {
+                run_task_brief: () =>
+                    new Promise<void>((_resolve, reject) => {
+                        fail = reject
+                    })
+            }
+        })
+        const {startTurn, view} = mount('task-1')
+        await plan(view)
+
+        deliver({type: 'brief-phase', phase: 'compose', field: 'spec', value: 'GOAL\nA menu.'})
+        await flush()
+
+        act(() => {
+            fail(new CommandFailure('worker-gone', 'the worker died'))
+        })
+        await flush()
+
+        expect(startTurn).not.toHaveBeenCalled()
+    })
+
     it('sends nothing when a phase after the spec fails', async () => {
         const {answers, endRun} = heldRun()
         backend({answers})

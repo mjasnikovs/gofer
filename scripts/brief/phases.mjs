@@ -3,6 +3,7 @@ import {findPhantomPaths, formatPathCorrections} from './phantom.mjs'
 import {applyRefutations} from './refuted.mjs'
 import {
     extractToolingCommands,
+    onlyClaimedCommands,
     parseVerifyToolingOutput,
     replaceToolingWithVerified
 } from './tooling.mjs'
@@ -166,9 +167,18 @@ export async function verifyTooling(research, deps = {}) {
         return research
     }
     const {verified, rejected} = parseVerifyToolingOutput(answer)
+    const kept = onlyClaimedCommands(verified, commands)
+    for (const line of verified.filter(one => !kept.includes(one)))
+        deps.log?.(`tooling verdict names a command nobody ran, so it is dropped: ${line}`)
     for (const line of rejected) deps.log?.(`tooling rejected: ${line}`)
-    deps.onWorker?.('TOOLING', verified.length > 0 ? 'ok' : 'empty')
-    return replaceToolingWithVerified(research, verified)
+    // Neither list is an answer this pass could read, not a verdict that everything failed.
+    // Rewriting the section then states a failure that never happened and empties the menu.
+    if (kept.length === 0 && rejected.length === 0) {
+        deps.log?.('the tooling verdict could not be read; the commands reach the spec unverified')
+        return research
+    }
+    deps.onWorker?.('TOOLING', kept.length > 0 ? 'ok' : 'empty')
+    return replaceToolingWithVerified(research, kept)
 }
 
 /** Say so where the task names a file of this project that the project does not have. */
@@ -410,11 +420,14 @@ function isWholeSpec(text) {
  * cost the plan the answer it already had.
  */
 export async function critique(refined, researchText, settled, spec, deps = {}) {
+    // The same subtraction compose read. Handed the original task, the critique is told a
+    // constraint research refuted is authoritative, and puts back what compose was denied.
+    const {refined: task} = applyRefutations(refined, researchText)
     const verdict = classifyWorkerOutcome(
         await deps.runWorker({
             label: 'critique',
             toolNames: [],
-            prompt: critiquePrompt(spec, refined, researchText, formatAnswers(settled ?? []))
+            prompt: critiquePrompt(spec, task, researchText, formatAnswers(settled ?? []))
         })
     )
     if (verdict.kind === 'stopped') throw new PhaseStopped('critique')

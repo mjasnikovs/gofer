@@ -41,3 +41,10 @@ test('a runtime path and a glob are not files this project is missing', () => {
     const found = namedPaths('- write `user://save.json`, and every `*.gd` under `scripts/ui/`')
     assert.deepEqual([...found.keys()], [])
 })
+
+test('"new" alone does not exempt a line from the check', () => {
+    assert.deepEqual(
+        [...namedPaths('- the new panel must read `scripts/ui/menu.gd`').keys()],
+        ['scripts/ui/menu.gd']
+    )
+})

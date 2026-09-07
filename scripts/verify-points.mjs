@@ -1,4 +1,5 @@
 import {verifyPoint} from './ai-events.mjs'
+import {normalizeGodotCall} from './godot-tools.mjs'
 import {parseVerifyPoints} from './brief/phases.mjs'
 import {validateBashCommand} from './workspace-confinement.mjs'
 
@@ -39,7 +40,7 @@ const holds = (answered, wanted) =>
 ///
 /// It carries no clock of its own. What it waits for is the router, which serialises every call to
 /// one editor, and the turn's signal, which is what a user pressing Stop moves.
-async function runToolPoint(point, host, signal) {
+async function runToolPoint(point, host, domains, signal) {
     if (!host) {
         return {
             passed: false,
@@ -49,7 +50,8 @@ async function runToolPoint(point, host, signal) {
         }
     }
     try {
-        const answered = JSON.stringify((await host.call(point.tool, point.params, signal)) ?? null)
+        const written = normalizeGodotCall(domains, point.tool, point.params)
+        const answered = JSON.stringify((await host.call(point.tool, written, signal)) ?? null)
         if (point.contains && !holds(answered, point.contains)) {
             return {
                 passed: false,
@@ -84,7 +86,7 @@ async function runShellPoint(point, env, signal) {
     }
 }
 
-export async function runVerifyPoints({points, env, host, emit, signal}) {
+export async function runVerifyPoints({points, env, host, domains, emit, signal}) {
     const results = []
     for (const [index, point] of points.entries()) {
         emit(
@@ -98,7 +100,7 @@ export async function runVerifyPoints({points, env, host, emit, signal}) {
         )
         const {passed, output: written} =
             point.tool ?
-                await runToolPoint(point, host, signal)
+                await runToolPoint(point, host, domains, signal)
             :   await runShellPoint(point, env, signal)
         const output = tail(written)
         results.push({name: point.name, command: point.command, passed, output})

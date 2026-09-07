@@ -80,14 +80,18 @@ const BULLET = /^(\s*(?:[-*]|\d+\.)\s*)?([\s\S]*)$/u
  * "One rule per line" is what refine is asked for and not always what it writes. Deleting a
  * whole line for one refuted token takes the rules beside it with it, and those are gone with
  * no note in CONSTRAINTS at all. Splitting reads worse than refine wrote; it loses less.
+ *
+ * Only a semicolon. "and" joins clauses of one rule far more often than it joins two rules —
+ * "refuse a cell when `is_open` is false and the grid is full" — and cutting there leaves a
+ * fragment that reads as a rule the task never wrote. Losing a line beats inventing one.
  */
 function withoutRefutedClause(line, refuted) {
     const [, marker = '', body] = BULLET.exec(line)
     const kept = body
-        .split(/\s*;\s*|\s+and\s+/u)
+        .split(/\s*;\s*/u)
         .filter(clause => !tokensIn(clause).some(token => refuted.has(token)))
         .filter(clause => clause.trim().length > 0)
-    return kept.length === 0 ? null : `${marker}${kept.join(' and ')}`
+    return kept.length === 0 ? null : `${marker}${kept.join('; ')}`
 }
 
 /**

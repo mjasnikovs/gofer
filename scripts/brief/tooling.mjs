@@ -62,6 +62,16 @@ export function replaceToolingWithVerified(research, verified) {
     )
 }
 
+/**
+ * Only the verdicts whose first column is a command that was handed out.
+ *
+ * A child that paraphrases or "corrects" a command would otherwise promote one that was never
+ * run into TOOLING, which is the unrunnable step this module exists to keep out.
+ */
+export function onlyClaimedCommands(verified, commands) {
+    return verified.filter(line => commands.includes(line.trim().split(COLUMNS)[0].trim()))
+}
+
 /** The child's verdict, as two lists. Anything it did not classify is not verified. */
 export function parseVerifyToolingOutput(text) {
     const pick = name =>

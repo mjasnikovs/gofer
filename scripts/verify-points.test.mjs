@@ -239,3 +239,43 @@ test('a contains holding a quote matches the answer that holds it', async () => 
     const [result] = await runVerifyPoints({points, host, emit: () => undefined})
     assert.equal(result.passed, true)
 })
+
+test('a point written in a wrapper shape takes the same repair a model call takes', async () => {
+    const host = {
+        calls: [],
+        call(name, params) {
+            this.calls.push({name, params})
+            return Promise.resolve({ok: true})
+        }
+    }
+    const domains = [
+        {
+            name: 'godot_runtime',
+            description: 'the running game',
+            operations: [{op: 'input', summary: 'send input', params: {key: {type: 'string'}}}]
+        }
+    ]
+    const points = [
+        {name: 'flat', command: 'x', tool: 'godot_runtime', params: {op: 'input', key: 'space'}}
+    ]
+
+    const [result] = await runVerifyPoints({points, host, domains, emit: () => undefined})
+
+    assert.equal(result.passed, true)
+    assert.deepEqual(host.calls[0].params, {ops: [{op: 'input', key: 'space'}]})
+})
+
+test('a point naming an operation the tool does not have fails as a point, not as a throw', async () => {
+    const host = {call: () => Promise.resolve({ok: true})}
+    const domains = [
+        {name: 'godot_runtime', description: 'x', operations: [{op: 'input', summary: 'send'}]}
+    ]
+    const points = [
+        {name: 'wrong', command: 'x', tool: 'godot_runtime', params: {ops: [{op: 'nope'}]}}
+    ]
+
+    const [result] = await runVerifyPoints({points, host, domains, emit: () => undefined})
+
+    assert.equal(result.passed, false)
+    assert.match(result.output, /no 'nope' operation/u)
+})
