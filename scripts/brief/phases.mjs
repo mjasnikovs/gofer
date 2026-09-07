@@ -5,6 +5,7 @@ import {
     extractToolingCommands,
     onlyClaimedCommands,
     parseVerifyToolingOutput,
+    rejectedEveryCommand,
     replaceToolingWithVerified
 } from './tooling.mjs'
 import {
@@ -171,9 +172,10 @@ export async function verifyTooling(research, deps = {}) {
     for (const line of verified.filter(one => !kept.includes(one)))
         deps.log?.(`tooling verdict names a command nobody ran, so it is dropped: ${line}`)
     for (const line of rejected) deps.log?.(`tooling rejected: ${line}`)
-    // Neither list is an answer this pass could read, not a verdict that everything failed.
-    // Rewriting the section then states a failure that never happened and empties the menu.
-    if (kept.length === 0 && rejected.length === 0) {
+    // Nothing to keep is only a verdict of total failure when every command was rejected by name.
+    // A partial, empty, or renamed verdict is an answer this pass could not read; rewriting the
+    // section then states a failure that never happened and empties the menu.
+    if (kept.length === 0 && !rejectedEveryCommand(rejected, commands)) {
         deps.log?.('the tooling verdict could not be read; the commands reach the spec unverified')
         return research
     }

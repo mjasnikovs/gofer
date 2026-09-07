@@ -649,3 +649,31 @@ test('the critique reads the same refuted task compose did', async () => {
     assert.doesNotMatch(worker.calls[0].prompt, /refuse the cell/u)
     assert.match(worker.calls[0].prompt, /keep the input map/u)
 })
+
+test('a verdict whose every verified line was renamed is unreadable, not a total failure', async () => {
+    const worker = scriptedWorker([
+        ok('VERIFIED\n  npm test --silent  0 failures\n\nREJECTED\n  make ship  no such target')
+    ])
+    const logged = []
+    const out = await verifyTooling(TOOLING_RESEARCH, {
+        runWorker: worker.run,
+        log: line => logged.push(line)
+    })
+
+    assert.equal(out, TOOLING_RESEARCH)
+    assert.doesNotMatch(out, /every command this task named failed/u)
+    assert.match(logged.join('\n'), /could not be read/u)
+})
+
+test('a rejection that names only one command leaves the others claimed, not failed', async () => {
+    const worker = scriptedWorker([ok('VERIFIED\n\nREJECTED\n  make ship  no such target')])
+    const logged = []
+    const out = await verifyTooling(TOOLING_RESEARCH, {
+        runWorker: worker.run,
+        log: line => logged.push(line)
+    })
+
+    assert.equal(out, TOOLING_RESEARCH)
+    assert.doesNotMatch(out, /every command this task named failed/u)
+    assert.match(logged.join('\n'), /could not be read/u)
+})

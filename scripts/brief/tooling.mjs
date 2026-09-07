@@ -69,7 +69,20 @@ export function replaceToolingWithVerified(research, verified) {
  * run into TOOLING, which is the unrunnable step this module exists to keep out.
  */
 export function onlyClaimedCommands(verified, commands) {
-    return verified.filter(line => commands.includes(line.trim().split(COLUMNS)[0].trim()))
+    return verified.filter(line => commands.includes(commandOf(line)))
+}
+
+const commandOf = line => line.trim().split(COLUMNS)[0].trim()
+
+/**
+ * True only when the REJECTED list accounts for every command that was handed out.
+ *
+ * A verdict that rejects one of two and never mentions the other is a partial answer, and
+ * rewriting the section on it states a failure the unmentioned command never had.
+ */
+export function rejectedEveryCommand(rejected, commands) {
+    const denied = new Set(onlyClaimedCommands(rejected, commands).map(commandOf))
+    return commands.length > 0 && commands.every(command => denied.has(command))
 }
 
 /** The child's verdict, as two lists. Anything it did not classify is not verified. */

@@ -17,10 +17,25 @@ const TOKEN = /`([^`\s]+)`/gu
 
 const SOURCE = /\.(?:gd|tscn|tres|gdshader|godot|cfg|json|import|uid|png|md|ts|mjs)$/iu
 
-/** Words that make a line a plan to write the file rather than a claim it is there. */
-/// "new" alone is not one of them: the word appears in prose about files that already exist,
-/// and matching it exempted every line holding it from the check.
-const CREATES = /\b(?:create[sd]?|creating|scaffold|generate[sd]?|does not exist|not exist yet)\b/iu
+/// A verb has to act on THIS file to exempt it. `add`, `write` and `build` are the ordinary
+/// verbs of an edit instruction too, so matching them anywhere in the line exempted
+/// "add the pause toggle to `x.gd`" — the very phrasing an invented path arrives in.
+const VERB = 'add|build|create|generate|introduce|make|scaffold|write'
+
+/** Only a determiner or a word for "file" may stand between the verb and what it creates. */
+const CREATED_AFTER = new RegExp(
+    `\\b(?:${VERB})(?:s|d|es|ed|ing)?\\s+(?:(?:a|an|the|new|empty|file|files|script|scene|resource)\\s+)*$`,
+    'iu'
+)
+
+/** The same claim in the passive: `` `x.gd` `` is created. */
+const CREATED_BEFORE = new RegExp(
+    `^\\s*(?:is|are|gets?|will\\s+be|to\\s+be)\\s+(?:${VERB})(?:s|d|es|ed|n)?\\b`,
+    'iu'
+)
+
+/** Absence stated outright needs no verb and no adjacency. */
+const ABSENT = /\bdoes not exist|not exist yet\b/iu
 
 const strip = path => path.replace(/^res:\/\//u, '').replace(/^\.\//u, '')
 
@@ -31,10 +46,15 @@ const NOT_A_FILE = /^user:\/\/|[*?[\]]/u
 export function namedPaths(text) {
     const found = new Map()
     for (const line of (text ?? '').split('\n')) {
-        if (CREATES.test(line)) continue
+        if (ABSENT.test(line)) continue
+        // Other backticked tokens are blanked first: `make test` is a command, not a plan to
+        // write the file beside it.
+        const prose = line.replace(TOKEN, match => ' '.repeat(match.length))
         for (const match of line.matchAll(TOKEN)) {
             const path = strip(match[1])
             if (NOT_A_FILE.test(match[1])) continue
+            if (CREATED_AFTER.test(prose.slice(0, match.index))) continue
+            if (CREATED_BEFORE.test(prose.slice(match.index + match[0].length))) continue
             if (!SOURCE.test(path)) continue
             if (isAbsolute(path) || normalize(path).startsWith('..')) continue
             // Keyed by the resolved path, valued by the spelling the task used: a
