@@ -888,12 +888,20 @@ const MAX_INVENTORY_BYTES: usize = 64 * 1024;
 /// here. Tracked rather than every file on disk, deliberately: build output, caches and imported
 /// assets are not what a task is about, and a worker shown them reads them.
 ///
+/// Gofer's own paths are cut for the same reason: a worker asked how the project works read
+/// `addons/gofer/runtime_queue.gd`, which is Gofer's plumbing and never the task.
+///
 /// A worktree Git does not know about answers nothing, which leaves the workers exactly as they were
 /// before this existed.
 pub fn tracked_files(workspace: &Path) -> Option<String> {
     let listed = git_text(workspace, &["ls-files"]).ok()?;
-    let trimmed = listed.trim();
-    (!trimmed.is_empty()).then(|| bounded_inventory(trimmed))
+    let kept = listed
+        .lines()
+        .map(str::trim_end)
+        .filter(|path| !path.is_empty() && !is_never_the_users_work(path))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!kept.is_empty()).then(|| bounded_inventory(&kept))
 }
 
 /// The listing, cut to a size worth sending, and saying so when it was cut.
@@ -1760,6 +1768,31 @@ mod tests {
         git(directory.path(), &["add", "project.godot"]);
         git(directory.path(), &["commit", "-m", "Initial"]);
         directory
+    }
+
+    /// The brief's CONTEXT worker read `addons/gofer/runtime_queue.gd` off this listing and spent
+    /// its steps on Gofer's own plumbing.
+    #[test]
+    fn the_inventory_leaves_out_gofer_s_own_files() {
+        let repository = repository();
+        for path in [
+            "addons/gofer/runtime_queue.gd",
+            ".gofer/checks/boss.gd",
+            "player/player.gd",
+        ] {
+            let file = repository.path().join(path);
+            fs::create_dir_all(file.parent().expect("a parent")).expect("the directory");
+            fs::write(&file, "extends Node\n").expect("the file");
+            git(repository.path(), &["add", "-f", path]);
+        }
+        git(repository.path(), &["commit", "-m", "Add files"]);
+
+        let inventory = tracked_files(repository.path()).expect("a listing");
+
+        assert!(inventory.contains("player/player.gd"), "{inventory}");
+        assert!(inventory.contains("project.godot"), "{inventory}");
+        assert!(!inventory.contains("addons/gofer"), "{inventory}");
+        assert!(!inventory.contains(".gofer/"), "{inventory}");
     }
 
     fn status(directory: &Path) -> String {
