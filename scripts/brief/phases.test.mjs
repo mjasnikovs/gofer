@@ -139,14 +139,25 @@ test('only the APIS worker reaches past the worktree, and only when search is co
     const withSearch = scriptedWorker([ok('a'), ok('b'), ok('c'), ok('d')])
     await research(REFINED, {runWorker: withSearch.run, canSearch: true})
     const tools = Object.fromEntries(withSearch.calls.map(call => [call.label, call.toolNames]))
-    assert.deepEqual(tools['worker:apis'], ['read', 'bash', 'godot_docs_search', 'web_search'])
+    assert.deepEqual(tools['worker:apis'], [
+        'read',
+        'bash',
+        'godot_docs_search',
+        'godot_script',
+        'web_search'
+    ])
     assert.deepEqual(tools['worker:files'], ['read', 'bash'])
     assert.deepEqual(tools['worker:context'], ['read', 'bash'])
     assert.deepEqual(tools['worker:tooling'], ['read', 'bash'])
 
     const offline = scriptedWorker([ok('a'), ok('b'), ok('c'), ok('d')])
     await research(REFINED, {runWorker: offline.run, canSearch: false})
-    assert.deepEqual(offline.calls[1].toolNames, ['read', 'bash', 'godot_docs_search'])
+    assert.deepEqual(offline.calls[1].toolNames, [
+        'read',
+        'bash',
+        'godot_docs_search',
+        'godot_script'
+    ])
 })
 
 test('the APIS worker is handed the finished FILES map', async () => {
@@ -420,4 +431,42 @@ test('the worker list and the assembly order are the same list', () => {
         RESEARCH_WORKERS.map(worker => worker.section),
         ['FILES', 'APIS', 'CONTEXT', 'TOOLING']
     )
+})
+
+test('a verification line naming a godot tool is parsed as a call, not as a command', () => {
+    const spec =
+        'VERIFY\n```sh\n'
+        + '# the bullet reaches the tree\n'
+        + 'godot_runtime {"ops": [{"op": "run"}], "contains": "Bullet"}\n'
+        + '# no assertion, so the call answering is all it proves\n'
+        + 'godot_runtime {"ops": [{"op": "get_state"}]}\n'
+        + '```\n'
+
+    assert.deepEqual(parseVerifyPoints(spec), [
+        {
+            name: 'the bullet reaches the tree',
+            command: 'godot_runtime {"ops": [{"op": "run"}], "contains": "Bullet"}',
+            tool: 'godot_runtime',
+            params: {ops: [{op: 'run'}]},
+            contains: 'Bullet'
+        },
+        {
+            name: 'no assertion, so the call answering is all it proves',
+            command: 'godot_runtime {"ops": [{"op": "get_state"}]}',
+            tool: 'godot_runtime',
+            params: {ops: [{op: 'get_state'}]}
+        }
+    ])
+})
+
+test('a line that only looks like a tool call stays a shell command', () => {
+    const notJson = 'VERIFY\n```sh\n# still the shell\ngodot_runtime run --scene main\n```'
+    assert.deepEqual(parseVerifyPoints(notJson), [
+        {name: 'still the shell', command: 'godot_runtime run --scene main'}
+    ])
+
+    const broken = 'VERIFY\n```sh\n# broken json\ngodot_runtime {"ops": [\n```'
+    assert.deepEqual(parseVerifyPoints(broken), [
+        {name: 'broken json', command: 'godot_runtime {"ops": ['}
+    ])
 })

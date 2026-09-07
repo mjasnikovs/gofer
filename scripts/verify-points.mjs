@@ -24,13 +24,62 @@ function tail(text) {
 function refusedPoint(error) {
     const reason = String(error?.message ?? error ?? 'the command was refused')
     return (
-        `${reason} A verification point is one shell command and has no tools of its own — check `
-        + 'this by booting the game instead, with `godot --headless --audio-driver Dummy --script '
-        + '.gofer/checks/<name>.gd`.'
+        `${reason} A verification point is one line: a shell command, or a call to the running `
+        + 'game written as `godot_runtime {"ops": [...], "contains": "<the text the answer must '
+        + 'hold>"}`, which reaches the editor without the shell.'
     )
 }
 
-export async function runVerifyPoints({points, env, emit, signal}) {
+/// A point that names a godot tool, run through the same channel the model's own calls take.
+///
+/// It carries no clock of its own. What it waits for is the router, which serialises every call to
+/// one editor, and the turn's signal, which is what a user pressing Stop moves.
+async function runToolPoint(point, host, signal) {
+    if (!host) {
+        return {
+            passed: false,
+            output:
+                `${point.tool} cannot be called here: this turn has no channel to the editor. `
+                + 'Check this with a shell command instead.'
+        }
+    }
+    try {
+        const answered = JSON.stringify((await host.call(point.tool, point.params, signal)) ?? null)
+        if (point.contains && !answered.includes(point.contains)) {
+            return {
+                passed: false,
+                output:
+                    `The call was answered, and nothing in the answer holds \`${point.contains}\`.`
+                    + `\n${answered}`
+            }
+        }
+        return {passed: true, output: answered}
+    } catch (error) {
+        return {passed: false, output: String(error?.message ?? error ?? 'the call did not run')}
+    }
+}
+
+async function runShellPoint(point, env, signal) {
+    let outcome
+    try {
+        validateBashCommand(point.command)
+        outcome = await env.exec(point.command, {
+            timeout: POINT_TIMEOUT_SECONDS,
+            abortSignal: signal
+        })
+    } catch (error) {
+        outcome = {ok: false, error: {message: refusedPoint(error)}}
+    }
+    return {
+        passed: outcome.ok && outcome.value.exitCode === 0,
+        output:
+            outcome.ok ?
+                `${outcome.value.stdout ?? ''}\n${outcome.value.stderr ?? ''}`
+            :   String(outcome.error?.message ?? outcome.error ?? 'the command did not run')
+    }
+}
+
+export async function runVerifyPoints({points, env, host, emit, signal}) {
     const results = []
     for (const [index, point] of points.entries()) {
         emit(
@@ -42,21 +91,11 @@ export async function runVerifyPoints({points, env, emit, signal}) {
                 of: points.length
             })
         )
-        let outcome
-        try {
-            validateBashCommand(point.command)
-            outcome = await env.exec(point.command, {
-                timeout: POINT_TIMEOUT_SECONDS,
-                abortSignal: signal
-            })
-        } catch (error) {
-            outcome = {ok: false, error: {message: refusedPoint(error)}}
-        }
-        const passed = outcome.ok && outcome.value.exitCode === 0
-        const output =
-            outcome.ok ?
-                tail(`${outcome.value.stdout ?? ''}\n${outcome.value.stderr ?? ''}`)
-            :   tail(String(outcome.error?.message ?? outcome.error ?? 'the command did not run'))
+        const {passed, output: written} =
+            point.tool ?
+                await runToolPoint(point, host, signal)
+            :   await runShellPoint(point, env, signal)
+        const output = tail(written)
         results.push({name: point.name, command: point.command, passed, output})
         emit(
             verifyPoint({

@@ -139,7 +139,93 @@ test('a point that reaches outside the workspace is refused, not run', async () 
 
     assert.equal(results[0].passed, false)
     assert.match(results[0].output, /absolute path/u)
-    assert.match(results[0].output, /has no tools of its own/u)
+    assert.match(results[0].output, /godot_runtime \{"ops"/u)
     assert.deepEqual(env.ran, ['godot --headless --script .gofer/checks/boss.gd'])
     assert.equal(results[1].passed, true)
+})
+
+const TOOL_SPEC =
+    'VERIFY\n```sh\n'
+    + '# the bullet is in the running tree\n'
+    + 'godot_runtime {"ops": [{"op": "run"}, {"op": "get_tree"}], "contains": "Bullet"}\n'
+    + '```\n'
+
+function hostAnswering(result) {
+    const calls = []
+    return {
+        calls,
+        call: (tool, params) => {
+            calls.push({tool, params})
+            return result instanceof Error ? Promise.reject(result) : Promise.resolve(result)
+        }
+    }
+}
+
+test('a point that names a godot tool is called, not put through the shell', async () => {
+    const env = {exec: () => assert.fail('a tool point must not reach the shell')}
+    const host = hostAnswering({ops: [{op: 'get_tree', result: {children: ['Bullet']}}]})
+
+    const results = await runVerifyPoints({
+        points: verifyPointsIn([{sender: 'user', text: TOOL_SPEC}]),
+        env,
+        host,
+        emit: () => {}
+    })
+
+    assert.deepEqual(host.calls, [
+        {tool: 'godot_runtime', params: {ops: [{op: 'run'}, {op: 'get_tree'}]}}
+    ])
+    assert.equal(results[0].passed, true)
+    assert.equal(results[0].name, 'the bullet is in the running tree')
+})
+
+test('`contains` is the assertion: the call answering is not enough', async () => {
+    const host = hostAnswering({ops: [{op: 'get_tree', result: {children: []}}]})
+
+    const results = await runVerifyPoints({
+        points: verifyPointsIn([{sender: 'user', text: TOOL_SPEC}]),
+        env: {exec: () => assert.fail('a tool point must not reach the shell')},
+        host,
+        emit: () => {}
+    })
+
+    assert.equal(results[0].passed, false)
+    assert.match(results[0].output, /Bullet/u)
+})
+
+test('a tool point that cannot be called fails by saying so, not by crashing', async () => {
+    const points = verifyPointsIn([{sender: 'user', text: TOOL_SPEC}])
+    const env = {exec: () => assert.fail('a tool point must not reach the shell')}
+
+    const refused = await runVerifyPoints({
+        points,
+        env,
+        host: hostAnswering(new Error('session_closed: no editor is running')),
+        emit: () => {}
+    })
+    assert.equal(refused[0].passed, false)
+    assert.match(refused[0].output, /session_closed/u)
+
+    const unreachable = await runVerifyPoints({points, env, emit: () => {}})
+    assert.equal(unreachable[0].passed, false)
+    assert.match(unreachable[0].output, /no channel to the editor/u)
+})
+
+test('a tool line the shell would refuse is never handed to the shell', async () => {
+    const spec =
+        'VERIFY\n```sh\n'
+        + '# the scene the shell rule will not name\n'
+        + 'godot_runtime {"ops": [{"op": "run", "scene": "scenes/main.tscn"}]}\n'
+        + '```\n'
+    const host = hostAnswering({ops: [{op: 'run', result: {playing: true}}]})
+
+    const results = await runVerifyPoints({
+        points: verifyPointsIn([{sender: 'user', text: spec}]),
+        env: {exec: () => assert.fail('a tool point must not reach the shell')},
+        host,
+        emit: () => {}
+    })
+
+    assert.equal(results[0].passed, true)
+    assert.equal(host.calls[0].params.ops[0].scene, 'scenes/main.tscn')
 })

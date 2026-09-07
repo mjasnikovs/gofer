@@ -828,6 +828,7 @@ export async function runAgent({
         attemptState.verifyResults = await runVerifyPoints({
             points: verifyPoints,
             env,
+            host,
             emit,
             signal
         })

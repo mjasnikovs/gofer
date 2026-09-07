@@ -20,7 +20,14 @@ import {confineTool} from './workspace-confinement.mjs'
 
 export const SUBAGENT_TOOL_NAME = 'subagent'
 
-export const CHILD_TOOL_NAMES = ['read', 'bash', 'godot_docs_search', 'web_search', 'ask_user']
+export const CHILD_TOOL_NAMES = [
+    'read',
+    'bash',
+    'godot_docs_search',
+    'godot_script',
+    'web_search',
+    'ask_user'
+]
 
 export const SUBAGENT_TOOL_NAMES = ['read', 'bash']
 
@@ -57,20 +64,46 @@ function pollIntervalMs(timeoutMs) {
 
 const MAX_REPORTED_STEPS = 12
 
-const CHILD_SYSTEM_PROMPT =
-    'You are a research sub-agent. You have been given one question by another agent that is '
-    + 'working in this same checkout, and it will see nothing you read — only what you write in '
-    + 'your final message.\n'
-    + '\n'
-    + 'You can read files and run shell commands. You cannot change anything: you have no write '
-    + 'tool, no edit tool, and no access to the Godot editor. Do not try to acquire them, and do '
-    + 'not use the shell to modify, move or delete anything.\n'
-    + '\n'
-    + 'Work as briefly as the question allows, then answer it. Your answer must stand on its own: '
-    + 'state the conclusion, name the files and line numbers it rests on, and quote only the few '
-    + 'lines that actually decide it. Do not paste whole files, whole command output, or a summary '
-    + 'of what you did — the agent that asked wants the finding, not the search. If the answer is '
-    + 'not in this checkout, say so plainly instead of guessing.'
+/// What each tool a child may hold is called in the sentence that lists them.
+///
+/// The sentence used to name read and bash whatever the child was given. A brief worker holding
+/// godot_docs_search and godot_script was told it had neither, and reached for grep instead of the
+/// language server that was sitting in its tool list.
+const CHILD_TOOL_SENTENCES = {
+    read: 'read files',
+    bash: 'run shell commands',
+    godot_docs_search: 'search the Godot documentation with godot_docs_search',
+    godot_script:
+        'ask the language server about GDScript with godot_script — where a symbol is '
+        + 'defined, who calls it, and its exact signature',
+    web_search: 'search the web with web_search',
+    ask_user: 'talk to the user with ask_user'
+}
+
+function inWords(parts) {
+    if (parts.length === 0) return 'nothing'
+    if (parts.length === 1) return parts[0]
+    return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
+}
+
+export function childSystemPrompt(toolNames = SUBAGENT_TOOL_NAMES) {
+    const held = toolNames.map(name => CHILD_TOOL_SENTENCES[name]).filter(Boolean)
+    return (
+        'You are a research sub-agent. You have been given one question by another agent that is '
+        + 'working in this same checkout, and it will see nothing you read — only what you write in '
+        + 'your final message.\n'
+        + '\n'
+        + `You can ${inWords(held)}. You cannot change anything: you have no write tool and no `
+        + 'edit tool, and every tool you do hold only reads. Do not try to acquire more, and do '
+        + 'not use the shell to modify, move or delete anything.\n'
+        + '\n'
+        + 'Work as briefly as the question allows, then answer it. Your answer must stand on its '
+        + 'own: state the conclusion, name the files and line numbers it rests on, and quote only '
+        + 'the few lines that actually decide it. Do not paste whole files, whole command output, '
+        + 'or a summary of what you did — the agent that asked wants the finding, not the search. '
+        + 'If the answer is not in this checkout, say so plainly instead of guessing.'
+    )
+}
 
 const SUBAGENT_DESCRIPTION =
     'Delegate a bounded question to an isolated read-only agent and get back only its conclusion. '
@@ -197,23 +230,50 @@ function underCommandClock(tool, {timeoutMs, timers}) {
 
 const CONFINED_CHILD_TOOLS = {read: createReadTool, bash: createBashTool}
 
+/// The godot_script operations that only ask a question. A child holds these and nothing else of
+/// that domain, because a research agent that could call `edit` or `save` would no longer be one.
+const ASKS_THE_LANGUAGE_SERVER = new Set([
+    'list',
+    'open',
+    'close',
+    'diagnostics',
+    'completion',
+    'declaration',
+    'definition',
+    'references',
+    'highlights',
+    'hover',
+    'signature_help',
+    'document_symbols',
+    'workspace_symbols'
+])
+
+function childGodotTool(name, {domains, host}, keep) {
+    if (!host || !Array.isArray(domains)) {
+        throw new Error(
+            `A child was asked for ${name} without the tool host that answers it. `
+                + 'Pass `host` and `domains` to createChildTools.'
+        )
+    }
+    const found = domains.find(domain => domain.name === name)
+    if (!found) {
+        throw new Error(
+            `A child was asked for ${name}, but the backend did not offer that domain for this turn.`
+        )
+    }
+    const operations = keep ? found.operations.filter(one => keep.has(one.op)) : found.operations
+    if (operations.length === 0) {
+        throw new Error(
+            `A child was asked for ${name}, and none of the operations it may hold are in the `
+                + 'catalogue the backend offered.'
+        )
+    }
+    return createGodotTools([{...found, operations}], host)[0]
+}
+
 const REACHING_CHILD_TOOLS = {
-    godot_docs_search: ({domains, host}) => {
-        if (!host || !Array.isArray(domains)) {
-            throw new Error(
-                'A child was asked for godot_docs_search without the tool host that answers it. '
-                    + 'Pass `host` and `domains` to createChildTools.'
-            )
-        }
-        const docs = domains.filter(domain => domain.name === 'godot_docs_search')
-        if (docs.length === 0) {
-            throw new Error(
-                'A child was asked for godot_docs_search, but the backend did not offer that '
-                    + 'domain for this turn.'
-            )
-        }
-        return createGodotTools(docs, host)[0]
-    },
+    godot_docs_search: deps => childGodotTool('godot_docs_search', deps),
+    godot_script: deps => childGodotTool('godot_script', deps, ASKS_THE_LANGUAGE_SERVER),
     web_search: ({searchProvider = 'exa', braveApiKey}) =>
         createWebSearchTool({provider: searchProvider, apiKey: braveApiKey}),
     ask_user: ({host, ownerCallId, agreed, model}) => {
@@ -353,7 +413,7 @@ export function eventProgress(emit, build, extra = {}) {
 async function attemptSubagent({
     prompt,
     images = [],
-    systemPrompt = CHILD_SYSTEM_PROMPT,
+    systemPrompt,
     toolNames = SUBAGENT_TOOL_NAMES,
     workspacePath,
     models,
@@ -401,7 +461,7 @@ async function attemptSubagent({
 
     const agent = new Agent({
         initialState: {
-            systemPrompt,
+            systemPrompt: systemPrompt ?? childSystemPrompt(toolNames),
             model,
             thinkingLevel,
             tools,
@@ -533,7 +593,7 @@ function cutAnswer(text, maxChars) {
 export async function runSubagentOutcome({
     prompt,
     images = [],
-    systemPrompt = CHILD_SYSTEM_PROMPT,
+    systemPrompt,
     toolNames = SUBAGENT_TOOL_NAMES,
     workspacePath,
     models,

@@ -71,8 +71,8 @@ export const RESEARCH_WORKERS = [
         label: 'apis',
         toolNames: deps =>
             deps.canSearch ?
-                ['read', 'bash', 'godot_docs_search', 'web_search']
-            :   ['read', 'bash', 'godot_docs_search'],
+                ['read', 'bash', 'godot_docs_search', 'godot_script', 'web_search']
+            :   ['read', 'bash', 'godot_docs_search', 'godot_script'],
         build: (refined, deps, done) =>
             apisPrompt(refined, {
                 inventory: deps.inventory,
@@ -238,6 +238,29 @@ export function declaresNoCommands(spec) {
     return lines !== null && lines.length === 1 && lines[0] === NO_COMMANDS
 }
 
+/// A verification line that reaches the editor instead of the shell: a tool name, then one JSON
+/// object. `contains` is the parser's own key — the text the answer must hold — so it never
+/// reaches the tool.
+const TOOL_POINT = /^(godot_[a-z_]+)[ \t]+(\{[\s\S]*\})$/u
+
+function toolPoint(line) {
+    const match = TOOL_POINT.exec(line)
+    if (!match) return null
+    let written
+    try {
+        written = JSON.parse(match[2])
+    } catch {
+        return null
+    }
+    if (!written || typeof written !== 'object' || Array.isArray(written)) return null
+    const {contains, ...params} = written
+    return {
+        tool: match[1],
+        params,
+        ...(typeof contains === 'string' && contains.length > 0 ? {contains} : {})
+    }
+}
+
 export function parseVerifyPoints(spec) {
     const body = verifyBlockBody(spec)
     if (body === null) return null
@@ -257,7 +280,11 @@ export function parseVerifyPoints(spec) {
             pending = ''
             continue
         }
-        points.push({name: pending.length > 0 ? pending : line, command: line})
+        points.push({
+            name: pending.length > 0 ? pending : line,
+            command: line,
+            ...(toolPoint(line) ?? {})
+        })
         pending = ''
     }
     return points.length > 0 ? points : null
@@ -271,9 +298,10 @@ export function stripPreamble(spec) {
 const NEEDS_VERIFY =
     'STOP. Your previous draft had no VERIFY block. A specification without one cannot be checked '
     + 'and will not be accepted. Write the whole specification again, and end it with a VERIFY '
-    + 'section holding a fenced ```sh block with one shell command per line, taken from the TOOLING '
-    + `section of the research — or holding exactly \`${NO_COMMANDS}\` if TOOLING lists no command. `
-    + 'Do not invent one to fill the block. Nothing else about the draft needs to change.\n\n'
+    + 'section holding a fenced ```sh block with one check per line — a shell command from the '
+    + 'TOOLING section of the research, or a `godot_runtime {"ops": [...], "contains": "..."}` call '
+    + `— or holding exactly \`${NO_COMMANDS}\` if there is nothing to run. Do not invent one to `
+    + 'fill the block. Nothing else about the draft needs to change.\n\n'
 
 export async function compose(refined, researchText, settled, deps = {}) {
     const prompt = composePrompt(refined, researchText, formatAnswers(settled ?? []))
