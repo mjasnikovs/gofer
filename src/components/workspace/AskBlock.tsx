@@ -11,6 +11,7 @@ import {Spinner} from '@astryxdesign/core/Spinner'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {Text} from '@astryxdesign/core/Text'
 import {Token} from '@astryxdesign/core/Token'
+import {ChatComposer, ChatComposerDrawer} from '@astryxdesign/core/Chat'
 import type {ChatComposerInputHandle} from '@astryxdesign/core/Chat'
 import {TextField} from '../TextField'
 import {AttachmentPicker, AttachmentThumbnails, GameCapturePicker} from './AttachmentControls'
@@ -87,6 +88,8 @@ const ASK_SURFACE = 'gofer-ask-surface'
 const ASK_OPTION = 'gofer-ask-option'
 
 const RECOMMENDED_STYLE = {borderColor: 'var(--color-border-green)'} as const
+
+const ANSWER_INPUT_STYLE = {minHeight: 'calc(var(--spacing-12) + var(--spacing-10))'} as const
 
 function equalColumns(count: number) {
     return {gridTemplateColumns: `repeat(${String(count)}, minmax(0, 1fr))`}
@@ -419,69 +422,101 @@ function Asking({prompt, onAnswer, canAskAgain = true}: AskingProps) {
                         />
                     )}
                     <VStack gap={1}>
-                        <HStack
-                            gap={2}
-                            align='center'
-                        >
-                            <StackItem size='fill'>
-                                <Text type='supporting'>Your answer</Text>
-                            </StackItem>
-                            <AttachmentPicker
-                                canAttach={canAttach}
-                                supportsImages={supportsImages}
-                                onSelect={files => {
-                                    void pictures.select(files)
-                                }}
-                            />
-                            <GameCapturePicker
-                                canAttach={canAttach}
-                                supportsImages={supportsImages}
-                                onSelect={files => {
-                                    void pictures.select(files)
-                                }}
-                                onError={setAttachError}
-                            />
-                        </HStack>
-                        <TextField
-                            kind='rich'
-                            label='Your answer'
-                            placeholder=''
+                        <Text type='supporting'>Your answer</Text>
+                        <ChatComposer
+                            elevation='none'
+                            density='spacious'
                             value={draft}
-                            maxRows={6}
-                            handleRef={answerInput}
-                            rootRef={keepRoot}
-                            triggers={[fileMentions.trigger]}
-                            canSubmit={hasAnswer}
-                            onKeyDown={fileMentions.onKeyDown}
+                            onChange={setDraft}
                             onSubmit={() => {
                                 send(prompt.isDelegated ? {again: true} : {})
                             }}
-                            onChange={setDraft}
-                            onFiles={files => {
-                                const images = imageFiles(files)
-                                if (!canAttach || images.length === 0) return
-                                void pictures.select(images)
-                            }}
-                            onPaste={(event, text) => {
-                                if (!canAttach) return undefined
-                                const images = clipboardItemImages(event.clipboardData)
-                                if (images.length > 0) {
-                                    void pictures.select(images)
-                                    return true
-                                }
-                                if (text !== '') return undefined
-                                void pictures.attachClipboardImage()
-                                return true
-                            }}
+                            headerActions={
+                                <>
+                                    <AttachmentPicker
+                                        canAttach={canAttach}
+                                        supportsImages={supportsImages}
+                                        onSelect={files => {
+                                            void pictures.select(files)
+                                        }}
+                                    />
+                                    <GameCapturePicker
+                                        canAttach={canAttach}
+                                        supportsImages={supportsImages}
+                                        onSelect={files => {
+                                            void pictures.select(files)
+                                        }}
+                                        onError={setAttachError}
+                                    />
+                                </>
+                            }
+                            drawer={
+                                pictures.attachments.length > 0 ?
+                                    <ChatComposerDrawer>
+                                        <AttachmentThumbnails
+                                            attachments={pictures.attachments}
+                                            isDisabled={false}
+                                            onEdit={pictures.edit}
+                                            onRemove={pictures.remove}
+                                        />
+                                    </ChatComposerDrawer>
+                                :   undefined
+                            }
+                            sendButton={
+                                prompt.isDelegated ?
+                                    <Button
+                                        label='Done, build it'
+                                        variant='primary'
+                                        isDisabled={!canApprove}
+                                        onClick={() => {
+                                            send({approved: true})
+                                        }}
+                                    />
+                                :   <Button
+                                        label='Send'
+                                        variant='primary'
+                                        isDisabled={!hasAnswer}
+                                        onClick={() => {
+                                            send()
+                                        }}
+                                    />
+                            }
+                            input={
+                                <TextField
+                                    kind='rich'
+                                    label='Your answer'
+                                    placeholder=''
+                                    value={draft}
+                                    maxRows={6}
+                                    style={ANSWER_INPUT_STYLE}
+                                    handleRef={answerInput}
+                                    rootRef={keepRoot}
+                                    triggers={[fileMentions.trigger]}
+                                    canSubmit={hasAnswer}
+                                    onKeyDown={fileMentions.onKeyDown}
+                                    onSubmit={() => {
+                                        send(prompt.isDelegated ? {again: true} : {})
+                                    }}
+                                    onChange={setDraft}
+                                    onFiles={files => {
+                                        const images = imageFiles(files)
+                                        if (!canAttach || images.length === 0) return
+                                        void pictures.select(images)
+                                    }}
+                                    onPaste={(event, text) => {
+                                        if (!canAttach) return undefined
+                                        const images = clipboardItemImages(event.clipboardData)
+                                        if (images.length > 0) {
+                                            void pictures.select(images)
+                                            return true
+                                        }
+                                        if (text !== '') return undefined
+                                        void pictures.attachClipboardImage()
+                                        return true
+                                    }}
+                                />
+                            }
                         />
-                        {pictures.attachments.length > 0 && (
-                            <AttachmentThumbnails
-                                attachments={pictures.attachments}
-                                isDisabled={false}
-                                onEdit={pictures.edit}
-                                onRemove={pictures.remove}
-                            />
-                        )}
                         {attachError !== undefined && (
                             <Banner
                                 status='error'
@@ -532,26 +567,6 @@ function Asking({prompt, onAnswer, canAskAgain = true}: AskingProps) {
                                 }
                                 onClick={() => {
                                     send({again: true})
-                                }}
-                            />
-                        )}
-                        {!prompt.isDelegated && (
-                            <Button
-                                label='Send'
-                                variant='primary'
-                                isDisabled={!hasAnswer}
-                                onClick={() => {
-                                    send()
-                                }}
-                            />
-                        )}
-                        {prompt.isDelegated && (
-                            <Button
-                                label='Done, build it'
-                                variant='primary'
-                                isDisabled={!canApprove}
-                                onClick={() => {
-                                    send({approved: true})
                                 }}
                             />
                         )}

@@ -284,6 +284,14 @@ describe('answering with a picture', () => {
 })
 
 describe('one question, in the feed', () => {
+    it('draws the answer box as a box, not an invisible strip', () => {
+        show(call(), [question()])
+
+        const shell = answerBox().closest('.astryx-chat-composer')
+        expect(shell).not.toBeNull()
+        expect(answerBox().closest('[style*="min-height"]')).not.toBeNull()
+    })
+
     it('sends an option the moment it is pressed', async () => {
         const {answer} = show(call(), [question()])
 
