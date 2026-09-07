@@ -848,6 +848,30 @@ test('a manual compaction summarises a conversation nowhere near the line', asyn
     )
 })
 
+test('retries a compaction the provider dropped, the way a turn is retried', async context => {
+    const mock = startScriptedServer([
+        {error: {status: 503, message: 'service unavailable'}},
+        {text: 'SUMMARY ON THE SECOND ASK'}
+    ])
+    const url = await baseUrl(context, mock.server)
+    const events = []
+
+    const completion = await runCompaction({
+        settings: servedBy(url),
+        agentMessages: longConversation(200, 3_500),
+        emit: event => events.push(event),
+        retry: {attempts: 2, baseDelayMs: 0, maxDelayMs: 0}
+    })
+
+    assert.equal(completion.type, 'compact-done')
+    assert.ok(completion.summarised > 0, 'the second ask is the one that answers')
+    assert.deepEqual(
+        events.filter(event => event.type === 'retry-scheduled').length,
+        1,
+        'the wait is reported, not silent'
+    )
+})
+
 test('a manual compaction still writes a summary with automatic compaction turned off', async context => {
     const mock = startScriptedServer([{text: 'SUMMARY WRITTEN ANYWAY'}])
     const url = await baseUrl(context, mock.server)

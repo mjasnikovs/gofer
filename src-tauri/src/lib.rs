@@ -983,14 +983,15 @@ async fn send_ai_message(
 ///
 /// It takes the same stream channel a chat turn does, because it runs as one: that is what Stop
 /// reaches, and what keeps it off the single provider connection while a turn is on it. The
-/// compacted transcript comes back as a `compact-done` event on that channel, not as a return
-/// value — the window is the side that holds and saves the conversation.
+/// compacted transcript comes back in this reply rather than only on that channel, because the two
+/// are separate IPC messages and the window cannot tell a lost race from a compaction that did not
+/// happen.
 #[tauri::command]
 async fn compact_ai_context(
     app: AppHandle,
     request: ai_turn::CompactRequest,
     stream: tauri::ipc::Channel<ai_turn::AiStreamPayload>,
-) -> Result<(), CommandError> {
+) -> Result<Option<ai_turn::CompactionSummary>, CommandError> {
     ai_turn::run_compaction(app, request, stream).await
 }
 

@@ -969,6 +969,8 @@ export async function runCompaction({
     credentialHost,
     emit,
     signal,
+    timers = realTimers,
+    retry: retryOverride,
     world = LIVE_WORLD
 }) {
     const {models, model} = world.createModelContext({
@@ -982,19 +984,45 @@ export async function runCompaction({
     const stored = Array.isArray(agentMessages) ? agentMessages : []
     const tokensBefore = estimateContextTokens(stored).tokens
     emit(compactionStart(tokensBefore, model.contextWindow))
+    const retry = {...TURN_RETRY, ...retryOverride}
+    const compaction = manualCompactionSettings(
+        settings.compactionPercent ?? TUNING_DEFAULTS.compactionPercent,
+        model.contextWindow
+    )
+    // A compaction is one provider request with no turn around it, and it used to be the only one
+    // put to the provider once. The failures it lost to are the ones a turn waits out: a local
+    // server reloading, a hosted one throttling.
+    const summarise = async () => {
+        for (let attempt = 0; ; attempt += 1) {
+            try {
+                return await compactMessages(
+                    stored,
+                    models,
+                    model,
+                    compaction,
+                    parentThinkingLevel(settings),
+                    signal
+                )
+            } catch (failure) {
+                if (signal?.aborted) throw failure
+                if (attempt >= retry.attempts || !isWorthRetrying(failure, model)) throw failure
+                const delayMs = retryDelay(attempt + 1, retry)
+                emit(
+                    retryScheduled({
+                        attempt: attempt + 1,
+                        maxAttempts: retry.attempts,
+                        delayMs,
+                        errorMessage: failure.message
+                    })
+                )
+                await abortableWait(delayMs, signal, timers)
+                emit(retryStart(attempt + 1, retry.attempts))
+            }
+        }
+    }
     let compacted
     try {
-        compacted = await compactMessages(
-            stored,
-            models,
-            model,
-            manualCompactionSettings(
-                settings.compactionPercent ?? TUNING_DEFAULTS.compactionPercent,
-                model.contextWindow
-            ),
-            parentThinkingLevel(settings),
-            signal
-        )
+        compacted = await summarise()
     } finally {
         emit(compactionEnd())
     }

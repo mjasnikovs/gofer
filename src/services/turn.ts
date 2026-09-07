@@ -13,9 +13,9 @@ import {
     withoutStatus
 } from '../models/chat-timeline'
 import type {
-    AiStreamEvent,
     AiStreamPayload,
     ChatAttachment,
+    CompactionSummary,
     Message,
     StoredChat
 } from '../models/chat'
@@ -47,10 +47,7 @@ export type TurnDependencies = Readonly<{
     ) => Promise<void>
     cancel: (requestId: number) => Promise<unknown>
     steer: (request: SteerAiRequest) => Promise<unknown>
-    compact: (
-        request: CompactAiContextRequest,
-        receive: (payload: AiStreamPayload) => void
-    ) => Promise<void>
+    compact: (request: CompactAiContextRequest) => Promise<CompactionSummary | undefined>
 }>
 
 export type TurnRunner = Readonly<{
@@ -375,22 +372,17 @@ export function createTurnRunner({send, cancel, steer, compact}: TurnDependencie
             if (activeRequestId !== undefined) return
             const requestId = nextRequestId++
             const last = current.messages.at(-1)
-            let done: Extract<AiStreamEvent, {type: 'compact-done'}> | undefined
+            let done: CompactionSummary | undefined
             activeRequestId = requestId
             publish({...cleared(current), isStreaming: true})
             try {
-                await compact(
-                    {
-                        requestId,
-                        taskId: current.taskId,
-                        agentMessages: current.agentMessages
-                    },
-                    payload => {
-                        if (payload.requestId !== requestId) return
-                        if (!isAiStreamEvent(payload.event)) return
-                        if (payload.event.type === 'compact-done') done = payload.event
-                    }
-                )
+                // The summary is the command's answer, not a channel event: the two are separate
+                // IPC messages, and one that lost the race read as a compaction that never ran.
+                done = await compact({
+                    requestId,
+                    taskId: current.taskId,
+                    agentMessages: current.agentMessages
+                })
             } catch (error) {
                 publish({...current, isStreaming: false, error: toCommandError(error).message})
                 return

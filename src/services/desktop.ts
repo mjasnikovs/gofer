@@ -44,6 +44,7 @@ import type {
 import type {
     AiStreamPayload,
     ChatAttachment,
+    CompactionSummary,
     Message,
     StoredChat,
     ToolApprovalPrompt,
@@ -186,7 +187,7 @@ export type DesktopCommandMap = Readonly<{
     close_script_document: CommandSpec<{request: OpenScriptRequest}, void>
     compact_ai_context: CommandSpec<
         {request: CompactAiContextRequest; stream: Channel<AiStreamPayload>},
-        void
+        CompactionSummary | undefined
     >
     create_chat_task: CommandSpec<{bringChanges: boolean}, StoredChat>
     create_project_backup: CommandSpec<undefined, BackupResult>

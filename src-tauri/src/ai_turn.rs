@@ -1134,12 +1134,25 @@ pub(crate) async fn run_judge(
     .map_err(CommandError::coded("memory_judge_failed"))
 }
 
+/// What a compaction folded away, and the transcript it leaves behind.
+///
+/// The same four fields the `compact-done` event carries, because they are the same answer told
+/// twice — the event for anything watching the stream, this for the caller that asked.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CompactionSummary {
+    agent_messages: Vec<serde_json::Value>,
+    summarised: u64,
+    tokens_before: u64,
+    tokens_after: u64,
+}
+
 /// Summarises the conversation once, because the user asked rather than because it filled up.
 ///
-/// It answers with nothing. The summary, the count and the two token totals ride the stream as one
-/// `compact-done` event, the way every other thing a worker produces reaches the window — and the
-/// window is where they are needed, since the compacted transcript is the renderer's to hold and
-/// save. Reading it back out of `run_ai_worker` would be a second path to the same payload.
+/// It answers with the summary itself, and answers with nothing when the user stopped it. It used
+/// to answer with nothing either way and leave the payload to the `compact-done` event, which is a
+/// second IPC message with no ordering against this reply: an event that lost the race left the
+/// window saying the conversation was not summarised when it had been. The event still goes out.
 ///
 /// It begins an `AiTurn` for the reasons a judgement does: it is what Stop reaches, and it is what
 /// keeps a compaction off the one provider connection while a chat turn is using it.
@@ -1147,13 +1160,13 @@ pub(crate) async fn run_compaction(
     app: AppHandle,
     request: CompactRequest,
     stream: tauri::ipc::Channel<AiStreamPayload>,
-) -> Result<(), CommandError> {
+) -> Result<Option<CompactionSummary>, CommandError> {
     let turn = AiTurn::begin(request.request_id, stream)?;
     tauri::async_runtime::spawn_blocking(move || {
         let turn = turn;
         validate_agent_messages(&request.agent_messages)?;
         let context = JobContext::read(&app)?;
-        run_ai_worker(
+        let completion = run_worker_completion(
             &app,
             &turn,
             context.request(Job::Compact {
@@ -1161,7 +1174,13 @@ pub(crate) async fn run_compaction(
                 agent_messages: request.agent_messages,
             }),
         )?;
-        Ok(())
+        completion
+            .event
+            .map(|event| {
+                serde_json::from_value(event)
+                    .map_err(|error| format!("The compaction answered with no summary: {error}"))
+            })
+            .transpose()
     })
     .await
     .map_err(|error| format!("The compaction task failed: {error}"))?
@@ -1738,6 +1757,14 @@ fn run_ai_worker(
     run_ai_worker_with(app, turn, request, &SystemProcessSpawner)
 }
 
+fn run_worker_completion(
+    app: &AppHandle,
+    turn: &AiTurn,
+    request: AiWorkerRequest,
+) -> Result<WorkerCompletion, String> {
+    run_worker_completion_with(app, turn, request, &SystemProcessSpawner)
+}
+
 /// The window event every brief update reaches the renderer on.
 const BRIEF_EVENT: &str = "ai-brief";
 
@@ -1898,6 +1925,26 @@ pub(crate) fn run_ai_worker_with<R: Runtime>(
     request: AiWorkerRequest,
     spawner: &impl ProcessSpawner,
 ) -> Result<String, String> {
+    run_worker_completion_with(app, turn, request, spawner).map(|completion| completion.text)
+}
+
+/// What a finished worker answered with.
+///
+/// The text is what a chat turn's caller wants. The event is the whole completion as it was
+/// streamed, and only a compaction reads it: its payload is the command's return value, so that the
+/// window does not have to see a channel message that has no ordering against the reply.
+pub(crate) struct WorkerCompletion {
+    text: String,
+    /// The completion event, or `None` when the turn was stopped before one arrived.
+    event: Option<serde_json::Value>,
+}
+
+fn run_worker_completion_with<R: Runtime>(
+    app: &AppHandle<R>,
+    turn: &AiTurn,
+    request: AiWorkerRequest,
+    spawner: &impl ProcessSpawner,
+) -> Result<WorkerCompletion, String> {
     let run = WorkerRun::enter(turn);
     let request_id = turn.request_id();
     let stream = turn
@@ -1937,6 +1984,7 @@ pub(crate) fn run_ai_worker_with<R: Runtime>(
     });
     let mut completed = false;
     let mut completion_text = String::new();
+    let mut completion_event: Option<serde_json::Value> = None;
     let mut completion_reason: Option<String> = None;
     let mut tool_workers: Vec<std::thread::JoinHandle<()>> = Vec::new();
     let brief_task = request
@@ -1989,6 +2037,7 @@ pub(crate) fn run_ai_worker_with<R: Runtime>(
                     .get("stopReason")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned);
+                completion_event = Some(event.clone());
             }
             stream
                 .send(AiStreamPayload { request_id, event })
@@ -2008,9 +2057,15 @@ pub(crate) fn run_ai_worker_with<R: Runtime>(
     if completed {
         reap_worker(Arc::clone(&child), stderr_reader);
         if the_worker_says_it_was_stopped(completion_reason.as_deref(), turn) {
-            return Ok(String::new());
+            return Ok(WorkerCompletion {
+                text: String::new(),
+                event: None,
+            });
         }
-        return Ok(completion_text);
+        return Ok(WorkerCompletion {
+            text: completion_text,
+            event: completion_event,
+        });
     }
 
     let status = stop_worker(&child)?;
@@ -2030,7 +2085,10 @@ pub(crate) fn run_ai_worker_with<R: Runtime>(
                 }
             );
         }
-        return Ok(String::new());
+        return Ok(WorkerCompletion {
+            text: String::new(),
+            event: None,
+        });
     }
     if !status.success {
         let detail = stderr.trim();
@@ -2042,7 +2100,10 @@ pub(crate) fn run_ai_worker_with<R: Runtime>(
     if !completed {
         return Err("Pi AI worker exited without completing the response".to_owned());
     }
-    Ok(completion_text)
+    Ok(WorkerCompletion {
+        text: completion_text,
+        event: completion_event,
+    })
 }
 
 /// Whether a completed turn is one the user stopped, asking the worker before the flag.
@@ -3205,6 +3266,41 @@ mod tests {
             "",
             "a half-answer is not what the task achieved"
         );
+    }
+
+    /// The compaction's payload has to survive the trip back as a return value.
+    ///
+    /// It used to reach the window only as a `compact-done` channel event, which is delivered by a
+    /// second IPC round trip and can land after the command's own reply. The window read no summary
+    /// and said the conversation was not summarised, having summarised it.
+    #[test]
+    fn a_compaction_answers_with_its_summary_and_not_only_with_an_event() {
+        let _test = AI_TEST_LOCK.lock().expect("AI test lock");
+        let _gate = crate::approvals::serialize_gate_tests();
+        let app = mock_app();
+        let (stream, _streamed) = recording_stream();
+
+        let compacted = FakeProcessSpawner::new(
+            concat!(
+                r#"GOFER_AI_EVENT:{"type":"compact-done","agentMessages":[{"role":"compactionSummary"}],"#,
+                r#""summarised":12,"tokensBefore":105000,"tokensAfter":8000}"#,
+                "\n"
+            ),
+            "",
+            true,
+        );
+        let turn = a_turn(30, &stream);
+        let completion =
+            run_worker_completion_with(app.handle(), &turn, worker_request(), &compacted)
+                .expect("a completed compaction");
+        let summary: CompactionSummary =
+            serde_json::from_value(completion.event.expect("the completion event travels back"))
+                .expect("a compaction summary");
+
+        assert_eq!(summary.summarised, 12);
+        assert_eq!(summary.tokens_before, 105_000);
+        assert_eq!(summary.tokens_after, 8_000);
+        assert_eq!(summary.agent_messages.len(), 1);
     }
 
     /// A worker that has said everything and then holds its pipe open.

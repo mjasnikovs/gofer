@@ -68,6 +68,14 @@ export type TokenUsage = Readonly<{
     cost: Readonly<{total: number}>
 }>
 
+/** What one compaction folded away, and what the conversation is now made of. */
+export type CompactionSummary = Readonly<{
+    agentMessages: readonly unknown[]
+    summarised: number
+    tokensBefore: number
+    tokensAfter: number
+}>
+
 export type ToolActivity = Readonly<{
     id: string
     name: string
@@ -90,13 +98,7 @@ export type AiStreamEvent =
     | Readonly<{type: 'tool-cost'; ids: readonly string[]; tokens: number}>
     | Readonly<{type: 'compaction-start'; tokens: number; contextWindow: number}>
     | Readonly<{type: 'compaction-end'}>
-    | Readonly<{
-          type: 'compact-done'
-          agentMessages: readonly unknown[]
-          summarised: number
-          tokensBefore: number
-          tokensAfter: number
-      }>
+    | (CompactionSummary & Readonly<{type: 'compact-done'}>)
     | Readonly<{
           type: 'done'
           text: string

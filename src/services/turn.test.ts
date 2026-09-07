@@ -1,7 +1,7 @@
 import {describe, expect, it, vi} from 'vitest'
 import {createTurnRunner} from './turn'
 import type {TurnRunner} from './turn'
-import type {AiStreamEvent, Message, TokenUsage} from '../models/chat'
+import type {AiStreamEvent, CompactionSummary, Message, TokenUsage} from '../models/chat'
 import type {CompactAiContextRequest, SendAiMessageRequest, SteerAiRequest} from './desktop'
 
 const USAGE: TokenUsage = {
@@ -27,7 +27,7 @@ type Harness = Readonly<{
     compacted: CompactAiContextRequest[]
     refuseSteer: (reason: unknown) => void
     refuseCompact: (reason: unknown) => void
-    answerCompact: (event: AiStreamEvent) => void
+    answerCompact: (summary: CompactionSummary) => void
     holdCompact: () => () => void
     idle: () => Promise<void>
 }>
@@ -44,7 +44,7 @@ function harness(...scripts: readonly Script[]): Harness {
     let turn = 0
     let steerFailure: unknown
     let compactFailure: unknown
-    let compaction: AiStreamEvent | undefined
+    let compaction: CompactionSummary | undefined
     let hold = false
     let release: (() => void) | undefined
 
@@ -68,12 +68,12 @@ function harness(...scripts: readonly Script[]): Harness {
             // eslint-disable-next-line @typescript-eslint/only-throw-error, @typescript-eslint/prefer-promise-reject-errors
             if (steerFailure !== undefined) throw steerFailure
         },
-        compact: async (request, receive) => {
+        compact: async request => {
             compacted.push(request)
             if (hold) await new Promise<void>(resolve => (release = resolve))
-            if (compaction) receive({requestId: request.requestId, event: compaction})
             // eslint-disable-next-line @typescript-eslint/only-throw-error, @typescript-eslint/prefer-promise-reject-errors
             if (compactFailure !== undefined) throw compactFailure
+            return compaction
         }
     })
 
@@ -86,8 +86,8 @@ function harness(...scripts: readonly Script[]): Harness {
         refuseCompact: reason => {
             compactFailure = reason
         },
-        answerCompact: event => {
-            compaction = event
+        answerCompact: summary => {
+            compaction = summary
         },
         holdCompact: () => {
             hold = true
@@ -122,7 +122,6 @@ describe('createTurnRunner', () => {
             ]
         })
         answerCompact({
-            type: 'compact-done',
             agentMessages: [{role: 'compactionSummary'}],
             summarised: 4,
             tokensBefore: 900,
@@ -181,7 +180,6 @@ describe('createTurnRunner', () => {
     it('says so rather than drawing a divider over nothing', async () => {
         const {runner, answerCompact, idle} = harness({})
         answerCompact({
-            type: 'compact-done',
             agentMessages: [],
             summarised: 0,
             tokensBefore: 900,

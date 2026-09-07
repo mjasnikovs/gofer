@@ -627,6 +627,8 @@ describe('Workspace', () => {
         expect(screen.queryByText(/Summarising the conversation/)).not.toBeInTheDocument()
     })
 
+    // The summary comes back as the command's reply and the stream event arrives after it, which is
+    // the order that used to read as "The conversation was not summarised."
     it('summarises on request, and draws the divider where it cut', async () => {
         backend({
             send_ai_message: async args => {
@@ -645,17 +647,17 @@ describe('Workspace', () => {
                 })
             },
             compact_ai_context: async args => {
+                const summary = {
+                    agentMessages: [{role: 'compactionSummary'}],
+                    summarised: 12,
+                    tokensBefore: 105_000,
+                    tokensAfter: 8_000
+                }
                 const stream = streamOf(args)
-                stream.onmessage({
-                    requestId: 1,
-                    event: {
-                        type: 'compact-done',
-                        agentMessages: [{role: 'compactionSummary'}],
-                        summarised: 12,
-                        tokensBefore: 105_000,
-                        tokensAfter: 8_000
-                    }
+                queueMicrotask(() => {
+                    stream.onmessage({requestId: 1, event: {type: 'compact-done', ...summary}})
                 })
+                return summary
             }
         })
         render(<Workspace />)
