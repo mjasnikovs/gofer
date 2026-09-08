@@ -32,6 +32,7 @@ import {messageParts} from '../../models/chat-timeline'
 import {gdscriptFenceLanguage, tokenizeGdscript} from '../../services/gdscript-syntax'
 import {compactedDivider} from '../../utils/chat-format'
 import {AskBlock} from './AskBlock'
+import {RememberBlock} from './RememberBlock'
 
 type ChatConversationProps = Readonly<{
     attachmentPreviews: Readonly<Record<string, string>>
@@ -380,6 +381,13 @@ function AssistantTimeline({message}: {message: Message}) {
                     if (tool.name === 'ask_user')
                         return (
                             <AskBlock
+                                key={`tool-${part.toolId}`}
+                                tool={tool}
+                            />
+                        )
+                    if (tool.name === 'remember' && tool.status === 'complete')
+                        return (
+                            <RememberBlock
                                 key={`tool-${part.toolId}`}
                                 tool={tool}
                             />

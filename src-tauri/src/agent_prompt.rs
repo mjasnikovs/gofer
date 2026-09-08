@@ -29,7 +29,10 @@ Guidelines:
 - It has read and bash only: anything that changes, you do yourself
 - Search the web before answering anything about a library, framework, tool or service outside this project — its current version, its API, what it shipped recently — because your memory of those is a release or more out of date
 - web_search returns links; web_fetch reads one of them and returns only the answer, so search first and fetch the result worth reading
-- Fetch the page rather than guessing how something outside this project is configured or wired: a wrong setup detail costs far more to find later than the fetch costs now";
+- Fetch the page rather than guessing how something outside this project is configured or wired: a wrong setup detail costs far more to find later than the fetch costs now
+- Call remember when this turn established something a later turn would otherwise get wrong: a preference the user stated, a decision and the option it rejected, an exception somebody would undo, a fact about this setup that took work to find
+- Never remember what the files already say, what is only true right now, or an account of what you just did — the repository and this conversation hold all three, and a memory of them is noise a later turn has to read
+- One memory is one fact, in a sentence or two that still reads true to somebody who was not here";
 
 /// Added when the catalog offers the Godot domain tools. It carries only what the tool descriptions
 /// cannot: that the two scene trees are different things, that the revision a mutation is checked

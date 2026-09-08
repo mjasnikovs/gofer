@@ -205,7 +205,7 @@ export type DesktopCommandMap = Readonly<{
     initialize_rag: CommandSpec<undefined, void>
     judge_project_memory: CommandSpec<
         {request: JudgeMemoryRequest; stream: Channel<AiStreamPayload>},
-        ProjectMemory
+        ProjectMemory | undefined
     >
     list_ai_models: CommandSpec<{request: SettingsRequest}, readonly AiModelOption[]>
     list_project_memory: CommandSpec<undefined, readonly ProjectMemory[]>

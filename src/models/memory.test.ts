@@ -5,7 +5,7 @@ import type {ProjectMemory} from './memory'
 function memory(overrides: Partial<ProjectMemory>): ProjectMemory {
     return {
         id: 'one',
-        kind: 'summary',
+        kind: 'fact',
         state: 'confirmed',
         content: 'built the roster',
         provenance: {},

@@ -30,6 +30,7 @@ export function toolTarget(name, args) {
         return flatten(given.question ?? given.brief)
     }
     if (name === 'subagent') return flatten(given.prompt)
+    if (name === 'remember') return flatten(given.content)
     return given.path
 }
 

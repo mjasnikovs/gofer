@@ -385,7 +385,7 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
     const storeMemory = (edit: MemoryEdit) => {
         const before = state.memories.find(row => row.id === edit.id)
         const stored: ProjectMemory = {
-            provenance: {source: 'completed-ai-turn'},
+            provenance: {source: 'model'},
             createdAt: stamped,
             check: 'unchecked',
             anchors: [],

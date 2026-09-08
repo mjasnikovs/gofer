@@ -152,9 +152,12 @@ embeddings are stored alongside the source records and indexed by the statically
 pinned `sqlite-vec` 0.1.9 extension. Hybrid search combines lexical and vector ranks; changing a
 memory's content or scope invalidates its old embedding.
 
-Successful AI turns automatically create task-scoped summary memories. A persistent local embedding
-worker indexes them, and subsequent requests receive a hybrid retrieval of confirmed project and
-active-task memories. SQLite remains the canonical store; no external database service is required.
+The agent writes a memory through the `remember` tool when a turn establishes something durable, and
+it is filed as a candidate. Retrieval reads confirmed memories only, so nothing reaches a later turn
+until the user keeps it — from the card in the transcript or from the memory panel. A persistent
+local embedding worker indexes them, and subsequent requests receive a hybrid retrieval of confirmed
+project and active-task memories. SQLite remains the canonical store; no external database service
+is required.
 
 Settings can create a consistent project backup containing SQLite data, attachments, logs, and a
 manifest. Maintenance removes unreferenced attachments after 24 hours, completed Godot runs after 30

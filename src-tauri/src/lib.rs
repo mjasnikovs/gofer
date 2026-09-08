@@ -62,6 +62,7 @@ mod project_memory;
 pub mod protocol_v2;
 mod rag;
 mod read_ledger;
+mod remember;
 mod script;
 mod settings;
 mod skills;
@@ -1020,12 +1021,15 @@ async fn run_task_brief(
 /// it from running beside a chat turn on the one provider connection. Its own progress does not
 /// ride the channel — it goes out as `ai-memory-judge` window events, because the panel reading it
 /// is not the chat timeline.
+///
+/// Nothing comes back when the verdict was `broken`: that deletes the memory, so there is no row
+/// left to answer with.
 #[tauri::command]
 async fn judge_project_memory(
     app: AppHandle,
     request: ai_turn::JudgeRequest,
     stream: tauri::ipc::Channel<ai_turn::AiStreamPayload>,
-) -> Result<project_memory::CheckedMemory, CommandError> {
+) -> Result<Option<project_memory::CheckedMemory>, CommandError> {
     ai_turn::run_judge(app, request, stream).await
 }
 

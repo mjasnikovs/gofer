@@ -548,8 +548,11 @@ impl Memories<'_> {
     }
 }
 
+/// The kinds a memory can be, and the list the tool offers the model.
+pub(crate) const MEMORY_KINDS: [&str; 4] = ["decision", "preference", "fact", "issue"];
+
 pub(crate) fn validate_memory(request: &UpsertMemoryRequest) -> Result<(), CommandError> {
-    if !["decision", "preference", "fact", "issue", "summary"].contains(&request.kind.as_str()) {
+    if !MEMORY_KINDS.contains(&request.kind.as_str()) {
         return Err(CommandError::from("The memory kind is invalid".to_owned()));
     }
     if !["candidate", "confirmed", "superseded"].contains(&request.state.as_str()) {

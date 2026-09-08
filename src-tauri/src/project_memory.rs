@@ -1,4 +1,4 @@
-//! What a project remembers, and what a finished turn deposits there.
+//! What a project remembers, and what the model puts there.
 //!
 //! Lifted out of `ai_turn`, where it read as part of a turn's lifetime rather than as a subject of
 //! its own. It is not: a memory outlives the turn that wrote it, the backfill runs from maintenance
@@ -105,46 +105,51 @@ pub(crate) fn retrieve_memory_context(
         .join("\n"))
 }
 
-pub(crate) fn remember_completed_turn(
+/// The longest memory the tool will store.
+///
+/// A fact that does not fit in this is not a fact, it is a transcript — which is the thing this
+/// replaced. The refusal says so, so a model that hits it rewrites rather than truncates.
+const MAX_REMEMBERED_CHARS: usize = 1_000;
+
+/// Files what the model asked to remember, unconfirmed.
+///
+/// `candidate` is the whole gate: retrieval reads `confirmed` and nothing else, so nothing the
+/// model writes reaches another turn until the user keeps it. It is embedded here anyway, because
+/// the vector is what makes it findable the moment it is kept and computing it costs a subprocess
+/// the user is not waiting on.
+pub(crate) fn remember(
     storage: &ProjectStorage,
     task_id: Option<&str>,
-    prompt: &str,
-    completion: &str,
-) -> Result<(), String> {
-    #[cfg(feature = "webdriver")]
-    if std::env::var_os("GOFER_WEBDRIVER_RAG_READY").is_some() {
-        return Ok(());
+    kind: &str,
+    content: &str,
+    call_id: Option<&str>,
+) -> Result<MemoryRecord, String> {
+    let content = content.trim();
+    if content.is_empty() {
+        return Err("A memory needs `content`: the one thing worth remembering.".to_owned());
     }
-
-    if prompt.trim().is_empty() || completion.trim().is_empty() {
-        return Ok(());
+    if content.chars().count() > MAX_REMEMBERED_CHARS {
+        return Err(format!(
+            "That is {MAX_REMEMBERED_CHARS} characters or more of memory. One memory is one fact, \
+             in a sentence or two. Write the fact, not what happened."
+        ));
     }
-    let content = format!(
-        "User request: {}\nOutcome: {}",
-        truncate_text(prompt.trim(), 1_000),
-        truncate_text(completion.trim(), 2_000)
-    );
     let record = storage
         .memory()
         .upsert(&UpsertMemoryRequest {
             id: None,
             task_id: task_id.map(str::to_owned),
-            kind: "summary".to_owned(),
-            state: "confirmed".to_owned(),
-            content: content.clone(),
-            provenance: serde_json::json!({"source": "completed-ai-turn"}),
+            kind: kind.to_owned(),
+            state: "candidate".to_owned(),
+            content: content.to_owned(),
+            provenance: serde_json::json!({"source": "model", "callId": call_id}),
             superseded_by: None,
         })
         .map_err(|failure| failure.message)?;
-    match embed_memory(storage, &record.id, &content) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            eprintln!(
-                "Storing the memory embedding failed, retry with storage maintenance: {error}"
-            );
-            Err(error)
-        }
+    if let Err(error) = embed_memory(storage, &record.id, content) {
+        eprintln!("Storing the memory embedding failed, storage maintenance will retry: {error}");
     }
+    Ok(record)
 }
 
 fn embed_memory(storage: &ProjectStorage, memory_id: &str, content: &str) -> Result<(), String> {
@@ -169,10 +174,6 @@ pub(crate) fn memory_vector(content: &str) -> Result<Vec<f32>, String> {
     crate::memory::embed_documents(&[content.to_owned()], &crate::rag::cache_path()?)?
         .pop()
         .ok_or_else(|| "The memory worker returned no document vector".to_owned())
-}
-
-fn truncate_text(text: &str, maximum: usize) -> String {
-    text.chars().take(maximum).collect()
 }
 
 /// What checking a memory's paths found.
@@ -570,7 +571,7 @@ fn anchor_path(token: &str) -> Option<String> {
 mod tests {
     use super::{
         MemoryCheck, basename_index, check_memory, list_checked_memories, record_judgement,
-        remember_completed_turn, retrieve_memory_context, save_memory, set_memory_states,
+        remember, retrieve_memory_context, save_memory, set_memory_states,
     };
     use crate::files::Snapshot;
     use crate::storage::{MemoryRecord, ProjectStorage, UpsertMemoryRequest};
@@ -599,7 +600,7 @@ mod tests {
         MemoryRecord {
             id: "01a0".to_owned(),
             task_id: None,
-            kind: "summary".to_owned(),
+            kind: "fact".to_owned(),
             state: "confirmed".to_owned(),
             content: content.to_owned(),
             provenance: serde_json::json!({}),
@@ -631,28 +632,59 @@ mod tests {
     }
 
     /**
-     * A half-empty turn deposits nothing, and that is a success.
+     * What the model remembers is not given to another turn until the user keeps it.
      *
-     * A turn that was cancelled before the model answered has a prompt and no completion; a turn
-     * started from an empty composer has the reverse. Storing either writes a memory that says
-     * only what was asked or only what came back, and the retrieval later offers it as precedent.
-     * Refusing it would fail the turn over housekeeping the turn does not depend on.
+     * The gate is the state, not a second table: retrieval reads `confirmed` and nothing else, so
+     * writing `candidate` is what makes the tool safe to hand a model. A row that arrived
+     * `confirmed` would be in the next prompt before anybody had read it.
      */
     #[test]
-    fn a_turn_missing_either_half_is_not_remembered_and_is_not_a_failure() {
+    fn what_the_model_remembers_waits_for_the_user_as_a_candidate() {
         let directory = TempDir::new().expect("temporary directory");
         let storage = storage(&directory);
 
-        remember_completed_turn(&storage, None, "  ", "a menu was added").expect("no prompt");
-        remember_completed_turn(&storage, None, "add a pause menu", "\n").expect("no completion");
+        let record = remember(
+            &storage,
+            None,
+            "preference",
+            "  The user never wants a `match` statement in GDScript.  ",
+            Some("call-7"),
+        )
+        .expect("stored");
 
+        assert_eq!(record.state, "candidate");
+        assert_eq!(record.kind, "preference");
+        assert_eq!(
+            record.content,
+            "The user never wants a `match` statement in GDScript."
+        );
+        assert_eq!(record.provenance["source"], serde_json::json!("model"));
+        assert_eq!(record.provenance["callId"], serde_json::json!("call-7"));
+    }
+
+    /**
+     * A transcript is refused rather than truncated.
+     *
+     * This is the failure the whole feature was rebuilt around: what used to be stored was the
+     * request and the reply verbatim. A ceiling that silently cut the text would keep storing them,
+     * just shorter — so the refusal says what is wrong, and the model rewrites.
+     */
+    #[test]
+    fn a_memory_that_is_a_transcript_is_refused_and_told_why() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+
+        assert_eq!(
+            remember(&storage, None, "fact", "   ", None).expect_err("nothing to remember"),
+            "A memory needs `content`: the one thing worth remembering."
+        );
+
+        let transcript = "x".repeat(1_001);
+        let refusal =
+            remember(&storage, None, "fact", &transcript, None).expect_err("too long to be a fact");
         assert!(
-            storage
-                .memory()
-                .missing_embeddings(10)
-                .expect("pending memories")
-                .is_empty(),
-            "nothing was stored, so maintenance has nothing to re-embed"
+            refusal.contains("Write the fact, not what happened."),
+            "the refusal says what to do instead: {refusal}"
         );
     }
 
@@ -801,19 +833,26 @@ mod tests {
      * An edit changes the three fields the user is editing and nothing else about the row.
      *
      * The upsert overwrites `provenance`, `task_id` and `superseded_by` with whatever it is handed.
-     * A window sending only the typed fields would blank all three — the memory would forget that a
-     * finished turn deposited it and come loose from the task it came out of — and nothing would
-     * report that, because the save would succeed.
+     * A window sending only the typed fields would blank all three — the memory would forget that
+     * the model wrote it and come loose from the task it came out of — and nothing would report
+     * that, because the save would succeed.
      */
     #[test]
     fn editing_a_memory_keeps_everything_about_it_the_user_was_not_editing() {
         let directory = TempDir::new().expect("temporary directory");
         let storage = storage(&directory);
-        remember_completed_turn(&storage, None, "add a pause menu", "added it").ok();
+        remember(
+            &storage,
+            None,
+            "fact",
+            "The pause menu is its own scene.",
+            None,
+        )
+        .ok();
         let stored = list_checked_memories(&storage, None).expect("list")[0]
             .memory
             .clone();
-        assert_eq!(stored.provenance["source"], "completed-ai-turn");
+        assert_eq!(stored.provenance["source"], "model");
 
         let edited = save_memory(
             &storage,
@@ -831,7 +870,7 @@ mod tests {
         assert_eq!(edited.memory.state, "candidate");
         assert_eq!(edited.memory.content, "The pause menu is 1280x720.");
         assert_eq!(
-            edited.memory.provenance["source"], "completed-ai-turn",
+            edited.memory.provenance["source"], "model",
             "where the memory came from survives the edit"
         );
         assert_eq!(edited.memory.provenance["editedBy"], "user");
@@ -874,7 +913,7 @@ mod tests {
     fn a_verdict_stops_being_current_when_the_memory_it_judged_is_edited() {
         let directory = TempDir::new().expect("temporary directory");
         let storage = storage(&directory);
-        remember_completed_turn(&storage, None, "delete GRAYZONE.md", "deleted it").ok();
+        remember(&storage, None, "fact", "GRAYZONE.md was deleted.", None).ok();
         let stored = list_checked_memories(&storage, None).expect("list")[0]
             .memory
             .clone();
@@ -964,7 +1003,7 @@ mod tests {
             .upsert(&UpsertMemoryRequest {
                 id: None,
                 task_id: None,
-                kind: "summary".to_owned(),
+                kind: "fact".to_owned(),
                 state: "confirmed".to_owned(),
                 content: "Built the pause menu in scripts/pause.gd.".to_owned(),
                 provenance: serde_json::json!({"source": "completed-ai-turn"}),
@@ -1012,7 +1051,7 @@ mod tests {
             .upsert(&UpsertMemoryRequest {
                 id: None,
                 task_id: None,
-                kind: "summary".to_owned(),
+                kind: "fact".to_owned(),
                 state: "confirmed".to_owned(),
                 content: "Added an audio autoload.".to_owned(),
                 provenance: serde_json::json!({}),

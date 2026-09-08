@@ -12,10 +12,10 @@ const tauri = createDesktopFake()
 function memory(overrides: Partial<ProjectMemory>): ProjectMemory {
     return {
         id: 'one',
-        kind: 'summary',
+        kind: 'fact',
         state: 'confirmed',
-        content: 'User request: add a roster\nOutcome: built it in `scripts/placement.gd`.',
-        provenance: {source: 'completed-ai-turn'},
+        content: 'The roster lives in `scripts/placement.gd`.',
+        provenance: {source: 'model'},
         createdAt: 1_700_000_000_000,
         updatedAt: 1_700_000_000_000,
         check: 'intact',
@@ -26,7 +26,7 @@ function memory(overrides: Partial<ProjectMemory>): ProjectMemory {
 
 const STALE = memory({
     id: 'two',
-    content: 'User request: delete GRAYZONE.md\nOutcome: deleted it.',
+    content: 'GRAYZONE.md was deleted.',
     check: 'stale',
     anchors: [{named: 'GRAYZONE.md'}]
 })
@@ -122,7 +122,7 @@ describe('the memory panel', () => {
         await open()
         const user = userEvent.setup()
 
-        await user.click(screen.getByText('delete GRAYZONE.md → deleted it.'))
+        await user.click(screen.getByText('GRAYZONE.md was deleted.'))
         await flush()
 
         expect(
@@ -139,8 +139,8 @@ describe('the memory panel', () => {
         await user.click(screen.getByRole('radio', {name: 'Needs review 1'}))
         await flush()
 
-        expect(screen.getByText('delete GRAYZONE.md → deleted it.')).toBeInTheDocument()
-        expect(screen.queryByText('add a roster → built it in `scripts/placement.gd`.')).toBeNull()
+        expect(screen.getByText('GRAYZONE.md was deleted.')).toBeInTheDocument()
+        expect(screen.queryByText('The roster lives in `scripts/placement.gd`.')).toBeNull()
     })
 
     it('holds a memory back from the model without throwing away what it says', async () => {
@@ -148,16 +148,16 @@ describe('the memory panel', () => {
         await open()
         const user = userEvent.setup()
 
-        await user.click(screen.getByText('delete GRAYZONE.md → deleted it.'))
+        await user.click(screen.getByText('GRAYZONE.md was deleted.'))
         await flush()
         await user.click(screen.getByRole('radio', {name: 'Held back'}))
         await user.click(screen.getByRole('button', {name: 'Save'}))
         await flush()
 
         expect(log.listed().find(row => row.id === 'two')).toMatchObject({
-            kind: 'summary',
+            kind: 'fact',
             state: 'candidate',
-            content: 'User request: delete GRAYZONE.md\nOutcome: deleted it.'
+            content: 'GRAYZONE.md was deleted.'
         })
         expect(screen.getByText('1 of these reach the model. A turn is given six.')).toBeVisible()
     })
@@ -167,13 +167,13 @@ describe('the memory panel', () => {
         await open()
         const user = userEvent.setup()
 
-        await user.click(screen.getByText('delete GRAYZONE.md → deleted it.'))
+        await user.click(screen.getByText('GRAYZONE.md was deleted.'))
         await flush()
         await user.click(screen.getByRole('button', {name: 'Forget'}))
         await flush()
 
         expect(log.listed().map(row => row.id)).toEqual(['one'])
-        expect(screen.queryByText('delete GRAYZONE.md → deleted it.')).toBeNull()
+        expect(screen.queryByText('GRAYZONE.md was deleted.')).toBeNull()
     })
 
     it('reports a read it could not do', async () => {
@@ -202,7 +202,7 @@ describe('putting a memory to the model', () => {
         await open()
         const user = userEvent.setup()
 
-        await user.click(screen.getByText('delete GRAYZONE.md → deleted it.'))
+        await user.click(screen.getByText('GRAYZONE.md was deleted.'))
         await flush()
         expect(log.judged).toEqual([])
 
@@ -218,7 +218,7 @@ describe('putting a memory to the model', () => {
         await open()
         const user = userEvent.setup()
 
-        await user.click(screen.getByText('delete GRAYZONE.md → deleted it.'))
+        await user.click(screen.getByText('GRAYZONE.md was deleted.'))
         await flush()
         await user.click(screen.getByRole('button', {name: 'Ask the model'}))
         await flush()
@@ -233,7 +233,7 @@ describe('putting a memory to the model', () => {
         await open()
         const user = userEvent.setup()
 
-        await user.click(screen.getByText('delete GRAYZONE.md → deleted it.'))
+        await user.click(screen.getByText('GRAYZONE.md was deleted.'))
         await flush()
         await user.click(screen.getByRole('button', {name: 'Ask the model'}))
         await flush()
@@ -276,7 +276,7 @@ describe('putting a memory to the model', () => {
         await open()
         const user = userEvent.setup()
 
-        await user.click(screen.getByText('delete GRAYZONE.md → deleted it.'))
+        await user.click(screen.getByText('GRAYZONE.md was deleted.'))
         await flush()
 
         expect(
@@ -291,7 +291,7 @@ describe('putting a memory to the model', () => {
         await open()
         const user = userEvent.setup()
 
-        await user.click(screen.getByText('delete GRAYZONE.md → deleted it.'))
+        await user.click(screen.getByText('GRAYZONE.md was deleted.'))
         await flush()
         await user.click(screen.getByRole('button', {name: 'Ask the model'}))
         await flush()
@@ -306,7 +306,7 @@ describe('putting a memory to the model', () => {
         await open()
         const user = userEvent.setup()
 
-        await user.click(screen.getByText('delete GRAYZONE.md → deleted it.'))
+        await user.click(screen.getByText('GRAYZONE.md was deleted.'))
         await flush()
         await user.click(screen.getByRole('button', {name: 'Ask the model'}))
         await flush()
@@ -322,7 +322,7 @@ it('leaves the other memories alone when one judgement fails', async () => {
     await open()
     const user = userEvent.setup()
 
-    await user.click(screen.getByText('delete GRAYZONE.md → deleted it.'))
+    await user.click(screen.getByText('GRAYZONE.md was deleted.'))
     await flush()
     await user.click(screen.getByRole('button', {name: 'Ask the model'}))
     await flush()
@@ -330,9 +330,10 @@ it('leaves the other memories alone when one judgement fails', async () => {
     await flush()
     expect(screen.getByText(/it used all of its steps/u)).toBeInTheDocument()
 
-    await user.click(screen.getByText('delete GRAYZONE.md → deleted it.'))
+    // The editor below holds the same words in a textarea, so the preview is named by its tag.
+    await user.click(screen.getByText('GRAYZONE.md was deleted.', {selector: 'span'}))
     await flush()
-    await user.click(screen.getByText('add a roster → built it in `scripts/placement.gd`.'))
+    await user.click(screen.getByText('The roster lives in `scripts/placement.gd`.'))
     await flush()
 
     expect(screen.queryByText(/it used all of its steps/u)).not.toBeInTheDocument()
@@ -341,7 +342,7 @@ it('leaves the other memories alone when one judgement fails', async () => {
 describe('sweeping the whole list', () => {
     const JUDGED = memory({
         id: 'three',
-        content: 'User request: pool the audio\nOutcome: added an autoload.',
+        content: 'Audio is pooled through an autoload.',
         judgement: {
             verdict: 'holds',
             reason: 'the autoload is registered',
@@ -402,7 +403,7 @@ describe('sweeping the whole list', () => {
         await open()
         const user = userEvent.setup()
 
-        await user.click(screen.getByText('delete GRAYZONE.md → deleted it.'))
+        await user.click(screen.getByText('GRAYZONE.md was deleted.'))
         await flush()
         await user.click(screen.getByRole('button', {name: 'Ask the model about 2'}))
         await flush()
@@ -439,53 +440,35 @@ describe('sweeping the whole list', () => {
     })
 })
 
-describe('acting on what the model found', () => {
-    const BROKEN = memory({
+describe('what is still waiting on the user', () => {
+    const WAITING = memory({
         id: 'four',
-        content: 'User request: add a pause menu\nOutcome: built it in `scripts/pause.gd`.',
-        judgement: {
-            verdict: 'broken',
-            reason: 'scripts/pause.gd holds a settings screen now',
-            at: 1_700_000_100_000,
-            model: 'qwen3-coder',
-            isCurrent: true
-        }
+        state: 'candidate',
+        content: 'The user never wants a match statement.',
+        kind: 'preference'
     })
 
-    it('counts only the rows judged broken against their current text', async () => {
-        backend([
-            memory({}),
-            BROKEN,
-            memory({
-                id: 'five',
-                judgement: {
-                    verdict: 'broken',
-                    reason: 'about an older version',
-                    at: 1_700_000_100_000,
-                    model: 'qwen3-coder',
-                    isCurrent: false
-                }
-            })
-        ])
+    it('counts the memories nothing has been given yet', async () => {
+        backend([memory({}), WAITING])
         await open()
 
-        expect(screen.getByRole('radio', {name: 'Model says broken 1'})).toBeInTheDocument()
+        expect(screen.getByRole('radio', {name: 'Waiting on you 1'})).toBeInTheDocument()
+        expect(screen.getByText('1 of these reach the model. A turn is given six.')).toBeVisible()
     })
 
-    it('stops retrieval reading every broken row in one press', async () => {
-        const log = backend([memory({}), BROKEN])
+    it('keeps every waiting memory in one press', async () => {
+        const log = backend([memory({}), WAITING])
         await open()
         const user = userEvent.setup()
 
-        await user.click(screen.getByRole('radio', {name: 'Model says broken 1'}))
+        await user.click(screen.getByRole('radio', {name: 'Waiting on you 1'}))
         await flush()
-        await user.click(screen.getByRole('button', {name: 'Hold back all 1'}))
+        await user.click(screen.getByRole('button', {name: 'Keep all 1'}))
         await flush()
 
         expect(log.listed().find(row => row.id === 'four')).toMatchObject({
-            state: 'candidate',
-            content: BROKEN.content
+            state: 'confirmed',
+            content: WAITING.content
         })
-        expect(log.listed().map(row => row.id)).toEqual(['one', 'four'])
     })
 })

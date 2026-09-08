@@ -242,7 +242,9 @@ pub(crate) fn probe(domain: &str) -> Result<Value, ToolFailure> {
                 .map_err(|error| ToolFailure::new("docs_unavailable", error))?;
             Ok(json!({"tool": domain, "reachable": true, "worker": worker}))
         }
-        crate::ask::ASK_USER_TOOL => Ok(json!({"tool": domain, "reachable": true})),
+        crate::ask::ASK_USER_TOOL | crate::remember::REMEMBER_TOOL => {
+            Ok(json!({"tool": domain, "reachable": true}))
+        }
         other => Err(ToolFailure::new(
             "unprobed_tool",
             format!(
@@ -329,6 +331,9 @@ fn route<R: Runtime>(
     }
     if request.tool == crate::ask::ASK_USER_TOOL {
         return crate::ask::ask_user(app, &request.params);
+    }
+    if request.tool == crate::remember::REMEMBER_TOOL {
+        return crate::remember::remember(app, &request.params);
     }
     let domain = CATALOG
         .iter()

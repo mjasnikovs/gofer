@@ -4,6 +4,7 @@ import {join} from 'node:path'
 import test from 'node:test'
 import {createToolHost} from './ai-host.mjs'
 import {probeTools} from './ai-reachability.mjs'
+import {createRememberTool} from './ai-remember.mjs'
 import {createChildTools} from './ai-subagent.mjs'
 import {createAgentTools, runAgent} from './ai-provider.mjs'
 import {
@@ -147,4 +148,26 @@ test('a workspace tool that answers without doing its work is caught by the next
         /- read: it answered without the text the probe wrote: expected reachable, got/u
     )
     assert.deepEqual(await readdir(workspace.path), [])
+})
+
+test('remembering is proved by the backend routing the name, not by the tool saying so', async () => {
+    const workspace = await temporaryWorkspace()
+    const tool = createRememberTool({host: {call: () => Promise.reject(new Error('no store'))}})
+
+    await assert.rejects(
+        probeTools({
+            tools: [tool],
+            host: {call: () => Promise.resolve({})},
+            workspacePath: workspace.path
+        }),
+        /- remember: no store/u
+    )
+
+    await probeTools({
+        tools: [createRememberTool({host: {call: () => Promise.resolve({reachable: true})}})],
+        host: {call: () => Promise.resolve({})},
+        workspacePath: workspace.path
+    })
+
+    await workspace.remove()
 })

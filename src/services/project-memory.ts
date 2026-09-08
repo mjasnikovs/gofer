@@ -34,9 +34,10 @@ export function deleteProjectMemory(id: string): Promise<void> {
     return invoke('delete_project_memory', {id})
 }
 
+// Nothing comes back when the judge rejected it: a broken memory is deleted rather than marked.
 export function judgeProjectMemory(
     request: Readonly<{requestId: number; memoryId: string}>
-): Promise<ProjectMemory> {
+): Promise<ProjectMemory | undefined> {
     return asTurn(() =>
         invoke('judge_project_memory', {request, stream: new Channel<AiStreamPayload>()})
     )

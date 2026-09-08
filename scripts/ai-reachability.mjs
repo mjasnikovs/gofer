@@ -2,6 +2,7 @@ import {rm, writeFile} from 'node:fs/promises'
 import {join} from 'node:path'
 import {SUBAGENT_PROBE_ANSWER, SUBAGENT_TOOL_NAME} from './ai-subagent.mjs'
 import {ASK_PROBE_ANSWER, ASK_USER_TOOL_NAME} from './ai-ask.mjs'
+import {REMEMBER_PROBE_ANSWER, REMEMBER_TOOL_NAME} from './ai-remember.mjs'
 import {WEB_FETCH_PROBE_ANSWER, WEB_FETCH_TOOL_NAME} from './ai-fetch.mjs'
 import {WEB_SEARCH_PROBE_ANSWER, WEB_SEARCH_TOOL_NAME} from './ai-search.mjs'
 
@@ -34,12 +35,18 @@ const ASK_PROBE = {
     answersWith: ASK_PROBE_ANSWER
 }
 
+const REMEMBER_PROBE = {
+    name: REMEMBER_TOOL_NAME,
+    params: PROBE_REQUEST,
+    answersWith: REMEMBER_PROBE_ANSWER
+}
+
 const WEB_PROBES = [
     {name: WEB_SEARCH_TOOL_NAME, params: PROBE_REQUEST, answersWith: WEB_SEARCH_PROBE_ANSWER},
     {name: WEB_FETCH_TOOL_NAME, params: PROBE_REQUEST, answersWith: WEB_FETCH_PROBE_ANSWER}
 ]
 
-const LOCAL_PROBES = [...WORKSPACE_PROBES, SUBAGENT_PROBE, ASK_PROBE, ...WEB_PROBES]
+const LOCAL_PROBES = [...WORKSPACE_PROBES, SUBAGENT_PROBE, ASK_PROBE, REMEMBER_PROBE, ...WEB_PROBES]
 
 function resultText(result) {
     return (result?.content ?? [])

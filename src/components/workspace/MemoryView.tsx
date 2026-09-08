@@ -24,7 +24,6 @@ import {
 import {
     MEMORY_KINDS,
     checkSummary,
-    isBroken,
     isRetrievable,
     isUnjudged,
     missingAnchors,
@@ -44,7 +43,7 @@ import {TextField} from '../TextField'
 
 const PREVIEW_LENGTH = 110
 
-type MemoryFilter = 'all' | 'review' | 'broken'
+type MemoryFilter = 'all' | 'review' | 'waiting'
 
 const DOT: Readonly<Record<MemoryCheck, 'success' | 'warning' | 'neutral'>> = {
     intact: 'success',
@@ -74,10 +73,6 @@ type Sweeping = Readonly<{
 function preview(content: string): string {
     const line = content.replace(/\s+/gu, ' ').trim()
     return line.length > PREVIEW_LENGTH ? `${line.slice(0, PREVIEW_LENGTH)}…` : line
-}
-
-function withoutTurnLabels(content: string): string {
-    return content.replace(/^User request:\s*/u, '').replace(/\n+Outcome:\s*/u, ' → ')
 }
 
 function draftOf(memory: ProjectMemory): MemoryEdit {
@@ -191,7 +186,11 @@ export function MemoryView() {
         setJudging({memoryId: memory.id, requestId, line: 'starting the sub-agent…'})
         void judgeProjectMemory({requestId, memoryId: memory.id})
             .then(judged => {
-                setMemories(rows => (rows ?? []).map(row => (row.id === judged.id ? judged : row)))
+                setMemories(rows =>
+                    judged === undefined ?
+                        (rows ?? []).filter(row => row.id !== memory.id)
+                    :   (rows ?? []).map(row => (row.id === judged.id ? judged : row))
+                )
             })
             .catch((failure: unknown) => {
                 setJudgeFailure(current =>
@@ -256,11 +255,11 @@ export function MemoryView() {
 
     const all = useMemo(() => memories ?? [], [memories])
     const needingReview = useMemo(() => all.filter(memory => memory.check === 'stale'), [all])
-    const broken = useMemo(() => all.filter(isBroken), [all])
+    const waiting = useMemo(() => all.filter(memory => !isRetrievable(memory)), [all])
     const unjudged = useMemo(() => all.filter(isUnjudged), [all])
     const shown =
         filter === 'review' ? needingReview
-        : filter === 'broken' ? broken
+        : filter === 'waiting' ? waiting
         : all
     const given = all.filter(isRetrievable).length
 
@@ -289,11 +288,11 @@ export function MemoryView() {
             })
     }, [unjudged])
 
-    const holdBackBroken = useCallback(() => {
-        const ids = broken.map(memory => memory.id)
+    const keepWaiting = useCallback(() => {
+        const ids = waiting.map(memory => memory.id)
         if (ids.length === 0) return
         setIsSaving(true)
-        void setMemoryStates(ids, 'candidate')
+        void setMemoryStates(ids, 'confirmed')
             .then(moved => {
                 const byId = new Map(moved.map(row => [row.id, row]))
                 setMemories(rows => (rows ?? []).map(row => byId.get(row.id) ?? row))
@@ -305,7 +304,7 @@ export function MemoryView() {
             .finally(() => {
                 setIsSaving(false)
             })
-    }, [broken])
+    }, [waiting])
 
     return (
         <VStack
@@ -334,8 +333,8 @@ export function MemoryView() {
                         label={`Needs review ${String(needingReview.length)}`}
                     />
                     <SegmentedControlItem
-                        value='broken'
-                        label={`Model says broken ${String(broken.length)}`}
+                        value='waiting'
+                        label={`Waiting on you ${String(waiting.length)}`}
                     />
                 </SegmentedControl>
                 <StackItem size='fill'>
@@ -388,7 +387,7 @@ export function MemoryView() {
                     </>
                 }
             </HStack>
-            {filter === 'broken' && broken.length > 0 && (
+            {filter === 'waiting' && waiting.length > 0 && (
                 <>
                     <Divider />
                     <HStack
@@ -401,15 +400,15 @@ export function MemoryView() {
                                 type='supporting'
                                 color='secondary'
                             >
-                                Holding one back stops retrieval reading it. Its words and the
-                                model&apos;s reason are kept.
+                                The model wrote these and nothing has been given them. Keeping one
+                                is what lets a later turn read it.
                             </Text>
                         </StackItem>
                         <Button
-                            label={`Hold back all ${String(broken.length)}`}
+                            label={`Keep all ${String(waiting.length)}`}
                             size='sm'
                             isDisabled={isSaving || Boolean(sweeping)}
-                            clickAction={holdBackBroken}
+                            clickAction={keepWaiting}
                         />
                     </HStack>
                 </>
@@ -426,16 +425,16 @@ export function MemoryView() {
                     isEmpty={shown.length === 0}
                     emptyTitle={
                         filter === 'review' ? 'Nothing to review'
-                        : filter === 'broken' ?
-                            'The model has not called anything broken'
+                        : filter === 'waiting' ?
+                            'Nothing is waiting on you'
                         :   'This project remembers nothing'
                     }
                     emptyDescription={
                         filter === 'review' ?
                             'Every memory names files the workspace still has, or names none at all.'
-                        : filter === 'broken' ?
-                            'A row lands here once a sub-agent has read the code and said it no longer holds.'
-                        :   'A memory is written when a turn finishes. Six are read back into every prompt.'
+                        : filter === 'waiting' ?
+                            'Every memory here has been kept or thrown away.'
+                        :   'The agent writes one when a turn establishes something durable, and you decide whether to keep it. Six are read back into every prompt.'
 
                     }
                 >
@@ -451,7 +450,7 @@ export function MemoryView() {
                                 value={memory.id}
                                 trigger={
                                     <VStack gap={1}>
-                                        <Text>{preview(withoutTurnLabels(memory.content))}</Text>
+                                        <Text>{preview(memory.content)}</Text>
                                         <HStack
                                             gap={2}
                                             align='center'

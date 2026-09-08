@@ -373,6 +373,64 @@ COMMIT;
 PRAGMA foreign_keys = ON;
 "#;
 
+/// `summary` stops being a kind a memory can have, and every row that was one is deleted.
+///
+/// Nothing but the finished-turn writer ever produced them, and what it wrote was the request and
+/// the reply verbatim: a transcript, kept forever, retrieved by similarity into the next prompt.
+/// Measured across the projects on this machine it was 107 rows of it, 15 of them greetings. A
+/// memory is now something a model decided was worth keeping and the user kept, which is one of the
+/// four remaining kinds.
+///
+/// The rebuild follows [`PROJECT_SCHEMA_V8`] and for the same reason — SQLite cannot alter a CHECK.
+/// The deletes come first, because the copy would fail the new constraint otherwise. Two of them
+/// are only needed because foreign keys are off around the rebuild: `memory_embeddings` cascades
+/// and `superseded_by` nulls itself, and neither happens with the pragma off.
+const PROJECT_SCHEMA_V9: &str = r#"
+PRAGMA foreign_keys = OFF;
+BEGIN;
+DELETE FROM memory_embeddings
+WHERE memory_id IN (SELECT id FROM memory_items WHERE kind = 'summary');
+UPDATE memory_items SET superseded_by = NULL
+WHERE superseded_by IN (SELECT id FROM memory_items WHERE kind = 'summary');
+DELETE FROM memory_items WHERE kind = 'summary';
+CREATE TABLE memory_items_rebuilt (
+    id TEXT PRIMARY KEY,
+    task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('decision', 'preference', 'fact', 'issue')),
+    state TEXT NOT NULL CHECK (state IN ('candidate', 'confirmed', 'superseded')),
+    content TEXT NOT NULL,
+    provenance_json TEXT NOT NULL,
+    superseded_by TEXT REFERENCES memory_items(id) ON DELETE SET NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+) STRICT;
+INSERT INTO memory_items_rebuilt
+    (rowid, id, task_id, kind, state, content, provenance_json, superseded_by, created_at, updated_at)
+SELECT rowid, id, task_id, kind, state, content, provenance_json, superseded_by, created_at, updated_at
+FROM memory_items;
+DROP TABLE memory_items;
+ALTER TABLE memory_items_rebuilt RENAME TO memory_items;
+CREATE INDEX memory_items_task_state ON memory_items(task_id, state, updated_at DESC);
+CREATE TRIGGER memory_items_ai AFTER INSERT ON memory_items BEGIN
+    INSERT INTO memory_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+CREATE TRIGGER memory_items_ad AFTER DELETE ON memory_items BEGIN
+    INSERT INTO memory_fts(memory_fts, rowid, content)
+    VALUES ('delete', old.rowid, old.content);
+END;
+CREATE TRIGGER memory_items_au AFTER UPDATE OF content ON memory_items BEGIN
+    INSERT INTO memory_fts(memory_fts, rowid, content)
+    VALUES ('delete', old.rowid, old.content);
+    INSERT INTO memory_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+CREATE TRIGGER memory_items_ad_vectors AFTER DELETE ON memory_items BEGIN
+    DELETE FROM memory_vectors WHERE memory_id = old.id;
+END;
+PRAGMA user_version = 9;
+COMMIT;
+PRAGMA foreign_keys = ON;
+"#;
+
 /// One task's brief, as the panel and a resume read it.
 ///
 /// Every phase output is optional because a run that stopped part way through has only the ones it
@@ -1172,9 +1230,9 @@ fn migrate_project(connection: &Connection) -> Result<(), CommandError> {
     let current = connection
         .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
         .map_err(database_error)?;
-    if current > 8 {
+    if current > 9 {
         return Err(format!(
-            "The database schema version {current} is newer than supported version 8"
+            "The database schema version {current} is newer than supported version 9"
         )
         .into());
     }
@@ -1216,6 +1274,11 @@ fn migrate_project(connection: &Connection) -> Result<(), CommandError> {
     if current <= 7 {
         connection
             .execute_batch(PROJECT_SCHEMA_V8)
+            .map_err(database_error)?;
+    }
+    if current <= 8 {
+        connection
+            .execute_batch(PROJECT_SCHEMA_V9)
             .map_err(database_error)?;
     }
     Ok(())
@@ -1630,7 +1693,7 @@ mod tests {
             .query_row("SELECT vec_version()", [], |row| row.get::<_, String>(0))
             .expect("sqlite-vec version");
 
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
         assert_eq!(vec_version, "v0.1.9");
     }
 
@@ -1660,7 +1723,7 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .expect("schema version");
         assert_eq!(title, "Existing task");
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
         connection
             .execute_batch(
                 "INSERT INTO sketches (id, task_id, question_id, question, label, is_approved, saved_at)
@@ -1778,6 +1841,72 @@ mod tests {
             1,
             "the project's own memory is untouched"
         );
+    }
+
+    /// Every transcript memory goes, and everything a memory is made of goes with it.
+    ///
+    /// The rebuild runs with foreign keys off, so `memory_embeddings` does not cascade and
+    /// `superseded_by` does not null itself. Both are done by hand, and a row left behind in either
+    /// is invisible until a search or a rebuild trips over it.
+    #[test]
+    fn the_transcripts_are_deleted_with_everything_that_was_made_from_them() {
+        register_sqlite_vec();
+        let connection = Connection::open_in_memory().expect("in-memory database");
+        for schema in [
+            PROJECT_SCHEMA_V1,
+            PROJECT_SCHEMA_V2,
+            PROJECT_SCHEMA_V3,
+            PROJECT_SCHEMA_V4,
+            PROJECT_SCHEMA_V5,
+            PROJECT_SCHEMA_V6,
+            PROJECT_SCHEMA_V7,
+            PROJECT_SCHEMA_V8,
+        ] {
+            connection.execute_batch(schema).expect("earlier schema");
+        }
+        connection
+            .execute_batch(
+                "INSERT INTO memory_items
+                     (id, task_id, kind, state, content, provenance_json, superseded_by, created_at, updated_at)
+                 VALUES
+                     ('memory-1', NULL, 'summary', 'confirmed', 'User request: hi', '{}', NULL, 1, 1),
+                     ('memory-2', NULL, 'fact', 'confirmed', 'The level instances the player', '{}', 'memory-1', 1, 1);
+                 INSERT INTO memory_embeddings
+                     (memory_id, model, dimensions, normalized, format_version, embedding, updated_at)
+                 VALUES ('memory-1', 'm', 1, 1, 1, x'00', 1);",
+            )
+            .expect("a transcript and a fact");
+
+        migrate_project(&connection).expect("migrate project");
+
+        let count = |sql: &str| {
+            connection
+                .query_row(sql, [], |row| row.get::<_, u32>(0))
+                .expect("count")
+        };
+        assert_eq!(count("SELECT count(*) FROM memory_items"), 1);
+        assert_eq!(count("SELECT count(*) FROM memory_embeddings"), 0);
+        assert_eq!(
+            count("SELECT count(*) FROM memory_items WHERE superseded_by IS NOT NULL"),
+            0,
+            "nothing still points at a memory that is gone"
+        );
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM memory_items
+                 WHERE rowid IN (SELECT rowid FROM memory_fts WHERE memory_fts MATCH 'instances')"
+            ),
+            1,
+            "the surviving memory is still findable by text"
+        );
+        connection
+            .execute(
+                "INSERT INTO memory_items
+                     (id, kind, state, content, provenance_json, created_at, updated_at)
+                 VALUES ('memory-3', 'summary', 'confirmed', 'User request: hi', '{}', 1, 1)",
+                [],
+            )
+            .expect_err("summary is no longer a kind a memory can have");
     }
 
     /// The regression: a recorded base branch that Git has since lost must not fold two tasks.

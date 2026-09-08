@@ -1,4 +1,4 @@
-export type MemoryKind = 'decision' | 'preference' | 'fact' | 'issue' | 'summary'
+export type MemoryKind = 'decision' | 'preference' | 'fact' | 'issue'
 
 export type MemoryState = 'candidate' | 'confirmed' | 'superseded'
 
@@ -56,13 +56,7 @@ export type MemoryEdit = Readonly<{
     content: string
 }>
 
-export const MEMORY_KINDS: readonly MemoryKind[] = [
-    'decision',
-    'preference',
-    'fact',
-    'issue',
-    'summary'
-]
+export const MEMORY_KINDS: readonly MemoryKind[] = ['decision', 'preference', 'fact', 'issue']
 
 export const MEMORY_STATES: readonly MemoryState[] = ['candidate', 'confirmed', 'superseded']
 
@@ -88,10 +82,6 @@ export function checkSummary(memory: ProjectMemory): string {
 
 export function isRetrievable(memory: ProjectMemory): boolean {
     return memory.state === 'confirmed'
-}
-
-export function isBroken(memory: ProjectMemory): boolean {
-    return memory.judgement?.verdict === 'broken' && memory.judgement.isCurrent
 }
 
 export function isUnjudged(memory: ProjectMemory): boolean {

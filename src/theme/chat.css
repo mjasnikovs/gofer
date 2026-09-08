@@ -22,7 +22,8 @@
     margin-block-start: calc(-1 * var(--spacing-2));
 }
 
-.astryx-card.gofer-ask-surface {
+.astryx-card.gofer-ask-surface,
+.astryx-card.gofer-remember-surface {
     background-color: var(--color-background-popover);
 }
 

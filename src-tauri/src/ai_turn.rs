@@ -956,23 +956,17 @@ pub(crate) async fn run_turn(
             task_id.as_deref(),
         )
         .ok();
-        let completion = run_ai_worker(
+        run_ai_worker(
             &app,
             &turn,
             context.request(Job::Turn {
-                task_id: task_id.clone(),
+                task_id,
                 messages,
                 agent_messages: request.agent_messages,
                 is_retry: request.is_retry,
                 memory_context,
             }),
         )?;
-        let _ = crate::project_memory::remember_completed_turn(
-            context.storage(),
-            task_id.as_deref(),
-            &prompt,
-            &completion,
-        );
         Ok(())
     })
     .await
@@ -1059,12 +1053,15 @@ impl JudgeContext {
 /// The verdict itself is not returned. It crosses on `judge-verdict` and is filed by
 /// [`handle_judge_event`], which is the only side that survives the worker being killed, so what
 /// comes back is the row read afterwards: what was stored, not what was reported.
+///
+/// Nothing is what a `broken` verdict leaves behind — that filing deletes the row — so a memory
+/// that is gone here is the ordinary ending, not a failure.
 fn judge_one(
     app: &AppHandle,
     turn: &AiTurn,
     context: &JudgeContext,
     memory_id: &str,
-) -> Result<crate::project_memory::CheckedMemory, String> {
+) -> Result<Option<crate::project_memory::CheckedMemory>, String> {
     let record = context
         .job
         .storage()
@@ -1098,18 +1095,20 @@ fn judge_one(
     }
     outcome?;
 
-    let record = context
+    let Some(record) = context
         .job
         .storage()
         .memory()
         .get(memory_id)
         .map_err(|failure| failure.message)?
-        .ok_or_else(|| "That memory is no longer stored".to_owned())?;
-    Ok(crate::project_memory::check_memory(
+    else {
+        return Ok(None);
+    };
+    Ok(Some(crate::project_memory::check_memory(
         record,
         Some(&context.snapshot),
         Some(&index),
-    ))
+    )))
 }
 
 /// Puts one stored memory to a read-only child and files what it says.
@@ -1122,7 +1121,7 @@ pub(crate) async fn run_judge(
     app: AppHandle,
     request: JudgeRequest,
     stream: tauri::ipc::Channel<AiStreamPayload>,
-) -> Result<crate::project_memory::CheckedMemory, CommandError> {
+) -> Result<Option<crate::project_memory::CheckedMemory>, CommandError> {
     let turn = AiTurn::begin(request.request_id, stream)?;
     tauri::async_runtime::spawn_blocking(move || {
         let turn = turn;
@@ -1240,7 +1239,8 @@ pub(crate) async fn run_sweep(
                 }),
             );
             match judge_one(&app, &turn, &context, memory_id) {
-                Ok(memory) => judged.push(memory),
+                Ok(Some(memory)) => judged.push(memory),
+                Ok(None) => {}
                 Err(reason) => {
                     eprintln!("Judging memory {memory_id} failed, the sweep continues: {reason}");
                 }
@@ -1827,13 +1827,20 @@ fn handle_judge_event<R: Runtime>(
         && let Some(verdict) = text("verdict")
         && let Ok(storage) = crate::workspace::project_storage(app)
     {
-        let _ = crate::project_memory::record_judgement(
-            &storage,
-            memory_id,
-            verdict,
-            text("reason").unwrap_or_default(),
-            text("model").unwrap_or_default(),
-        );
+        // A broken memory is deleted rather than kept and marked. Keeping it means a pile nobody
+        // opens, which is the noise this feature was rebuilt to stop; and a verdict that was wrong
+        // costs one re-learning, which is cheaper than the pile.
+        let _ = if verdict == "broken" {
+            storage.memory().delete(memory_id)
+        } else {
+            crate::project_memory::record_judgement(
+                &storage,
+                memory_id,
+                verdict,
+                text("reason").unwrap_or_default(),
+                text("model").unwrap_or_default(),
+            )
+        };
     }
     let mut event = event.clone();
     if let Some(fields) = event.as_object_mut() {
@@ -2599,7 +2606,7 @@ mod tests {
             .upsert(&crate::storage::UpsertMemoryRequest {
                 id: None,
                 task_id: None,
-                kind: "summary".to_owned(),
+                kind: "fact".to_owned(),
                 state: "confirmed".to_owned(),
                 content: "Deleted GRAYZONE.md.".to_owned(),
                 provenance: serde_json::json!({"source": "completed-ai-turn"}),
@@ -2632,6 +2639,47 @@ mod tests {
         assert_eq!(filed.memory.provenance["source"], "completed-ai-turn");
     }
 
+    /// A memory the judge read the code and rejected is deleted, not kept and marked.
+    ///
+    /// Keeping it means a pile of rejected memories nobody opens, which is the noise the feature
+    /// was rebuilt to stop. The judge is a small local model and is sometimes wrong; that costs one
+    /// re-learning, and the pile costs every later reading of the panel.
+    #[test]
+    fn a_memory_the_judge_rejects_is_deleted_rather_than_marked() {
+        let directory = TempDir::new().expect("temporary directory");
+        let (app, _task_id) = app_with_a_task(&directory);
+        let storage = crate::workspace::project_storage(app.handle()).expect("storage");
+        let stored = storage
+            .memory()
+            .upsert(&crate::storage::UpsertMemoryRequest {
+                id: None,
+                task_id: None,
+                kind: "fact".to_owned(),
+                state: "confirmed".to_owned(),
+                content: "Deleted GRAYZONE.md.".to_owned(),
+                provenance: serde_json::json!({"source": "model"}),
+                superseded_by: None,
+            })
+            .expect("store a memory");
+
+        handle_judge_event(
+            app.handle(),
+            &stored.id,
+            "judge-verdict",
+            &serde_json::json!({
+                "type": "judge-verdict",
+                "verdict": "broken",
+                "reason": "the file is back",
+                "model": "qwen3",
+            }),
+        );
+
+        assert!(
+            storage.memory().get(&stored.id).expect("read").is_none(),
+            "a broken memory is gone rather than held back"
+        );
+    }
+
     /// Progress crosses the pipe without touching the row: only a verdict is worth storing.
     #[test]
     fn a_running_judgement_reports_itself_without_filing_anything() {
@@ -2643,7 +2691,7 @@ mod tests {
             .upsert(&crate::storage::UpsertMemoryRequest {
                 id: None,
                 task_id: None,
-                kind: "summary".to_owned(),
+                kind: "fact".to_owned(),
                 state: "confirmed".to_owned(),
                 content: "Deleted GRAYZONE.md.".to_owned(),
                 provenance: serde_json::json!({}),
