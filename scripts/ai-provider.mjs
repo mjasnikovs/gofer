@@ -58,7 +58,7 @@ import {createSubagentTool} from './ai-subagent.mjs'
 import {createProgressGuard} from './progress-guard.mjs'
 import {createWebFetchTool} from './ai-fetch.mjs'
 import {createWebSearchTool} from './ai-search.mjs'
-import {createTranscript, withoutTrailingAnswer} from './ai-transcript.mjs'
+import {createTranscript, withoutEmptyToolCalls, withoutTrailingAnswer} from './ai-transcript.mjs'
 import {toolTarget} from './tool-target.mjs'
 import {withoutPackedLiterals} from './scene-text.mjs'
 import {confineTool} from './workspace-confinement.mjs'
@@ -791,6 +791,7 @@ export async function runAgent({
                 const usage = event.message.usage
                 if (ids.length > 0) emit(toolCost(ids, (usage?.input ?? 0) + (usage?.output ?? 0)))
             }
+            transcript.replaceWith(withoutEmptyToolCalls(transcript.messages()))
             transcript.checkpoint()
         }
     })

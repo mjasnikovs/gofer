@@ -1,6 +1,6 @@
 import {strict as assert} from 'node:assert'
 import test from 'node:test'
-import {createTranscript, withoutTrailingAnswer} from './ai-transcript.mjs'
+import {createTranscript, withoutEmptyToolCalls, withoutTrailingAnswer} from './ai-transcript.mjs'
 
 const user = text => ({role: 'user', content: [{type: 'text', text}]})
 const assistant = text => ({role: 'assistant', content: [{type: 'text', text}]})
@@ -92,4 +92,76 @@ test('dropping an answer that is not there changes nothing', () => {
     transcript.dropTrailingAnswer()
 
     assert.deepEqual(transcript.messages(), [user('a'), toolResult('t1')])
+})
+
+const emptyCall = id => ({
+    role: 'assistant',
+    content: [{type: 'toolCall', id, name: 'godot', arguments: {ops: [{op: 'set_property'}]}}]
+})
+const fullCall = id => ({
+    role: 'assistant',
+    content: [
+        {
+            type: 'toolCall',
+            id,
+            name: 'godot',
+            arguments: {ops: [{op: 'set_property', node: 'Player', name: 'speed', value: 3}]}
+        }
+    ]
+})
+const failed = id => ({role: 'toolResult', toolCallId: id, isError: true, content: []})
+const succeeded = id => ({role: 'toolResult', toolCallId: id, isError: false, content: []})
+
+test('an empty call and its refusal both leave the history', () => {
+    assert.deepEqual(withoutEmptyToolCalls([user('a'), emptyCall('c1'), failed('c1'), user('b')]), [
+        user('a'),
+        user('b')
+    ])
+})
+
+test('a call with parameters stays, refused or not', () => {
+    const kept = [user('a'), fullCall('c1'), failed('c1')]
+    assert.deepEqual(withoutEmptyToolCalls(kept), kept)
+})
+
+test('an empty call that somehow worked stays', () => {
+    const kept = [emptyCall('c1'), succeeded('c1')]
+    assert.deepEqual(withoutEmptyToolCalls(kept), kept)
+})
+
+test('a call with no result stays, because the API refuses an orphan', () => {
+    const kept = [emptyCall('c1')]
+    assert.deepEqual(withoutEmptyToolCalls(kept), kept)
+})
+
+test('a message holding one empty call and one good one stays whole', () => {
+    const mixed = {
+        role: 'assistant',
+        content: [...emptyCall('c1').content, ...fullCall('c2').content]
+    }
+    const kept = [mixed, failed('c1'), succeeded('c2')]
+    assert.deepEqual(withoutEmptyToolCalls(kept), kept)
+})
+
+test('a message whose every empty call failed goes with all of its results', () => {
+    const both = {
+        role: 'assistant',
+        content: [...emptyCall('c1').content, ...emptyCall('c2').content]
+    }
+    assert.deepEqual(withoutEmptyToolCalls([user('a'), both, failed('c1'), failed('c2')]), [
+        user('a')
+    ])
+})
+
+test('a bare operation with no ops wrapper counts as empty', () => {
+    const bare = {
+        role: 'assistant',
+        content: [{type: 'toolCall', id: 'c1', name: 'godot', arguments: {op: 'set_property'}}]
+    }
+    assert.deepEqual(withoutEmptyToolCalls([bare, failed('c1')]), [])
+})
+
+test('plain text and results nobody called are untouched', () => {
+    const kept = [user('a'), assistant('b'), succeeded('c9')]
+    assert.deepEqual(withoutEmptyToolCalls(kept), kept)
 })
