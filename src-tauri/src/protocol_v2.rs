@@ -315,7 +315,7 @@ pub fn validate_value(value: &Value) -> Result<(), ProtocolError> {
             payload.is_some_and(Value::is_number),
             "a float value carries a number",
         ),
-        "string" => require(
+        "string" | "node_path" => require(
             payload.is_some_and(Value::is_string),
             "a string value carries a string",
         ),

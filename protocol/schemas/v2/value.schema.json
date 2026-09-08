@@ -24,7 +24,10 @@
         },
         {
             "required": ["value"],
-            "properties": {"type": {"const": "string"}, "value": {"type": "string"}}
+            "properties": {
+                "type": {"enum": ["string", "node_path"]},
+                "value": {"type": "string"}
+            }
         },
         {
             "required": ["value"],

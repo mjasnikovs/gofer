@@ -858,3 +858,65 @@ fn an_instance_under_a_node_that_changes_type_is_still_an_instance() {
         "an instance's insides must not be written into the file that instanced it: {saved}"
     );
 }
+
+/// An `@export` node reference can be pointed at another node in the same scene.
+///
+/// The Inspector is the only thing that wires these, and what it writes is a `NodePath` relative to
+/// the node holding the property — never a resource, which is what a property declared as an
+/// `Object` otherwise asks for. So the value arrives as a path and is resolved against that node
+/// before it is written, and this test is the proof the engine then packs it as one.
+#[test]
+fn an_exported_node_reference_is_wired_by_the_path_it_is_saved_as() {
+    let directory = tempfile::TempDir::new().expect("temporary directory");
+    let worktree = crate::godot_editor_harness::fixture_worktree(&directory);
+    std::fs::write(
+        worktree.join("panel.gd"),
+        "extends Control\n\n\n@export var rate_slider: HSlider\n",
+    )
+    .expect("write the script");
+    let ledger = directory.path().join("ledger.json");
+    let mut session = Session::start_on_worktree(worktree.clone(), ledger, Some(directory));
+
+    session.mutate(
+        "scene.create",
+        json!({"path": "res://panel.tscn", "rootType": "Control"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"parent": "/panel", "name": "Box", "type": "VBoxContainer"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"parent": "/panel/Box", "name": "RateSlider", "type": "HSlider"}),
+    );
+    session.mutate(
+        "node.set_property",
+        json!({"node": "/panel", "property": "script",
+               "value": {"type": "resource", "value": {"path": "res://panel.gd"}}}),
+    );
+
+    let refused = session.error(
+        "node.set_property",
+        json!({"node": "/panel", "property": "rate_slider",
+               "value": {"type": "string", "value": "Box/RateSlider"}}),
+        Some(session.revision()),
+    );
+    assert!(
+        refused.contains("node_path"),
+        "a node reference written as a string names the tag that takes it: {refused}"
+    );
+
+    session.mutate(
+        "node.set_property",
+        json!({"node": "/panel", "property": "rate_slider",
+               "value": {"type": "node_path", "value": "Box/RateSlider"}}),
+    );
+    session.mutate("scene.save", json!({}));
+
+    let saved = std::fs::read_to_string(worktree.join("panel.tscn"))
+        .expect("the panel scene must exist on disk");
+    assert!(
+        saved.contains("rate_slider = NodePath(\"Box/RateSlider\")"),
+        "the wired reference is missing from:\n{saved}"
+    );
+}

@@ -1246,6 +1246,11 @@ static func where_a_method_would_be(target: Node, method: String = "") -> String
 ## scene, which then opened with a String where a Shape2D belongs. What the node says the property
 ## is, is therefore checked before the value reaches it, so a mistyped write is an error naming the
 ## type it wanted rather than a level that will not run.
+##
+## A property holding another node is the one place a path is not a mistyped write: the Inspector
+## wires an `@export var target: Node2D` by path too, and the scene stores what it wrote as a
+## NodePath. So a path is resolved against the node the property is on, which is what that stored
+## path is read from.
 static func fit_to_property(node: Node, property: String, value: Variant) -> Dictionary:
     var declared: Dictionary = {}
     for info in node.get_property_list():
@@ -1257,10 +1262,31 @@ static func fit_to_property(node: Node, property: String, value: Variant) -> Dic
     var wanted := int(declared.get("type", TYPE_NIL))
     if value == null and wanted == TYPE_OBJECT:
         return Protocol.decoded(null)
+    var wanted_class := str(declared.get("class_name", ""))
+    var holds_a_node := (
+        wanted == TYPE_OBJECT
+        and (
+            int(declared.get("hint", PROPERTY_HINT_NONE)) == PROPERTY_HINT_NODE_TYPE
+            or (ClassDB.class_exists(wanted_class) and ClassDB.is_parent_class(wanted_class, "Node"))
+        )
+    )
+    if holds_a_node and typeof(value) == TYPE_NODE_PATH:
+        var pointed_at := node.get_node_or_null(value)
+        if pointed_at == null:
+            return Protocol.decode_failed(
+                "no node at %s, which is read from %s" % [str(value), str(node.get_path())]
+            )
+        value = pointed_at
     var fitted := Protocol.fit_to_declared_type(value, wanted)
     if not fitted["ok"]:
+        if holds_a_node:
+            return Protocol.decode_failed(
+                (
+                    '%s holds a node: send {"type": "node_path", "value": "Box/Slider"}, a path '
+                    + "read from the node the property is on."
+                ) % property
+            )
         return fitted
-    var wanted_class := str(declared.get("class_name", ""))
     if wanted != TYPE_OBJECT or wanted_class.is_empty() or not ClassDB.class_exists(wanted_class):
         return fitted
     var object: Object = fitted["value"]

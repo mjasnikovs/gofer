@@ -258,6 +258,10 @@ static func decode(value: Variant) -> Dictionary:
         "quaternion":
             var quaternion := numbers(payload, 4)
             return decode_failed("A quaternion value requires four numbers") if quaternion.is_empty() else decoded(Quaternion(quaternion[0], quaternion[1], quaternion[2], quaternion[3]))
+        "node_path":
+            if not typeof(payload) in [TYPE_STRING, TYPE_STRING_NAME]:
+                return decode_failed("A node_path value requires a string payload")
+            return decoded(NodePath(str(payload)))
         "color":
             if typeof(payload) == TYPE_STRING or typeof(payload) == TYPE_STRING_NAME:
                 var unreadable := Color(-1.0, -2.0, -3.0, -4.0)

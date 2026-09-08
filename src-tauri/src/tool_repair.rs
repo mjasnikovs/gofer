@@ -516,6 +516,7 @@ const TAGS: &[(&str, Payload)] = &[
     ("int", Payload::Numeric),
     ("float", Payload::Numeric),
     ("string", Payload::Str),
+    ("node_path", Payload::Str),
     ("vector2", Payload::Numbers(2)),
     ("vector2i", Payload::Numbers(2)),
     ("vector3", Payload::Numbers(3)),
