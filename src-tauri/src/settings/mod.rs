@@ -1509,7 +1509,14 @@ fn resolve_model(
         }
         if let Some(window) = model.context_window {
             choice.context_window = window;
-            choice.max_tokens = ceiling_within(window, Some(choice.max_tokens));
+            // The window is the server's to name; the ceiling inside it is the user's. This used to
+            // re-derive the ceiling from the new window on every resolve, which silently overwrote a
+            // typed value with the compaction reserve and made the field impossible to raise. It now
+            // applies the one rule [`validate_model_choice`] applies: a ceiling that does not fit
+            // inside the window is no ceiling, and only that case falls back to the default.
+            if choice.max_tokens >= window {
+                choice.max_tokens = ceiling_within(window, None);
+            }
         }
         choice.reasoning = model.reasoning;
         choice.supports_reasoning_effort = !model.efforts.is_empty();
@@ -4491,6 +4498,47 @@ mod tests {
         assert!(
             local.model.reasoning,
             "it still thinks, it just cannot be told how hard"
+        );
+    }
+
+    /// A ceiling the user typed survives the server answering for the window.
+    ///
+    /// The default is still the compaction reserve — 14% of the window, which on a 140,032-token
+    /// host is 19,605 — and that is what a freshly picked model arrives with. But it is a default,
+    /// not a clamp: a user who wants a longer single answer types one, and resolving against the
+    /// same server it was typed for must leave it alone. It used to snap back to 19,605 on every
+    /// resolve, so the field could not be raised at all.
+    #[test]
+    fn a_typed_ceiling_inside_the_window_is_not_re_derived() {
+        let mut local = connection("http://127.0.0.1:8080/v1", "/models/qwen.gguf");
+        local.model.context_window = 140_032;
+        local.model.max_tokens = 65_536;
+        let mut ai = settings_on(AiConnectionType::Local, local).ai;
+
+        let served = HashMap::from([(
+            "http://127.0.0.1:8080/v1".to_owned(),
+            ServedModel {
+                id: "/models/qwen.gguf".to_owned(),
+                context_window: Some(140_032),
+                reasoning: true,
+                efforts: Vec::new(),
+                input: None,
+                sole: true,
+            },
+        )]);
+        resolve_model_facts(&mut ai, &PiCatalog::default(), &served);
+
+        let local = ai
+            .connection_for(AiConnectionType::Local)
+            .expect("the local connection");
+        assert_eq!(
+            local.model.max_tokens, 65_536,
+            "the number the user chose, not the reserve it exceeds"
+        );
+        assert_eq!(
+            ceiling_within(140_032, None),
+            19_605,
+            "and the default nobody chose is unchanged"
         );
     }
 
