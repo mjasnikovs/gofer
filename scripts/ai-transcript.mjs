@@ -41,10 +41,26 @@ function heldNothing(call) {
     return entries.length > 0 && entries.every(namesOnlyAnOperation)
 }
 
+// An operation that needs no parameters is legitimately written as `{op}`, so the shape alone is
+// not the defect. Our own refusal saying which parameter is missing is.
+const REFUSED_FOR_EMPTINESS = /missing_param|has now refused this exact call/u
+
+function refusedForEmptiness(result) {
+    if (result.isError !== true) return false
+    const said = (result.content ?? [])
+        .filter(part => part.type === 'text')
+        .map(part => part.text)
+        .join(' ')
+    return REFUSED_FOR_EMPTINESS.test(said)
+}
+
 /**
  * The model reads its own failures and copies them. An operation named with every parameter
  * missing is refused, the pair stays in the history, and the next call is likelier to be empty
  * still. Deleting the pair is what stops it: 7/10 empty turns became 0/10 on the same task.
+ *
+ * This runs as `transformContext`, on every request. The agent loop works from its own copy of
+ * the context, so assigning `agent.state.messages` mid-run reaches nothing the model will read.
  */
 export function withoutEmptyToolCalls(messages) {
     const dropped = new Set()
@@ -55,8 +71,7 @@ export function withoutEmptyToolCalls(messages) {
         const results = messages.filter(
             other => other.role === 'toolResult' && calls.some(call => call.id === other.toolCallId)
         )
-        if (results.length !== calls.length || !results.every(result => result.isError === true))
-            continue
+        if (results.length !== calls.length || !results.every(refusedForEmptiness)) continue
         dropped.add(message)
         for (const result of results) dropped.add(result)
     }

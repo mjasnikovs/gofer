@@ -10,3 +10,6 @@ src-tauri/addon/*.gd
 fixtures/godot-project/addons
 
 scripts/__fixtures__
+
+# Plan-check fixtures are inputs under test: reformatting one changes what it tests.
+scripts/plan-check/fixtures

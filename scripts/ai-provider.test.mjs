@@ -2598,3 +2598,42 @@ test('a turn that repeats past every warning ends and says so', async context =>
     assert.equal(mock.bodies.length, 10)
     assert.equal(events.filter(event => event.type === 'retry-scheduled').length, 0)
 })
+
+test('an operation refused for naming no parameters is gone from the next request', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const mock = startScriptedServer([
+        {calls: [{name: 'godot_scene', args: {ops: [{op: 'get_tree'}]}}]},
+        {calls: [{name: 'godot_scene', args: {ops: [{op: 'save'}]}}]},
+        {text: 'Saved'}
+    ])
+    const url = await baseUrl(context, mock.server)
+    const host = createToolHost(call => {
+        if (isProbe(call)) return host.deliver(probeResult(call))
+        if (call.params.ops[0].op === 'get_tree')
+            return host.deliver({
+                type: 'tool-result',
+                id: call.id,
+                ok: false,
+                error: {code: 'missing_param', message: 'godot_scene get_tree requires `path`.'}
+            })
+        host.deliver({type: 'tool-result', id: call.id, ok: true, result: {saved: true}})
+    })
+
+    await runAgent({
+        settings: servedBy(url),
+        messages: [{sender: 'user', text: 'Save the scene', timestamp: 1}],
+        workspacePath: workspace.path,
+        tools: catalog,
+        host,
+        emit: () => undefined
+    })
+
+    const sent = mock.bodies.at(-1).messages
+    assert.doesNotMatch(JSON.stringify(sent), /missing_param/u)
+    assert.equal(
+        sent.filter(message => message.role === 'tool').length,
+        1,
+        'only the call that worked is still there'
+    )
+})

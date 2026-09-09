@@ -492,6 +492,7 @@ async function attemptSubagent({
             messages: []
         },
         streamFn,
+        transformContext: async messages => withoutEmptyToolCalls(messages),
         shouldStopAfterTurn: () => guard.verdict() !== undefined,
         toolExecution: 'parallel'
     })
@@ -543,7 +544,6 @@ async function attemptSubagent({
             return
         }
         if (event.type !== 'turn_end' || event.message.role !== 'assistant') return
-        agent.state.messages = withoutEmptyToolCalls(agent.state.messages)
         silence.note()
         usage = addUsage(usage, event.message.usage)
         if (event.message.stopReason === 'error') lastFailure = event.message

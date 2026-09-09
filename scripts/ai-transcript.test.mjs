@@ -109,8 +109,19 @@ const fullCall = id => ({
         }
     ]
 })
-const failed = id => ({role: 'toolResult', toolCallId: id, isError: true, content: []})
+const failed = id => ({
+    role: 'toolResult',
+    toolCallId: id,
+    isError: true,
+    content: [{type: 'text', text: 'missing_param: godot_node set_property requires `node`.'}]
+})
 const succeeded = id => ({role: 'toolResult', toolCallId: id, isError: false, content: []})
+const refusedForAnotherReason = id => ({
+    role: 'toolResult',
+    toolCallId: id,
+    isError: true,
+    content: [{type: 'text', text: 'read_only: a sub-agent changes nothing.'}]
+})
 
 test('an empty call and its refusal both leave the history', () => {
     assert.deepEqual(withoutEmptyToolCalls([user('a'), emptyCall('c1'), failed('c1'), user('b')]), [
@@ -164,4 +175,19 @@ test('a bare operation with no ops wrapper counts as empty', () => {
 test('plain text and results nobody called are untouched', () => {
     const kept = [user('a'), assistant('b'), succeeded('c9')]
     assert.deepEqual(withoutEmptyToolCalls(kept), kept)
+})
+
+test('an operation refused for anything but its parameters stays', () => {
+    const kept = [emptyCall('c1'), refusedForAnotherReason('c1')]
+    assert.deepEqual(withoutEmptyToolCalls(kept), kept)
+})
+
+test('the refusal that says it has heard this call before goes too', () => {
+    const worn = {
+        role: 'toolResult',
+        toolCallId: 'c1',
+        isError: true,
+        content: [{type: 'text', text: 'godot_node has now refused this exact call 3 times, …'}]
+    }
+    assert.deepEqual(withoutEmptyToolCalls([emptyCall('c1'), worn]), [])
 })

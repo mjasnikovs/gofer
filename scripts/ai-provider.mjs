@@ -703,7 +703,8 @@ export async function runAgent({
             return {context: {...context, messages: transcript.replaceWith(compacted)}}
         },
         convertToLlm,
-        transformContext: async messages => withTurnContext(messages, turnText, turnAnchor),
+        transformContext: async messages =>
+            withTurnContext(withoutEmptyToolCalls(messages), turnText, turnAnchor),
         streamFn: (nextModel, context, options) =>
             models.streamSimple(nextModel, context, {...options, ...streamOptions}),
         shouldStopAfterTurn: () => guard.verdict() !== undefined,
