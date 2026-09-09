@@ -104,7 +104,9 @@ async function ask(arm, seed, messages) {
 }
 
 async function trial(armName, task, seed) {
-    const arm = ARMS[armName]
+    // An arm is decoded by its shape, not its name: S1 is whatever list the previous step built,
+    // and since step 2 that is one `godot` tool.
+    const arm = tools[armName].some(t => t.name === 'godot') ? ARMS.S2 : ARMS[armName]
     const messages = conversation(task, prompts[armName], arm)
     const row = {
         arm: armName,
