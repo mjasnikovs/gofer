@@ -1700,9 +1700,12 @@ fn validate_chat_messages(
     ) {
         return Err("The last chat message must come from the user".to_owned());
     }
+    // Only what the user sends has to say something. An answer that was all tool calls carries no
+    // prose, and rejecting it would poison every later turn in that conversation.
     if messages.iter().any(|message| {
-        message.text.trim().is_empty()
-            && (message.sender != ChatSender::User || message.attachments.is_empty())
+        message.sender == ChatSender::User
+            && message.text.trim().is_empty()
+            && message.attachments.is_empty()
     }) {
         return Err("Chat messages must contain text or an image".to_owned());
     }
@@ -4323,6 +4326,33 @@ mod tests {
             .unwrap_err()
             .message
             .contains("10 MiB")
+        );
+    }
+
+    #[test]
+    fn an_answer_of_only_tool_calls_does_not_block_the_next_turn() {
+        assert!(
+            validate_chat_messages(vec![
+                ChatMessageInput {
+                    sender: ChatSender::User,
+                    text: "ask".to_owned(),
+                    timestamp: 1,
+                    attachments: Vec::new(),
+                },
+                ChatMessageInput {
+                    sender: ChatSender::Assistant,
+                    text: String::new(),
+                    timestamp: 2,
+                    attachments: Vec::new(),
+                },
+                ChatMessageInput {
+                    sender: ChatSender::User,
+                    text: "again".to_owned(),
+                    timestamp: 3,
+                    attachments: Vec::new(),
+                },
+            ])
+            .is_ok()
         );
     }
 
