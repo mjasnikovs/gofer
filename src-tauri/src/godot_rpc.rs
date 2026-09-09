@@ -304,11 +304,19 @@ impl RpcSession {
                 .insert(request.id.clone(), PendingRequest { sender: tx });
         }
         let request_id = request.id.clone();
+        #[cfg(debug_assertions)]
+        let command = request.command.clone();
         self.request_tx
             .send(request)
             .map_err(|_| RpcError::new("session_closed", "The RPC session has stopped"))?;
         match crate::cancel::recv_until(&rx, Instant::now() + timeout) {
-            Ok(response) => response,
+            Ok(response) => {
+                #[cfg(debug_assertions)]
+                if let Ok(envelope) = &response {
+                    the_answer_the_command_declares(&command, &envelope.result);
+                }
+                response
+            }
             Err(crate::cancel::WaitEnd::Cancelled) => {
                 self.tell_the_addon_to_give_up(&request_id);
                 Err(RpcError::new(
@@ -703,6 +711,21 @@ fn same_project(expected: &str, reported: &str) -> bool {
         crate::paths::simplified(&canonical).to_path_buf()
     };
     normalize(expected) == normalize(reported)
+}
+
+/// Holds every addon answer to the shape its command declares, in a build that can afford it.
+///
+/// The declaration is `result` in `protocol/schemas/v2/params.json`, and this is the only place
+/// the two ever meet: an answer is a dictionary the whole way up to the renderer, so a key the
+/// handler stopped sending, or started sending, is invisible until something reads it and finds
+/// nothing there. Panicking is the point — the acceptance suite runs every command through here,
+/// so a declaration that has drifted from the addon is a red run naming the command, the answer
+/// and what serde could not make of it.
+#[cfg(debug_assertions)]
+fn the_answer_the_command_declares(command: &str, result: &Value) {
+    if let Err(why) = crate::tool_results::declared_shape_of(command, result) {
+        panic!("{command} answered {result}, which is not the shape it declares: {why}");
+    }
 }
 
 /// Recognizes the traffic that carries no correlated request: the addon's reply to a heartbeat

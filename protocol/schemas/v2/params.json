@@ -5,6 +5,7 @@
     "$acceptsComment": "`accepts` names a parameter the addon reads and the model is never told about. `scene` is the only one: every node command takes it and defaults it to the scene the editor already has open, so the desktop client passes it and the model has no reason to.",
     "$gatedComment": "`gated` is the sentence the user is shown before the agent may run this operation. Its absence means auto-allowed, so a new operation is allowed by default and has to be gated deliberately. It lives beside the parameters and the route because all three are facts about the same operation, and keeping the safety model in a table of its own meant a fifth place to look and a fifth thing to hold to the catalogue afterwards.",
     "$writesComment": "`writes` names what an operation writes where one of the user's enforced Godot rules may refuse it: `projectSetting` and `editorSetting` are the two settings surfaces, `scriptText` is a call carrying GDScript source. `godot_policy::enforcement_refusal` reads the tag rather than matching on the tool and the operation, so an operation renamed here cannot quietly stop being enforced. Absence means no rule keys on this operation — which is every operation but five.",
+    "$resultComment": "`result` is the shape of the answer an operation succeeds with, in the same vocabulary as `params` and never shown to the model. The generator emits a Rust struct per addon command from it, and `godot_rpc` deserializes every answer into that struct in a debug build — so a declaration that disagrees with the handler is a failed acceptance run rather than a stale sentence. A kind of `shape` names a row of `shapes` below; an `object` with no `entry` is one this codebase does not shape at all — a settings map, a language server payload — and says so by being open.",
     "$aloneComment": "`alone` narrows where an operation may sit in an `ops` list, and carries the sentence a caller reads when it gets that wrong. Every tool call is a list, so a model wanting three inspections writes one call rather than three. `scope: \"repeat\"` is the ordinary case: the operation may sit beside other operations, and may not appear twice, because it takes no parameters to vary or drives something the session owns exactly one of — the open scene, the running game, the undo stack, the dialog. The router runs a list in order, so a second one would only redo or undo the first. `scope: \"exclusive\"` is the debugger, where each answer decides what the next operation means, so the operation has to be the only entry of its call. Absence means the operation may appear as often as a list names it.",
     "$vocabularyComment": "`vocabularies` names a set of words a parameter accepts where `kind` cannot reach — `key` sits inside each entry of an `events` list — and it names them by pointing at a list in `protocol/godot-vocabulary.json`, which is written by running the pinned engine. Nothing here is hand-listed: the twenty-five key names that used to be were a quarter of the hundred and ninety the engine has, and the only thing holding them to it was a test feeding them to a real editor one at a time. The generator resolves `engine` into the words, emits them as the schema `enum` the sampler is constrained by, and the prose says nothing about them: an enum permits and prose steers, and the same enum with a stale list beside it measured worse than with none.",
     "$domainsComment": "`domains` is the ten groupings the hundred operations are offered as, and the sentence the model reads about each. It is a decision about presentation rather than a fact about an operation, which is why it is a block of its own — but it is prose the model reads, so it lives where every other sentence it reads lives and the same checks reach it. `ai_tools.rs` CATALOG is generated from this, in this order.",
@@ -76,6 +77,642 @@
             "note": "A `JoyAxis` constant, as the engine spells it."
         }
     },
+    "$shapesComment": "`shapes` is the answer shapes more than one operation carries, named once. A shape may name itself — a scene tree node holds scene tree nodes — which is why results point at a name rather than nesting.",
+    "shapes": {
+        "godotNode": {
+            "note": "One node of a scene tree, and the nodes under it.",
+            "entry": [
+                {
+                    "name": "name",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "type",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "icon",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "children",
+                    "kind": "listOf",
+                    "of": {"kind": "shape", "shape": "godotNode"},
+                    "required": true
+                }
+            ]
+        },
+        "godotFrame": {
+            "note": "A captured image, PNG bytes in base64.",
+            "entry": [
+                {
+                    "name": "encoding",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "width",
+                    "kind": "int",
+                    "required": true
+                },
+                {
+                    "name": "height",
+                    "kind": "int",
+                    "required": true
+                },
+                {
+                    "name": "data",
+                    "kind": "text",
+                    "required": true
+                }
+            ]
+        },
+        "godotEditorDialog": {
+            "note": "The question the editor is waiting on, and the buttons it offers.",
+            "entry": [
+                {
+                    "name": "title",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "text",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "buttons",
+                    "kind": "listOf",
+                    "of": {"kind": "text"},
+                    "required": true
+                }
+            ]
+        },
+        "godotSetting": {
+            "note": "One setting a search answered with. `restartRequired` is a project setting fact; an editor setting carries none.",
+            "entry": [
+                {
+                    "name": "name",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "value",
+                    "kind": "tagged",
+                    "required": true
+                },
+                {
+                    "name": "restartRequired",
+                    "kind": "flag",
+                    "required": false
+                }
+            ]
+        },
+        "godotProperty": {
+            "note": "One property of a node in the edited scene, as the inspector would show it.",
+            "entry": [
+                {
+                    "name": "name",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "value",
+                    "kind": "tagged",
+                    "required": true
+                },
+                {
+                    "name": "type",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "className",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "stored",
+                    "kind": "flag",
+                    "required": true
+                },
+                {
+                    "name": "writable",
+                    "kind": "flag",
+                    "required": true
+                }
+            ]
+        },
+        "godotPropertyWrite": {
+            "note": "One property a batch write stored, read back off the node.",
+            "entry": [
+                {
+                    "name": "node",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "property",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "value",
+                    "kind": "tagged",
+                    "required": true
+                }
+            ]
+        },
+        "godotInputEvent": {
+            "note": "One event bound to an input action. `kind` says which of the other keys it carries.",
+            "entry": [
+                {
+                    "name": "kind",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "key",
+                    "kind": "text",
+                    "required": false
+                },
+                {
+                    "name": "button",
+                    "kind": "text",
+                    "required": false
+                },
+                {
+                    "name": "joypadButton",
+                    "kind": "text",
+                    "required": false
+                },
+                {
+                    "name": "axis",
+                    "kind": "text",
+                    "required": false
+                },
+                {
+                    "name": "axisValue",
+                    "kind": "number",
+                    "required": false
+                },
+                {
+                    "name": "description",
+                    "kind": "text",
+                    "required": false
+                }
+            ]
+        },
+        "godotInputAction": {
+            "note": "One action of the Input Map.",
+            "entry": [
+                {
+                    "name": "name",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "deadzone",
+                    "kind": "number",
+                    "required": true
+                },
+                {
+                    "name": "events",
+                    "kind": "listOf",
+                    "of": {"kind": "shape", "shape": "godotInputEvent"},
+                    "required": true
+                },
+                {
+                    "name": "builtIn",
+                    "kind": "flag",
+                    "required": true
+                }
+            ]
+        },
+        "godotAutoload": {
+            "note": "One autoload the project registers.",
+            "entry": [
+                {
+                    "name": "name",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "enabled",
+                    "kind": "flag",
+                    "required": true
+                },
+                {
+                    "name": "goferManaged",
+                    "kind": "flag",
+                    "required": true
+                }
+            ]
+        },
+        "godotPlugin": {
+            "note": "One editor plugin the project holds.",
+            "entry": [
+                {
+                    "name": "name",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "enabled",
+                    "kind": "flag",
+                    "required": true
+                },
+                {
+                    "name": "goferManaged",
+                    "kind": "flag",
+                    "required": true
+                }
+            ]
+        },
+        "godotCell": {
+            "note": "One painted cell of a TileMapLayer.",
+            "entry": [
+                {
+                    "name": "x",
+                    "kind": "int",
+                    "required": true
+                },
+                {
+                    "name": "y",
+                    "kind": "int",
+                    "required": true
+                },
+                {
+                    "name": "source",
+                    "kind": "int",
+                    "required": true
+                },
+                {
+                    "name": "atlas",
+                    "kind": "listOf",
+                    "of": {"kind": "int"},
+                    "required": true
+                },
+                {
+                    "name": "alternative",
+                    "kind": "int",
+                    "required": true
+                }
+            ]
+        },
+        "godotTileTally": {
+            "note": "How many cells one atlas tile draws.",
+            "entry": [
+                {
+                    "name": "atlas",
+                    "kind": "listOf",
+                    "of": {"kind": "int"},
+                    "required": true
+                },
+                {
+                    "name": "count",
+                    "kind": "int",
+                    "required": true
+                }
+            ]
+        },
+        "godotTilesetTile": {
+            "note": "One tile an atlas source defines, and whether it carries collision.",
+            "entry": [
+                {
+                    "name": "atlas",
+                    "kind": "listOf",
+                    "of": {"kind": "int"},
+                    "required": true
+                },
+                {
+                    "name": "solid",
+                    "kind": "flag",
+                    "required": true
+                }
+            ]
+        },
+        "godotTilesetSource": {
+            "note": "One source of a TileSet. Only an atlas source carries a texture, a region size and a count.",
+            "entry": [
+                {
+                    "name": "id",
+                    "kind": "int",
+                    "required": true
+                },
+                {
+                    "name": "type",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "tiles",
+                    "kind": "listOf",
+                    "of": {"kind": "shape", "shape": "godotTilesetTile"},
+                    "required": true
+                },
+                {
+                    "name": "truncated",
+                    "kind": "flag",
+                    "required": true
+                },
+                {
+                    "name": "texture",
+                    "kind": "text",
+                    "required": false
+                },
+                {
+                    "name": "regionSize",
+                    "kind": "listOf",
+                    "of": {"kind": "int"},
+                    "required": false
+                },
+                {
+                    "name": "count",
+                    "kind": "int",
+                    "required": false
+                }
+            ]
+        },
+        "godotRescannedFile": {
+            "note": "One file a rescan named, and whether the editor took it in.",
+            "entry": [
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "scanned",
+                    "kind": "flag",
+                    "required": true
+                }
+            ]
+        },
+        "godotNodeConnection": {
+            "note": "One persistent signal connection of the edited scene, in the shape node.connect_signal takes back.",
+            "entry": [
+                {
+                    "name": "node",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "signal",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "target",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "method",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "binds",
+                    "kind": "listOf",
+                    "of": {"kind": "tagged"},
+                    "required": true
+                },
+                {
+                    "name": "deferred",
+                    "kind": "flag",
+                    "required": true
+                },
+                {
+                    "name": "oneShot",
+                    "kind": "flag",
+                    "required": true
+                },
+                {
+                    "name": "persistent",
+                    "kind": "flag",
+                    "required": true
+                }
+            ]
+        },
+        "godotSession": {
+            "note": "The editor session the supervisor is holding, as the desktop reports it.",
+            "entry": [
+                {
+                    "name": "sessionId",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "state",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "rpcAddress",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "lspPort",
+                    "kind": "int",
+                    "required": true
+                },
+                {
+                    "name": "dapPort",
+                    "kind": "int",
+                    "required": true
+                },
+                {
+                    "name": "godotVersion",
+                    "kind": "text",
+                    "required": false,
+                    "note": "Null until the editor has said which version it is."
+                },
+                {
+                    "name": "worktree",
+                    "kind": "text",
+                    "required": true
+                }
+            ]
+        },
+        "godotLogEntry": {
+            "note": "One captured line of the session output.",
+            "entry": [
+                {
+                    "name": "sequence",
+                    "kind": "int",
+                    "required": true
+                },
+                {
+                    "name": "source",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "severity",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "message",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "timestamp",
+                    "kind": "int",
+                    "required": true
+                }
+            ]
+        },
+        "godotDocsPassage": {
+            "note": "One passage the documentation search ranked.",
+            "entry": [
+                {
+                    "name": "text",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "chapter",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "order",
+                    "kind": "int",
+                    "required": true
+                },
+                {
+                    "name": "score",
+                    "kind": "number",
+                    "required": true
+                },
+                {
+                    "name": "pinned",
+                    "kind": "flag",
+                    "required": false,
+                    "note": "Null when nothing pinned it."
+                }
+            ]
+        },
+        "godotDocsChapter": {
+            "note": "One chapter an answer drew on, and how well it scored.",
+            "entry": [
+                {
+                    "name": "chapter",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "score",
+                    "kind": "number",
+                    "required": true
+                }
+            ]
+        },
+        "godotVerifiedBreakpoint": {
+            "note": "One breakpoint as the adapter reports it back.",
+            "entry": [
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "line",
+                    "kind": "int",
+                    "required": false,
+                    "note": "Null when the adapter moved it nowhere it can name."
+                },
+                {
+                    "name": "verified",
+                    "kind": "flag",
+                    "required": true
+                },
+                {
+                    "name": "message",
+                    "kind": "text",
+                    "required": false
+                }
+            ]
+        },
+        "godotStoppedDetails": {
+            "note": "Why the debuggee stopped, out of the adapter’s own stopped event.",
+            "entry": [
+                {
+                    "name": "reason",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "threadId",
+                    "kind": "int",
+                    "required": false
+                },
+                {
+                    "name": "description",
+                    "kind": "text",
+                    "required": false
+                },
+                {
+                    "name": "text",
+                    "kind": "text",
+                    "required": false
+                },
+                {
+                    "name": "allThreadsStopped",
+                    "kind": "flag",
+                    "required": true
+                }
+            ]
+        },
+        "godotDebugFrame": {
+            "note": "One frame of a stack trace.",
+            "entry": [
+                {
+                    "name": "id",
+                    "kind": "int",
+                    "required": true
+                },
+                {
+                    "name": "name",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "line",
+                    "kind": "int",
+                    "required": true
+                },
+                {
+                    "name": "column",
+                    "kind": "int",
+                    "required": true
+                },
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": false,
+                    "note": "Absent when the frame’s script is outside the worktree."
+                }
+            ]
+        }
+    },
     "operations": [
         {
             "tool": "godot_session",
@@ -86,6 +723,18 @@
                 "why": "It takes no parameters, so a second one in the same call is the first one again."
             },
             "params": [],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "session",
+                        "kind": "shape",
+                        "shape": "godotSession",
+                        "required": false,
+                        "note": "Null when there is no session to report."
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -97,6 +746,18 @@
                 "why": "There is one editor session, so a second one in the same call is the first one again."
             },
             "params": [],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "session",
+                        "kind": "shape",
+                        "shape": "godotSession",
+                        "required": false,
+                        "note": "Null when there is no session to report."
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -108,6 +769,16 @@
                 "why": "There is one editor session, so a second one in the same call is the first one again."
             },
             "params": [],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "stopped",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -119,6 +790,48 @@
                 "why": "It takes no parameters, so a second one in the same call is the first one again."
             },
             "params": [],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "state",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "scene",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "revision",
+                        "kind": "int",
+                        "required": true
+                    },
+                    {
+                        "name": "dirty",
+                        "kind": "flag",
+                        "required": true
+                    },
+                    {
+                        "name": "canUndo",
+                        "kind": "flag",
+                        "required": true
+                    },
+                    {
+                        "name": "canRedo",
+                        "kind": "flag",
+                        "required": true
+                    },
+                    {
+                        "name": "dialog",
+                        "kind": "shape",
+                        "shape": "godotEditorDialog",
+                        "required": false,
+                        "note": "Null when the editor is waiting on nothing."
+                    }
+                ]
+            },
             "command": "session.get_state"
         },
         {
@@ -136,6 +849,22 @@
                     "required": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "answered",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "dialog",
+                        "kind": "shape",
+                        "shape": "godotEditorDialog",
+                        "required": true
+                    }
+                ]
+            },
             "command": "session.answer_dialog",
             "gated": "Answering an editor dialog presses that button in the editor, exactly as clicking it would."
         },
@@ -156,6 +885,21 @@
                     "hidden": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "undoDepth",
+                        "kind": "int",
+                        "required": true
+                    },
+                    {
+                        "name": "redoDepth",
+                        "kind": "int",
+                        "required": true
+                    }
+                ]
+            },
             "command": "session.undo"
         },
         {
@@ -175,6 +919,21 @@
                     "hidden": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "undoDepth",
+                        "kind": "int",
+                        "required": true
+                    },
+                    {
+                        "name": "redoDepth",
+                        "kind": "int",
+                        "required": true
+                    }
+                ]
+            },
             "command": "session.redo"
         },
         {
@@ -186,6 +945,17 @@
                 "why": "It takes no parameters, so a second one in the same call is the first one again."
             },
             "params": [],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "scenes",
+                        "kind": "listOf",
+                        "of": {"kind": "text"},
+                        "required": true
+                    }
+                ]
+            },
             "command": "scene.list"
         },
         {
@@ -203,6 +973,26 @@
                     "required": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "scene",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "revision",
+                        "kind": "int",
+                        "required": true
+                    },
+                    {
+                        "name": "dirty",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "command": "scene.open"
         },
         {
@@ -233,6 +1023,26 @@
                     "hidden": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "scene",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "revision",
+                        "kind": "int",
+                        "required": true
+                    },
+                    {
+                        "name": "dirty",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "command": "scene.create"
         },
         {
@@ -259,6 +1069,33 @@
                     "note": "How many nodes to answer with, at most. The answer opens with `truncated`, which says whether it stopped early; a root or a depth is how you read the rest."
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "truncated",
+                        "kind": "flag",
+                        "required": true
+                    },
+                    {
+                        "name": "root",
+                        "kind": "shape",
+                        "shape": "godotNode",
+                        "required": false,
+                        "note": "Null when no scene is open."
+                    },
+                    {
+                        "name": "revision",
+                        "kind": "int",
+                        "required": true
+                    },
+                    {
+                        "name": "scene",
+                        "kind": "text",
+                        "required": true
+                    }
+                ]
+            },
             "command": "scene.get_tree"
         },
         {
@@ -278,6 +1115,31 @@
                     "hidden": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "scene",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "revision",
+                        "kind": "int",
+                        "required": true
+                    },
+                    {
+                        "name": "dirty",
+                        "kind": "flag",
+                        "required": true
+                    },
+                    {
+                        "name": "wrote",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "command": "scene.save"
         },
         {
@@ -302,6 +1164,26 @@
                     "hidden": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "scene",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "revision",
+                        "kind": "int",
+                        "required": true
+                    },
+                    {
+                        "name": "dirty",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "command": "scene.save_as"
         },
         {
@@ -321,6 +1203,26 @@
                     "hidden": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "scene",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "revision",
+                        "kind": "int",
+                        "required": true
+                    },
+                    {
+                        "name": "dirty",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "command": "scene.reload"
         },
         {
@@ -341,6 +1243,56 @@
                     "note": "The property names to read, like [\"text\", \"position\"]. Without it every property is answered."
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "name",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "type",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "path",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "properties",
+                        "kind": "listOf",
+                        "of": {"kind": "shape", "shape": "godotProperty"},
+                        "required": true
+                    },
+                    {
+                        "name": "atClassDefault",
+                        "kind": "listOf",
+                        "of": {"kind": "text"},
+                        "required": true
+                    },
+                    {
+                        "name": "groups",
+                        "kind": "listOf",
+                        "of": {"kind": "text"},
+                        "required": true
+                    },
+                    {
+                        "name": "signals",
+                        "kind": "listOf",
+                        "of": {"kind": "text"},
+                        "required": true
+                    },
+                    {
+                        "name": "connections",
+                        "kind": "listOf",
+                        "of": {"kind": "shape", "shape": "godotNodeConnection"},
+                        "required": true
+                    }
+                ]
+            },
             "command": "node.inspect",
             "accepts": ["scene"]
         },
@@ -385,6 +1337,22 @@
                     "hidden": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "nodes",
+                        "kind": "listOf",
+                        "of": {"kind": "text"},
+                        "required": true
+                    },
+                    {
+                        "name": "created",
+                        "kind": "int",
+                        "required": true
+                    }
+                ]
+            },
             "command": "node.create_nodes",
             "accepts": ["scene"]
         },
@@ -421,6 +1389,21 @@
                     "hidden": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "node",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "path",
+                        "kind": "text",
+                        "required": true
+                    }
+                ]
+            },
             "command": "node.instantiate",
             "accepts": ["scene"]
         },
@@ -447,6 +1430,16 @@
                     "hidden": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "node",
+                        "kind": "text",
+                        "required": true
+                    }
+                ]
+            },
             "command": "node.duplicate",
             "accepts": ["scene"]
         },
@@ -473,6 +1466,16 @@
                     "hidden": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "node",
+                        "kind": "text",
+                        "required": true
+                    }
+                ]
+            },
             "command": "node.rename",
             "accepts": ["scene"]
         },
@@ -504,6 +1507,16 @@
                     "hidden": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "node",
+                        "kind": "text",
+                        "required": true
+                    }
+                ]
+            },
             "command": "node.reparent",
             "accepts": ["scene"]
         },
@@ -530,6 +1543,21 @@
                     "hidden": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "node",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "type",
+                        "kind": "text",
+                        "required": true
+                    }
+                ]
+            },
             "command": "node.change_type",
             "accepts": ["scene"]
         },
@@ -551,6 +1579,16 @@
                     "hidden": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "deleted",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "command": "node.delete",
             "accepts": ["scene"]
         },
@@ -592,6 +1630,17 @@
                     "hidden": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "properties",
+                        "kind": "listOf",
+                        "of": {"kind": "shape", "shape": "godotPropertyWrite"},
+                        "required": true
+                    }
+                ]
+            },
             "command": "node.set_properties",
             "accepts": ["scene"]
         },
@@ -618,6 +1667,22 @@
                     "hidden": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "node",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "groups",
+                        "kind": "listOf",
+                        "of": {"kind": "text"},
+                        "required": true
+                    }
+                ]
+            },
             "command": "node.add_to_group"
         },
         {
@@ -643,6 +1708,22 @@
                     "hidden": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "node",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "groups",
+                        "kind": "listOf",
+                        "of": {"kind": "text"},
+                        "required": true
+                    }
+                ]
+            },
             "command": "node.remove_from_group"
         },
         {
@@ -693,6 +1774,7 @@
                     "hidden": true
                 }
             ],
+            "result": {"kind": "shape", "shape": "godotNodeConnection"},
             "command": "node.connect_signal"
         },
         {
@@ -733,6 +1815,26 @@
                     "hidden": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "node",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "signal",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "connected",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "command": "node.disconnect_signal"
         },
         {
@@ -791,6 +1893,42 @@
                     "hidden": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "node",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "cells",
+                        "kind": "int",
+                        "required": true
+                    },
+                    {
+                        "name": "usedRect",
+                        "kind": "listOf",
+                        "of": {"kind": "int"},
+                        "required": true
+                    },
+                    {
+                        "name": "tileSet",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "painted",
+                        "kind": "int",
+                        "required": true
+                    },
+                    {
+                        "name": "erased",
+                        "kind": "int",
+                        "required": true
+                    }
+                ]
+            },
             "command": "node.set_cells"
         },
         {
@@ -809,6 +1947,49 @@
                     "required": false
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "node",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "cells",
+                        "kind": "int",
+                        "required": true
+                    },
+                    {
+                        "name": "usedRect",
+                        "kind": "listOf",
+                        "of": {"kind": "int"},
+                        "required": true
+                    },
+                    {
+                        "name": "tileSet",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "cellsListed",
+                        "kind": "listOf",
+                        "of": {"kind": "shape", "shape": "godotCell"},
+                        "required": true
+                    },
+                    {
+                        "name": "tiles",
+                        "kind": "listOf",
+                        "of": {"kind": "shape", "shape": "godotTileTally"},
+                        "required": true
+                    },
+                    {
+                        "name": "truncated",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "command": "node.get_cells"
         },
         {
@@ -820,6 +2001,26 @@
                 "why": "It takes no parameters, so a second one in the same call is the first one again."
             },
             "params": [],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "projectName",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "mainScene",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "renderingMethod",
+                        "kind": "text",
+                        "required": true
+                    }
+                ]
+            },
             "command": "project.get_settings"
         },
         {
@@ -833,6 +2034,27 @@
                     "required": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "settings",
+                        "kind": "listOf",
+                        "of": {"kind": "shape", "shape": "godotSetting"},
+                        "required": true
+                    },
+                    {
+                        "name": "totalMatches",
+                        "kind": "int",
+                        "required": true
+                    },
+                    {
+                        "name": "truncated",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "command": "project.search_settings"
         },
         {
@@ -846,6 +2068,26 @@
                     "required": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "name",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "value",
+                        "kind": "tagged",
+                        "required": true
+                    },
+                    {
+                        "name": "restartRequired",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "command": "project.get_setting"
         },
         {
@@ -865,6 +2107,31 @@
                     "vocabulary": "godotValueTag"
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "name",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "saved",
+                        "kind": "flag",
+                        "required": true
+                    },
+                    {
+                        "name": "created",
+                        "kind": "flag",
+                        "required": true
+                    },
+                    {
+                        "name": "restartRequired",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "command": "project.set_setting",
             "writes": "projectSetting"
         },
@@ -879,6 +2146,36 @@
                     "required": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "name",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "value",
+                        "kind": "tagged",
+                        "required": true
+                    },
+                    {
+                        "name": "previous",
+                        "kind": "tagged",
+                        "required": true
+                    },
+                    {
+                        "name": "changed",
+                        "kind": "flag",
+                        "required": true
+                    },
+                    {
+                        "name": "restartRequired",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "command": "project.reset_setting",
             "writes": "projectSetting"
         },
@@ -891,6 +2188,17 @@
                 "why": "It takes no parameters, so a second one in the same call is the first one again."
             },
             "params": [],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "autoloads",
+                        "kind": "listOf",
+                        "of": {"kind": "shape", "shape": "godotAutoload"},
+                        "required": true
+                    }
+                ]
+            },
             "command": "project.list_autoloads"
         },
         {
@@ -914,6 +2222,26 @@
                     "required": false
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "name",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "path",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "enabled",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "command": "project.set_autoload"
         },
         {
@@ -927,6 +2255,21 @@
                     "required": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "name",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "removed",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "command": "project.remove_autoload"
         },
         {
@@ -942,6 +2285,23 @@
                     "note": "The action names to read, like [\"ui_left\", \"jump\"]. Without it the project's own are answered and the rest are named."
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "actions",
+                        "kind": "listOf",
+                        "of": {"kind": "shape", "shape": "godotInputAction"},
+                        "required": true
+                    },
+                    {
+                        "name": "atEngineDefault",
+                        "kind": "listOf",
+                        "of": {"kind": "text"},
+                        "required": true
+                    }
+                ]
+            },
             "command": "project.list_input_actions"
         },
         {
@@ -998,6 +2358,27 @@
                     "required": false
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "name",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "deadzone",
+                        "kind": "number",
+                        "required": true
+                    },
+                    {
+                        "name": "events",
+                        "kind": "listOf",
+                        "of": {"kind": "shape", "shape": "godotInputEvent"},
+                        "required": true
+                    }
+                ]
+            },
             "command": "project.set_input_action"
         },
         {
@@ -1011,6 +2392,21 @@
                     "required": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "name",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "removed",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "command": "project.remove_input_action"
         },
         {
@@ -1024,6 +2420,26 @@
                     "required": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "name",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "reset",
+                        "kind": "flag",
+                        "required": true
+                    },
+                    {
+                        "name": "restartRequired",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "command": "project.reset_input_action"
         },
         {
@@ -1035,6 +2451,17 @@
                 "why": "It takes no parameters, so a second one in the same call is the first one again."
             },
             "params": [],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "plugins",
+                        "kind": "listOf",
+                        "of": {"kind": "shape", "shape": "godotPlugin"},
+                        "required": true
+                    }
+                ]
+            },
             "command": "project.list_plugins"
         },
         {
@@ -1053,6 +2480,26 @@
                     "required": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "plugin",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "enabled",
+                        "kind": "flag",
+                        "required": true
+                    },
+                    {
+                        "name": "changed",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "command": "project.set_plugin_enabled",
             "gated": "Enabling or disabling an editor plugin changes what runs inside the editor itself."
         },
@@ -1067,6 +2514,27 @@
                     "required": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "settings",
+                        "kind": "listOf",
+                        "of": {"kind": "shape", "shape": "godotSetting"},
+                        "required": true
+                    },
+                    {
+                        "name": "totalMatches",
+                        "kind": "int",
+                        "required": true
+                    },
+                    {
+                        "name": "truncated",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "command": "editor.search_settings"
         },
         {
@@ -1080,6 +2548,21 @@
                     "required": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "name",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "value",
+                        "kind": "tagged",
+                        "required": true
+                    }
+                ]
+            },
             "command": "editor.get_setting"
         },
         {
@@ -1099,6 +2582,26 @@
                     "vocabulary": "godotValueTag"
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "name",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "machineWide",
+                        "kind": "flag",
+                        "required": true
+                    },
+                    {
+                        "name": "value",
+                        "kind": "tagged",
+                        "required": true
+                    }
+                ]
+            },
             "command": "editor.set_setting",
             "gated": "Editor settings are machine-wide: they live outside the task worktree and outside Git, so this change is not part of anything the task can roll back.",
             "writes": "editorSetting"
@@ -1120,6 +2623,31 @@
                     "required": false
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "files",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "object",
+                            "entry": [
+                                {
+                                    "name": "path",
+                                    "kind": "text",
+                                    "required": true
+                                },
+                                {
+                                    "name": "bytes",
+                                    "kind": "int",
+                                    "required": true
+                                }
+                            ]
+                        },
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -1135,6 +2663,23 @@
                     "note": "The files that changed, named in one call rather than one call each. Omitted, the whole project is walked, which is what a directory made after the editor started needs."
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "scanned",
+                        "kind": "flag",
+                        "required": true
+                    },
+                    {
+                        "name": "files",
+                        "kind": "listOf",
+                        "of": {"kind": "shape", "shape": "godotRescannedFile"},
+                        "required": true,
+                        "note": "Empty for a whole-project walk, which claims nothing about any one file."
+                    }
+                ]
+            },
             "command": "resource.rescan"
         },
         {
@@ -1182,6 +2727,72 @@
                     "note": "Gives every tile collision. Refused beside `solid`, which names its own."
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "path",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "texture",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "tileSize",
+                        "kind": "listOf",
+                        "of": {"kind": "int"},
+                        "required": true
+                    },
+                    {
+                        "name": "grid",
+                        "kind": "listOf",
+                        "of": {"kind": "int"},
+                        "required": true
+                    },
+                    {
+                        "name": "source",
+                        "kind": "int",
+                        "required": true
+                    },
+                    {
+                        "name": "tiles",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "listOf",
+                            "of": {"kind": "int"}
+                        },
+                        "required": true
+                    },
+                    {
+                        "name": "solid",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "listOf",
+                            "of": {"kind": "int"}
+                        },
+                        "required": true
+                    },
+                    {
+                        "name": "physicsLayers",
+                        "kind": "int",
+                        "required": true
+                    },
+                    {
+                        "name": "replaced",
+                        "kind": "flag",
+                        "required": true
+                    },
+                    {
+                        "name": "scanned",
+                        "kind": "flag",
+                        "required": false,
+                        "note": "Only when the file needed a project walk before its UID was registered."
+                    }
+                ]
+            },
             "command": "resource.create_tileset"
         },
         {
@@ -1245,6 +2856,36 @@
                     "note": "Filled rectangles, painted over the background in order."
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "scanned",
+                        "kind": "flag",
+                        "required": true
+                    },
+                    {
+                        "name": "path",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "width",
+                        "kind": "int",
+                        "required": true
+                    },
+                    {
+                        "name": "height",
+                        "kind": "int",
+                        "required": true
+                    },
+                    {
+                        "name": "replaced",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "command": "resource.create_texture"
         },
         {
@@ -1290,6 +2931,32 @@
                     "required": false
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "path",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "shapeType",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "replaced",
+                        "kind": "flag",
+                        "required": true
+                    },
+                    {
+                        "name": "scanned",
+                        "kind": "flag",
+                        "required": false,
+                        "note": "Only when the file needed a project walk before its UID was registered."
+                    }
+                ]
+            },
             "command": "resource.create_shape"
         },
         {
@@ -1303,6 +2970,33 @@
                     "required": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "path",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "tileSize",
+                        "kind": "listOf",
+                        "of": {"kind": "int"},
+                        "required": true
+                    },
+                    {
+                        "name": "physicsLayers",
+                        "kind": "int",
+                        "required": true
+                    },
+                    {
+                        "name": "sources",
+                        "kind": "listOf",
+                        "of": {"kind": "shape", "shape": "godotTilesetSource"},
+                        "required": true
+                    }
+                ]
+            },
             "command": "resource.describe_tileset"
         },
         {
@@ -1321,6 +3015,26 @@
                     "required": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "from",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "to",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "moved",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust",
             "gated": "Moving a path removes the file from where it is now, and can overwrite the destination."
         },
@@ -1342,6 +3056,21 @@
                     "hidden": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "path",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "deleted",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust",
             "gated": "Deleting a file removes it from the task worktree; only a Git checkout brings it back."
         },
@@ -1357,6 +3086,31 @@
                     "note": "A directory to list, named the way the project names it — `scripts`, not its full path. Omit it for every script in the worktree."
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "files",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "object",
+                            "entry": [
+                                {
+                                    "name": "path",
+                                    "kind": "text",
+                                    "required": true
+                                },
+                                {
+                                    "name": "bytes",
+                                    "kind": "int",
+                                    "required": true
+                                }
+                            ]
+                        },
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -1373,6 +3127,42 @@
                     "note": "Every script you are about to query, named in one call rather than one call each."
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "files",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "object",
+                            "entry": [
+                                {
+                                    "name": "path",
+                                    "kind": "text",
+                                    "required": true
+                                },
+                                {
+                                    "name": "bytes",
+                                    "kind": "int",
+                                    "required": true
+                                },
+                                {
+                                    "name": "text",
+                                    "kind": "text",
+                                    "required": false,
+                                    "note": "Absent when the call had no room left for it, which `omitted` then says."
+                                },
+                                {
+                                    "name": "omitted",
+                                    "kind": "text",
+                                    "required": false
+                                }
+                            ]
+                        },
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -1391,6 +3181,16 @@
                     "required": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "path",
+                        "kind": "text",
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -1429,6 +3229,48 @@
                     "note": "Every `oldText` must match one region of that file exactly and must not overlap another edit of the same file. Entries may name different files, and either every file is written or none is."
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "files",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "object",
+                            "entry": [
+                                {
+                                    "name": "path",
+                                    "kind": "text",
+                                    "required": true
+                                },
+                                {
+                                    "name": "bytes",
+                                    "kind": "int",
+                                    "required": true
+                                },
+                                {
+                                    "name": "replaced",
+                                    "kind": "int",
+                                    "required": true
+                                },
+                                {
+                                    "name": "diagnostics",
+                                    "kind": "listOf",
+                                    "of": {"kind": "object"},
+                                    "required": true,
+                                    "note": "The language server’s own payload, passed through unchanged."
+                                },
+                                {
+                                    "name": "published",
+                                    "kind": "flag",
+                                    "required": true
+                                }
+                            ]
+                        },
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust",
             "writes": "scriptText"
         },
@@ -1455,6 +3297,33 @@
                     "hidden": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "path",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "bytes",
+                        "kind": "int",
+                        "required": true
+                    },
+                    {
+                        "name": "diagnostics",
+                        "kind": "listOf",
+                        "of": {"kind": "object"},
+                        "required": true,
+                        "note": "The language server’s own payload, passed through unchanged."
+                    },
+                    {
+                        "name": "published",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust",
             "writes": "scriptText"
         },
@@ -1472,6 +3341,31 @@
                     "note": "Every script you are done with, named in one call rather than one call each."
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "files",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "object",
+                            "entry": [
+                                {
+                                    "name": "path",
+                                    "kind": "text",
+                                    "required": true
+                                },
+                                {
+                                    "name": "closed",
+                                    "kind": "flag",
+                                    "required": true
+                                }
+                            ]
+                        },
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -1485,6 +3379,21 @@
                     "required": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "formatted",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "changed",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -1516,6 +3425,22 @@
                     "note": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "hover",
+                        "kind": "object",
+                        "required": false,
+                        "note": "Null where the server has nothing to say about that position."
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -1547,6 +3472,28 @@
                     "note": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "items",
+                        "kind": "listOf",
+                        "of": {"kind": "object"},
+                        "required": true,
+                        "note": "The language server’s own payload, passed through unchanged."
+                    },
+                    {
+                        "name": "isIncomplete",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -1578,6 +3525,22 @@
                     "note": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "signatureHelp",
+                        "kind": "object",
+                        "required": false,
+                        "note": "Null where the server offers no signature."
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -1609,6 +3572,37 @@
                     "note": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "locations",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "object",
+                            "entry": [
+                                {
+                                    "name": "path",
+                                    "kind": "text",
+                                    "required": true
+                                },
+                                {
+                                    "name": "range",
+                                    "kind": "object",
+                                    "required": true,
+                                    "note": "The language server’s own payload, passed through unchanged."
+                                }
+                            ]
+                        },
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -1640,6 +3634,37 @@
                     "note": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "locations",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "object",
+                            "entry": [
+                                {
+                                    "name": "path",
+                                    "kind": "text",
+                                    "required": true
+                                },
+                                {
+                                    "name": "range",
+                                    "kind": "object",
+                                    "required": true,
+                                    "note": "The language server’s own payload, passed through unchanged."
+                                }
+                            ]
+                        },
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -1676,6 +3701,37 @@
                     "required": false
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "locations",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "object",
+                            "entry": [
+                                {
+                                    "name": "path",
+                                    "kind": "text",
+                                    "required": true
+                                },
+                                {
+                                    "name": "range",
+                                    "kind": "object",
+                                    "required": true,
+                                    "note": "The language server’s own payload, passed through unchanged."
+                                }
+                            ]
+                        },
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -1707,6 +3763,23 @@
                     "note": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "highlights",
+                        "kind": "listOf",
+                        "of": {"kind": "object"},
+                        "required": true,
+                        "note": "The language server’s own payload, passed through unchanged."
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -1728,6 +3801,38 @@
                     "required": false
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "files",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "object",
+                            "entry": [
+                                {
+                                    "name": "path",
+                                    "kind": "text",
+                                    "required": true
+                                },
+                                {
+                                    "name": "diagnostics",
+                                    "kind": "listOf",
+                                    "of": {"kind": "object"},
+                                    "required": true,
+                                    "note": "The language server’s own payload, passed through unchanged."
+                                },
+                                {
+                                    "name": "published",
+                                    "kind": "flag",
+                                    "required": true
+                                }
+                            ]
+                        },
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -1741,6 +3846,23 @@
                     "required": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "symbols",
+                        "kind": "listOf",
+                        "of": {"kind": "object"},
+                        "required": true,
+                        "note": "The language server’s own payload, passed through unchanged."
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -1754,6 +3876,52 @@
                     "required": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "symbols",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "object",
+                            "entry": [
+                                {
+                                    "name": "name",
+                                    "kind": "text",
+                                    "required": true
+                                },
+                                {
+                                    "name": "kind",
+                                    "kind": "int",
+                                    "required": true
+                                },
+                                {
+                                    "name": "uri",
+                                    "kind": "text",
+                                    "required": true
+                                },
+                                {
+                                    "name": "range",
+                                    "kind": "object",
+                                    "required": true,
+                                    "note": "The language server’s own payload, passed through unchanged."
+                                },
+                                {
+                                    "name": "container",
+                                    "kind": "text",
+                                    "required": false
+                                }
+                            ]
+                        },
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -1785,6 +3953,32 @@
                     "note": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "range",
+                        "kind": "object",
+                        "required": false,
+                        "note": "The language server’s own payload, passed through unchanged."
+                    },
+                    {
+                        "name": "placeholder",
+                        "kind": "text",
+                        "required": false
+                    },
+                    {
+                        "name": "renameable",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -1821,6 +4015,46 @@
                     "required": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "files",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "object",
+                            "entry": [
+                                {
+                                    "name": "path",
+                                    "kind": "text",
+                                    "required": true
+                                },
+                                {
+                                    "name": "originalText",
+                                    "kind": "text",
+                                    "required": true
+                                },
+                                {
+                                    "name": "originalHash",
+                                    "kind": "text",
+                                    "required": true
+                                },
+                                {
+                                    "name": "updatedText",
+                                    "kind": "text",
+                                    "required": true
+                                }
+                            ]
+                        },
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -1857,6 +4091,31 @@
                     "note": "The list `rename` answered with, passed back unchanged."
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "files",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "object",
+                            "entry": [
+                                {
+                                    "name": "path",
+                                    "kind": "text",
+                                    "required": true
+                                },
+                                {
+                                    "name": "bytes",
+                                    "kind": "int",
+                                    "required": true
+                                }
+                            ]
+                        },
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust",
             "writes": "scriptText"
         },
@@ -1869,6 +4128,22 @@
                 "why": "It takes no parameters, so a second one in the same call is the first one again."
             },
             "params": [],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "capabilities",
+                        "kind": "object",
+                        "required": true,
+                        "note": "What the adapter said it supports, as it said it."
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -1887,6 +4162,28 @@
                     "required": false
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "breakpoints",
+                        "kind": "listOf",
+                        "of": {"kind": "shape", "shape": "godotVerifiedBreakpoint"},
+                        "required": true
+                    },
+                    {
+                        "name": "armed",
+                        "kind": "listOf",
+                        "of": {"kind": "text"},
+                        "required": false
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -1905,6 +4202,36 @@
                     "required": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "locations",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "object",
+                            "entry": [
+                                {
+                                    "name": "line",
+                                    "kind": "int",
+                                    "required": true
+                                },
+                                {
+                                    "name": "endLine",
+                                    "kind": "int",
+                                    "required": false
+                                }
+                            ]
+                        },
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -1940,6 +4267,22 @@
                     ]
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "breakpoints",
+                        "kind": "listOf",
+                        "of": {"kind": "shape", "shape": "godotVerifiedBreakpoint"},
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -1951,6 +4294,16 @@
                 "why": "It takes no parameters, so a second one in the same call is the first one again."
             },
             "params": [],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -1973,6 +4326,23 @@
                     "required": false
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "stopped",
+                        "kind": "shape",
+                        "shape": "godotStoppedDetails",
+                        "required": false,
+                        "note": "Null when the debuggee ended before it stopped."
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -1984,6 +4354,36 @@
                 "why": "It takes no parameters, so a second one in the same call is the first one again."
             },
             "params": [],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "threads",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "object",
+                            "entry": [
+                                {
+                                    "name": "id",
+                                    "kind": "int",
+                                    "required": true
+                                },
+                                {
+                                    "name": "name",
+                                    "kind": "text",
+                                    "required": true
+                                }
+                            ]
+                        },
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -1997,6 +4397,28 @@
                     "required": false
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "frames",
+                        "kind": "listOf",
+                        "of": {"kind": "shape", "shape": "godotDebugFrame"},
+                        "required": true
+                    },
+                    {
+                        "name": "note",
+                        "kind": "text",
+                        "required": false,
+                        "note": "Only when there are no frames, saying why."
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -2010,6 +4432,46 @@
                     "required": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "scopes",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "object",
+                            "entry": [
+                                {
+                                    "name": "name",
+                                    "kind": "text",
+                                    "required": true
+                                },
+                                {
+                                    "name": "presentationHint",
+                                    "kind": "text",
+                                    "required": false
+                                },
+                                {
+                                    "name": "variablesReference",
+                                    "kind": "int",
+                                    "required": true
+                                },
+                                {
+                                    "name": "expensive",
+                                    "kind": "flag",
+                                    "required": true
+                                }
+                            ]
+                        },
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -2023,6 +4485,46 @@
                     "required": true
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "variables",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "object",
+                            "entry": [
+                                {
+                                    "name": "name",
+                                    "kind": "text",
+                                    "required": true
+                                },
+                                {
+                                    "name": "value",
+                                    "kind": "text",
+                                    "required": true
+                                },
+                                {
+                                    "name": "type",
+                                    "kind": "text",
+                                    "required": false
+                                },
+                                {
+                                    "name": "variablesReference",
+                                    "kind": "int",
+                                    "required": true
+                                }
+                            ]
+                        },
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -2041,6 +4543,31 @@
                     "required": false
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "result",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "type",
+                        "kind": "text",
+                        "required": false
+                    },
+                    {
+                        "name": "variablesReference",
+                        "kind": "int",
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -2058,6 +4585,21 @@
                     "required": false
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "allThreads",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -2075,6 +4617,16 @@
                     "required": false
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -2092,6 +4644,16 @@
                     "required": false
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -2109,6 +4671,16 @@
                     "required": false
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -2126,6 +4698,34 @@
                     "required": false
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "outcome",
+                        "kind": "object",
+                        "entry": [
+                            {
+                                "name": "kind",
+                                "kind": "text",
+                                "required": true
+                            },
+                            {
+                                "name": "stop",
+                                "kind": "shape",
+                                "shape": "godotStoppedDetails",
+                                "required": false
+                            }
+                        ],
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -2137,6 +4737,16 @@
                 "why": "One debuggee, driven in order: each answer decides what the next call means."
             },
             "params": [],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -2148,6 +4758,16 @@
                 "why": "One debuggee, driven in order: each answer decides what the next call means."
             },
             "params": [],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -2165,6 +4785,16 @@
                     "required": false
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "op",
+                        "kind": "text",
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -2190,6 +4820,23 @@
                     "note": "Command-line arguments for the game, like [\"--\", \"--rate=30\"]. A game reads its own with OS.get_cmdline_user_args(), which sees only what follows a `--`. The editor carries them as one string it splits on spaces, so an argument holding a space is refused rather than delivered in pieces. restart reuses whatever run passed."
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "running",
+                        "kind": "flag",
+                        "required": true
+                    },
+                    {
+                        "name": "frame",
+                        "kind": "shape",
+                        "shape": "godotFrame",
+                        "required": false,
+                        "note": "Absent for a game asked to run without a display."
+                    }
+                ]
+            },
             "command": "runtime.run"
         },
         {
@@ -2201,6 +4848,16 @@
                 "why": "There is one running game, so a second one in the same call is the first one again."
             },
             "params": [],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "running",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "command": "runtime.stop"
         },
         {
@@ -2212,6 +4869,22 @@
                 "why": "There is one running game, so a second one in the same call is the first one again."
             },
             "params": [],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "running",
+                        "kind": "flag",
+                        "required": true
+                    },
+                    {
+                        "name": "frame",
+                        "kind": "shape",
+                        "shape": "godotFrame",
+                        "required": false
+                    }
+                ]
+            },
             "command": "runtime.restart"
         },
         {
@@ -2223,6 +4896,26 @@
                 "why": "It takes no parameters, so a second one in the same call is the first one again."
             },
             "params": [],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "running",
+                        "kind": "flag",
+                        "required": true
+                    },
+                    {
+                        "name": "runtimeReady",
+                        "kind": "flag",
+                        "required": true
+                    },
+                    {
+                        "name": "broke",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "command": "runtime.get_state"
         },
         {
@@ -2249,6 +4942,27 @@
                     "note": "How many nodes to answer with, at most. The answer opens with `truncated`, which says whether it stopped early; a root or a depth is how you read the rest."
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "truncated",
+                        "kind": "flag",
+                        "required": true
+                    },
+                    {
+                        "name": "root",
+                        "kind": "shape",
+                        "shape": "godotNode",
+                        "required": true
+                    },
+                    {
+                        "name": "paused",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "command": "runtime.get_tree"
         },
         {
@@ -2268,6 +4982,39 @@
                     "required": false
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "path",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "name",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "type",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "properties",
+                        "kind": "object",
+                        "of": {"kind": "tagged"},
+                        "required": true,
+                        "note": "Keyed by property name, and only the ones the call asked for."
+                    },
+                    {
+                        "name": "groups",
+                        "kind": "listOf",
+                        "of": {"kind": "text"},
+                        "required": true
+                    }
+                ]
+            },
             "command": "runtime.inspect_node"
         },
         {
@@ -2353,6 +5100,22 @@
                     ]
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "applied",
+                        "kind": "int",
+                        "required": true
+                    },
+                    {
+                        "name": "frame",
+                        "kind": "shape",
+                        "shape": "godotFrame",
+                        "required": false
+                    }
+                ]
+            },
             "command": "runtime.input"
         },
         {
@@ -2367,6 +5130,17 @@
                     "required": false
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "frame",
+                        "kind": "shape",
+                        "shape": "godotFrame",
+                        "required": true
+                    }
+                ]
+            },
             "command": "runtime.capture"
         },
         {
@@ -2387,6 +5161,27 @@
                     "note": "How long to let pass instead, in milliseconds. Held under ten seconds, which is what one request has."
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "frames",
+                        "kind": "int",
+                        "required": false
+                    },
+                    {
+                        "name": "ms",
+                        "kind": "int",
+                        "required": false
+                    },
+                    {
+                        "name": "exited",
+                        "kind": "flag",
+                        "required": true,
+                        "note": "True when the game was already gone, which is the answer a wait was run for."
+                    }
+                ]
+            },
             "command": "runtime.wait"
         },
         {
@@ -2398,6 +5193,16 @@
                 "why": "It takes no parameters, so a second one in the same call is the first one again."
             },
             "params": [],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "paused",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "command": "runtime.pause"
         },
         {
@@ -2409,6 +5214,16 @@
                 "why": "It takes no parameters, so a second one in the same call is the first one again."
             },
             "params": [],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "paused",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            },
             "command": "runtime.resume"
         },
         {
@@ -2423,6 +5238,18 @@
                     "required": false
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "monitors",
+                        "kind": "object",
+                        "of": {"kind": "number"},
+                        "required": true,
+                        "note": "Keyed by Performance.Monitor constant."
+                    }
+                ]
+            },
             "command": "runtime.get_monitors"
         },
         {
@@ -2466,6 +5293,32 @@
                     "note": "How many matches to answer with, at most. The lines `context` asks for ride along and are not counted, so a page can never come back holding none of what was searched for."
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "entries",
+                        "kind": "listOf",
+                        "of": {"kind": "shape", "shape": "godotLogEntry"},
+                        "required": true
+                    },
+                    {
+                        "name": "cursor",
+                        "kind": "int",
+                        "required": true
+                    },
+                    {
+                        "name": "dropped",
+                        "kind": "int",
+                        "required": true
+                    },
+                    {
+                        "name": "terminalLinesOmitted",
+                        "kind": "int",
+                        "required": true
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -2491,6 +5344,48 @@
                     "required": false
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "passages",
+                        "kind": "listOf",
+                        "of": {"kind": "shape", "shape": "godotDocsPassage"},
+                        "required": false
+                    },
+                    {
+                        "name": "text",
+                        "kind": "text",
+                        "required": false
+                    },
+                    {
+                        "name": "excerptVerified",
+                        "kind": "flag",
+                        "required": false
+                    },
+                    {
+                        "name": "chapters",
+                        "kind": "listOf",
+                        "of": {"kind": "shape", "shape": "godotDocsChapter"},
+                        "required": false
+                    },
+                    {
+                        "name": "coverageMiss",
+                        "kind": "flag",
+                        "required": false
+                    },
+                    {
+                        "name": "abstained",
+                        "kind": "flag",
+                        "required": false
+                    },
+                    {
+                        "name": "readerUnavailable",
+                        "kind": "text",
+                        "required": false
+                    }
+                ]
+            },
             "answeredBy": "rust"
         },
         {
@@ -2516,6 +5411,48 @@
                     "required": false
                 }
             ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "passages",
+                        "kind": "listOf",
+                        "of": {"kind": "shape", "shape": "godotDocsPassage"},
+                        "required": false
+                    },
+                    {
+                        "name": "text",
+                        "kind": "text",
+                        "required": false
+                    },
+                    {
+                        "name": "excerptVerified",
+                        "kind": "flag",
+                        "required": false
+                    },
+                    {
+                        "name": "chapters",
+                        "kind": "listOf",
+                        "of": {"kind": "shape", "shape": "godotDocsChapter"},
+                        "required": false
+                    },
+                    {
+                        "name": "coverageMiss",
+                        "kind": "flag",
+                        "required": false
+                    },
+                    {
+                        "name": "abstained",
+                        "kind": "flag",
+                        "required": false
+                    },
+                    {
+                        "name": "readerUnavailable",
+                        "kind": "text",
+                        "required": false
+                    }
+                ]
+            },
             "answeredBy": "rust"
         }
     ]

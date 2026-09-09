@@ -1,6 +1,7 @@
 {
     "$comment": "The catalogue of every command the addon answers, and the addon method that answers it. Hand-written: this is the specification. `scripts/generate-command-surface.mjs` emits the addon's dispatch table, its runtime routing list and the renderer's command names from it, so a command that is not here is unreachable and unspellable. Which of these mutate the edited scene is request.schema.json's to say, and only its.",
     "$paramsComment": "A command params.json does not describe — one no AI tool operation reaches — names its parameters here instead, so `Params.check_declared` has a row for it. Every command needs one: a command with no row is refused as unknown, not waved through. A command params.json already describes must not repeat itself here.",
+    "$resultComment": "`result` is the shape of the answer a command succeeds with, for the commands params.json does not describe — the ones no AI tool operation reaches. A command params.json already describes must not repeat itself here, and the generator refuses a command that declares no result anywhere.",
     "$runtimeComment": "The commands the addon hands to the running game rather than answering itself. They are listed apart because they have no handler method: `_handle_runtime_request` routes each one, some to the game over the debugger bridge and some to the editor. Before they were listed here the addon carried them twice — once to decide what to route and once to route it — and neither list was reconciled with anything.",
     "runtimeCommands": [
         "runtime.run",
@@ -24,11 +25,36 @@
         {
             "command": "session.cancel",
             "handler": "_session_cancel",
-            "params": {"required": [], "optional": ["requestId"]}
+            "params": {"required": [], "optional": ["requestId"]},
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "requestId",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "cancelled",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            }
         },
         {
             "command": "session.quit",
-            "handler": "_session_quit"
+            "handler": "_session_quit",
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "quitting",
+                        "kind": "flag",
+                        "required": true
+                    }
+                ]
+            }
         },
         {
             "command": "session.undo",
@@ -44,11 +70,33 @@
         },
         {
             "command": "session.get_unsaved_scenes",
-            "handler": "_session_unsaved_scenes"
+            "handler": "_session_unsaved_scenes",
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "scenes",
+                        "kind": "listOf",
+                        "of": {"kind": "text"},
+                        "required": true
+                    }
+                ]
+            }
         },
         {
             "command": "session.save_all_scenes",
-            "handler": "_session_save_all_scenes"
+            "handler": "_session_save_all_scenes",
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "saved",
+                        "kind": "listOf",
+                        "of": {"kind": "text"},
+                        "required": true
+                    }
+                ]
+            }
         },
         {
             "command": "project.get_settings",
@@ -132,7 +180,24 @@
         {
             "command": "editor.get_class_icons",
             "handler": "_editor_class_icons",
-            "params": {"required": [], "optional": ["classes"]}
+            "params": {"required": [], "optional": ["classes"]},
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "encoding",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "icons",
+                        "kind": "object",
+                        "of": {"kind": "text"},
+                        "required": true,
+                        "note": "Keyed by class name; a class with no icon in the theme is left out."
+                    }
+                ]
+            }
         },
         {
             "command": "scene.list",
@@ -165,9 +230,16 @@
         {
             "command": "node.create",
             "handler": "_node_create",
-            "params": {
-                "required": ["parent", "type", "name"],
-                "optional": ["index", "scene"]
+            "params": {"required": ["parent", "type", "name"], "optional": ["index", "scene"]},
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "node",
+                        "kind": "text",
+                        "required": true
+                    }
+                ]
             }
         },
         {
@@ -201,9 +273,26 @@
         {
             "command": "node.set_property",
             "handler": "_node_set_property",
-            "params": {
-                "required": ["node", "property", "value"],
-                "optional": ["scene"]
+            "params": {"required": ["node", "property", "value"], "optional": ["scene"]},
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "node",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "property",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "value",
+                        "kind": "tagged",
+                        "required": true
+                    }
+                ]
             }
         },
         {
@@ -260,7 +349,11 @@
         },
         {
             "command": "session.heartbeat",
-            "handler": "_session_heartbeat"
+            "handler": "_session_heartbeat",
+            "result": {
+                "kind": "object",
+                "entry": []
+            }
         }
     ],
     "$moduleComment": "`module` names the addon script a handler lives in, and its absence means `plugin.gd`. A handler outside the plugin class is a `static func` in a preloadable script, which is what puts it in the one-second headless suite rather than behind an editor boot; the dispatch table calls it through the preload constant of the same name."

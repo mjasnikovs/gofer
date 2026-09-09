@@ -48,7 +48,8 @@ export async function callGodot<Name extends GodotCommandName>(
             ...(options.timeoutMs !== undefined && {timeoutMs: options.timeoutMs})
         }
     })
-    return response.result
+    // The desktop hands back a dictionary; which shape it is, is the command's own declaration.
+    return response.result as GodotCommandResult<Name>
 }
 
 export function callGodotDebug(request: DebugRequest): Promise<DebugResponse> {

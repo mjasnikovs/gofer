@@ -48,6 +48,7 @@ const NODE_COVERAGE_EXCLUDES = [
     'check-ignored-tests.mjs',
     'check-command-surface.mjs',
     'generate-command-surface.mjs',
+    'result-types.mjs',
     'check-rust-critical-coverage.mjs',
     'run-rust-coverage.mjs',
     'run-packaged-journey.mjs',

@@ -4,6 +4,7 @@ import {fileURLToPath} from 'node:url'
 import {createGodotTools} from './godot-tools.mjs'
 import {declaredDomains} from './declared-domains.mjs'
 import {ANSWER_ONLY, engineWords, readVocabulary, tagPayloads} from './godot-vocabulary.mjs'
+import {checkResult, checkShapes, rustResults, typescriptCommands} from './result-types.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const GENERATOR = 'scripts/generate-command-surface.mjs'
@@ -39,7 +40,13 @@ async function runtimeCatalogue() {
 
 async function parameterCatalogue() {
     const path = 'protocol/schemas/v2/params.json'
-    const {operations, domains, vocabularies: declared = {}} = JSON.parse(await read(path))
+    const {
+        operations,
+        domains,
+        shapes = {},
+        vocabularies: declared = {}
+    } = JSON.parse(await read(path))
+    checkShapes(path, shapes)
     const engine = await readVocabulary()
     const vocabularies = Object.fromEntries(
         Object.entries(declared).map(([name, words]) => {
@@ -83,13 +90,14 @@ async function parameterCatalogue() {
                 )
         }
         for (const param of entry.params ?? []) checkKind(path, entry, param, vocabularies)
+        checkResult(`${path}: ${entry.tool} ${entry.op} result`, entry.result, shapes)
     }
     const named = new Set(domains.map(domain => domain.name))
     for (const entry of operations) {
         if (!named.has(entry.tool))
             throw new Error(`${path}: ${entry.tool} ${entry.op} belongs to no declared domain`)
     }
-    return {operations, domains, vocabularies}
+    return {operations, domains, shapes, vocabularies}
 }
 
 const ALONE_SCOPES = ['repeat', 'exclusive']
@@ -189,7 +197,7 @@ async function catalogue() {
         return {file, source: sources.get(file)}
     }
     return await Promise.all(
-        commands.map(async ({command, handler, module, params}) => {
+        commands.map(async ({command, handler, module, params, result}) => {
             const {file, source} = await sourceOf(module)
             const declared = module ? 'static func' : 'func'
             const signature = source.match(
@@ -204,6 +212,7 @@ async function catalogue() {
                 handler,
                 module,
                 params,
+                result,
                 takesParams: signature.trim().length > 0
             }
         })
@@ -425,10 +434,6 @@ function gdRuntimeCommands(names) {
     return `const RUNTIME_COMMANDS: Array[String] = [\n${names
         .map(name => `    "${name}",\n`)
         .join('')}]\n`
-}
-
-function typescriptCommandNames(names) {
-    return `export type GodotCommandName =\n${names.map(name => `    | '${name}'\n`).join('')}`
 }
 
 function rustMutating(names) {
@@ -1011,12 +1016,66 @@ function wrapPrefixed(note, prefix, width) {
     return lines.join('\n')
 }
 
+/** A command's parameters as objects, in the order the guard lists their names. */
+function commandParams(entry) {
+    const carried = (entry.params ?? []).filter(
+        param => param.name !== 'expectedRevision' && param.name !== 'timeoutMs'
+    )
+    return [
+        ...carried.filter(param => param.required && !param.hidden),
+        ...carried.filter(param => !param.required || param.hidden),
+        ...(entry.accepts ?? []).map(name => ({name, kind: 'text', required: false}))
+    ]
+}
+
+/**
+ * Every command the addon answers, with the parameters it takes and the answer it declares.
+ *
+ * One row per command, from whichever file describes it: an operation's own row when a tool
+ * operation reaches it, and `commands.json`'s otherwise. A command described in neither has no
+ * declared answer, and this refuses it rather than typing it as a dictionary.
+ */
+function answeredCommands(operations, commands, runtime) {
+    const byCommand = new Map(
+        operations.filter(entry => entry.command).map(entry => [entry.command, entry])
+    )
+    return [...commands.map(entry => entry.command), ...runtime].map(command => {
+        const operation = byCommand.get(command)
+        const own = commands.find(entry => entry.command === command)
+        if (operation && own?.result)
+            throw new Error(
+                `protocol/schemas/v2/commands.json declares a result for ${command}, which params.json already describes`
+            )
+        if (operation) {
+            return {command, params: commandParams(operation), result: operation.result}
+        }
+        if (!own?.result)
+            throw new Error(
+                `protocol/schemas/v2/commands.json binds ${command} to a handler and declares no result for it`
+            )
+        const named = required => name => ({name, kind: 'unknown', required})
+        return {
+            command,
+            params: [
+                ...(own.params?.required ?? []).map(named(true)),
+                ...(own.params?.optional ?? []).map(named(false))
+            ],
+            result: own.result
+        }
+    })
+}
+
 export async function generateSurfaces() {
     const mutating = await mutatingCommands()
     const commands = await catalogue()
     const runtime = await runtimeCatalogue()
     const desktop = await registeredDesktopCommands()
-    const {operations: parameters, domains: toolDomains, vocabularies} = await parameterCatalogue()
+    const {
+        operations: parameters,
+        domains: toolDomains,
+        shapes,
+        vocabularies
+    } = await parameterCatalogue()
     const engine = await readVocabulary()
     const valueTags = engineWords(engine, 'valueTags', 'the tagged value')
     const subagentBounds = await subagentBoundsCatalogue()
@@ -1046,6 +1105,11 @@ export async function generateSurfaces() {
                 `protocol/schemas/v2/params.json declares parameters for ${entry.command}, which commands.json does not answer`
             )
     }
+
+    const answers = answeredCommands(parameters, commands, runtime)
+    const rustAnswered = parameters
+        .filter(entry => !entry.command)
+        .map(entry => ({tool: entry.tool, op: entry.op, result: entry.result}))
 
     const edits = [
         {
@@ -1117,15 +1181,14 @@ export async function generateSurfaces() {
         {
             path: 'src/models/godot-commands.ts',
             comment: '//',
-            regions: [
-                {
-                    name: 'command-names',
-                    body: typescriptCommandNames([
-                        ...commands.map(entry => entry.command),
-                        ...runtime
-                    ])
-                }
-            ]
+            prettier: true,
+            regions: [{name: 'command-names', body: typescriptCommands(shapes, answers)}]
+        },
+        {
+            path: 'src-tauri/src/tool_results.rs',
+            comment: '//',
+            rustfmt: true,
+            regions: [{name: 'results', body: rustResults(shapes, answers, rustAnswered)}]
         },
         {
             path: 'scripts/ai-provider.mjs',
@@ -1156,10 +1219,21 @@ export async function generateSurfaces() {
     const results = []
     for (const {path, body} of whole)
         results.push({path, before: await read(path).catch(() => ''), after: body})
-    for (const {path, comment, regions, rustfmt} of edits) {
+    for (const {path, comment, regions, rustfmt, prettier} of edits) {
         const before = await read(path)
         let after = before
         for (const {name, body} of regions) after = replaceRegion(after, path, comment, name, body)
+        if (prettier) {
+            const {name} = regions[0]
+            const formatted = await formatSource(after, path)
+            after = replaceRegion(
+                formatted,
+                path,
+                comment,
+                name,
+                sliceRegion(formatted, path, comment, name)
+            )
+        }
         if (rustfmt && after !== before) {
             const {name} = regions[0]
             const formatted = await formatRust(after, path)
@@ -1198,6 +1272,22 @@ export function collectText(stream, take) {
     stream.setEncoding('utf8')
     stream.on('data', take)
     return stream
+}
+
+/**
+ * A generated region printed the way Prettier would print it, so the next check finds it unchanged.
+ *
+ * The same reason `formatRust` exists: a region the formatter then rewrites fails
+ * `check:command-surface` over a file nobody edited. The whole file is formatted and the region
+ * sliced back out of it, because Prettier decides where to break a line from its indentation.
+ */
+async function formatSource(text, path) {
+    const prettier = await import('prettier')
+    const full = new URL(path, `file://${root}`).pathname
+    return await prettier.format(text, {
+        ...(await prettier.resolveConfig(full)),
+        filepath: full
+    })
 }
 
 async function formatRust(text, path) {

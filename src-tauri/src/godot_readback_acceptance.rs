@@ -723,7 +723,7 @@ fn a_path_that_climbs_out_of_the_project_is_refused_by_the_addon() {
     session.mutate(
         "node.set_property",
         json!({
-            "node": named["path"],
+            "node": named["node"],
             "property": "text",
             "value": {"type": "String", "value": "see ../docs/readme"}
         }),

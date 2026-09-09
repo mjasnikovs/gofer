@@ -1,5 +1,9 @@
 import type {CommandError} from './errors'
 
+// The protocol's own shapes, generated from `protocol/schemas/v2/params.json` beside the answers
+// that carry them. Re-exported here so a renderer keeps importing Godot's model from one place.
+export type {GodotFrame, GodotNode, GodotNodeConnection, GodotValue} from './godot-commands'
+
 export type GodotSessionState =
     | 'offline'
     | 'staging'
@@ -61,91 +65,6 @@ export type GodotSessionEvent =
           event: string
           data: Readonly<Record<string, unknown>>
       }>
-
-export type GodotValue = Readonly<{
-    type: string
-    value: unknown
-}>
-
-export type GodotNode = Readonly<{
-    name: string
-    type: string
-    icon?: string | undefined
-    path: string
-    children: readonly GodotNode[]
-}>
-
-export type GodotClassIcons = Readonly<{
-    encoding: 'png-base64'
-    icons?: Readonly<Record<string, string>> | undefined
-}>
-
-export type GodotSceneTree = Readonly<{
-    root: GodotNode | null
-    revision?: number | undefined
-    truncated?: boolean | undefined
-}>
-
-export type GodotNodeConnection = Readonly<{
-    signal: string
-    target: string
-    method: string
-    binds?: readonly GodotValue[] | undefined
-    deferred?: boolean | undefined
-    oneShot?: boolean | undefined
-    persistent?: boolean | undefined
-}>
-
-export type GodotNodeDetails = Readonly<{
-    name: string
-    type: string
-    path: string
-    groups?: readonly string[] | undefined
-    signals?: readonly string[] | undefined
-    connections?: readonly GodotNodeConnection[] | undefined
-    properties?: Readonly<Record<string, GodotValue>> | undefined
-}>
-
-export type GodotSetting = Readonly<{
-    name: string
-    value: GodotValue
-    restartRequired?: boolean | undefined
-}>
-
-export type GodotSettingsPage = Readonly<{
-    settings: readonly GodotSetting[]
-    totalMatches: number
-    truncated: boolean
-}>
-
-export type GodotProjectSettings = Readonly<{
-    projectName: string
-    mainScene: string
-    renderingMethod: string
-}>
-
-export type GodotFrame = Readonly<{
-    encoding: string
-    width: number
-    height: number
-    data: string
-}>
-
-export type GodotEditorDialog = Readonly<{
-    title: string
-    text: string
-    buttons: readonly string[]
-}>
-
-export type GodotSessionStatus = Readonly<{
-    state: string
-    scene: string
-    revision: number
-    dirty: boolean
-    canUndo: boolean
-    canRedo: boolean
-    dialog?: GodotEditorDialog | null
-}>
 
 export type GodotError = CommandError
 

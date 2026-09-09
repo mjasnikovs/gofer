@@ -5,17 +5,25 @@ import type {GodotNode} from '../models/godot'
 const scene: GodotNode = {
     name: 'Main',
     type: 'Node2D',
+    icon: 'Node2D',
     path: 'Main',
     children: [
         {
             name: 'Player',
             type: 'CharacterBody2D',
+            icon: 'CharacterBody2D',
             path: 'Main/Player',
             children: [
-                {name: 'Hitbox', type: 'CollisionShape2D', path: 'Main/Player/Hitbox', children: []}
+                {
+                    name: 'Hitbox',
+                    type: 'CollisionShape2D',
+                    icon: 'CollisionShape2D',
+                    path: 'Main/Player/Hitbox',
+                    children: []
+                }
             ]
         },
-        {name: 'Coin', type: 'Area2D', path: 'Main/Coin', children: []}
+        {name: 'Coin', type: 'Area2D', icon: 'Area2D', path: 'Main/Coin', children: []}
     ]
 }
 

@@ -17,7 +17,8 @@ import {useEditorSession} from '../../hooks/useEditorSession'
 import {useGodotReading} from '../../hooks/useGodotReading'
 import {formatGodotValue} from '../../utils/godot-format'
 import {isSessionOffline} from '../../models/godot'
-import type {GodotNodeConnection, GodotSettingsPage} from '../../models/godot'
+import type {GodotNodeConnection} from '../../models/godot'
+import type {GodotCommandResult} from '../../models/godot-commands'
 import type {GodotSelection} from '../../models/workspace'
 import type {InspectorTab} from '../../models/ui-state'
 import {PanelState} from './PanelState'
@@ -53,18 +54,20 @@ function useDebounced(value: string) {
 
 function connectionLabel(connection: GodotNodeConnection) {
     const notes = [
-        connection.deferred === true ? 'deferred' : '',
-        connection.oneShot === true ? 'one-shot' : ''
+        connection.deferred ? 'deferred' : '',
+        connection.oneShot ? 'one-shot' : ''
     ].filter(Boolean)
     const suffix = notes.length > 0 ? ` (${notes.join(', ')})` : ''
     return `${connection.signal} → ${connection.target}.${connection.method}${suffix}`
 }
 
 function connectionKey(connection: GodotNodeConnection) {
-    return `${connection.signal}|${connection.target}|${connection.method}|${JSON.stringify(connection.binds ?? [])}`
+    return `${connection.signal}|${connection.target}|${connection.method}|${JSON.stringify(connection.binds)}`
 }
 
-function settingRows(page: GodotSettingsPage | undefined): SettingRow[] {
+function settingRows(
+    page: GodotCommandResult<'project.search_settings'> | undefined
+): SettingRow[] {
     return (page?.settings ?? []).map(setting => ({
         name: setting.name,
         value: formatGodotValue(setting.value),
@@ -122,6 +125,8 @@ export function InspectorPanel({
         {when: tab === 'node' && selection?.origin === 'runtime', follows: runtimeEpoch}
     )
     const node = selection?.origin === 'runtime' ? runtimeNode : editedNode
+    // Only the edited scene has connections; the running game's answer has never carried any.
+    const connections = selection?.origin === 'runtime' ? undefined : editedNode.data?.connections
 
     const project = useGodotReading(
         'project.search_settings',
@@ -234,7 +239,7 @@ export function InspectorPanel({
                                             {node.data.path}
                                         </MetadataListItem>
                                         <MetadataListItem label='Groups'>
-                                            {node.data.groups && node.data.groups.length > 0 ?
+                                            {node.data.groups.length > 0 ?
                                                 <HStack
                                                     gap={1}
                                                     wrap='wrap'
@@ -249,11 +254,11 @@ export function InspectorPanel({
                                                 </HStack>
                                             :   <Text color='secondary'>None</Text>}
                                         </MetadataListItem>
-                                        {node.data.connections ?
+                                        {connections ?
                                             <MetadataListItem label='Connections'>
-                                                {node.data.connections.length > 0 ?
+                                                {connections.length > 0 ?
                                                     <VStack gap={1}>
-                                                        {node.data.connections.map(connection => (
+                                                        {connections.map(connection => (
                                                             <Text
                                                                 key={connectionKey(connection)}
                                                                 type='supporting'

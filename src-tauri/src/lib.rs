@@ -70,6 +70,7 @@ mod tool_check;
 /// The catalogue's parameter contract, checked against everything that reads it. Tests only.
 mod tool_drift;
 mod tool_params;
+mod tool_results;
 mod unsaved_work;
 mod workers;
 mod workspace;

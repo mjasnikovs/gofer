@@ -136,9 +136,15 @@ branches and the router's tag arity. A new Godot command means a new catalogue e
 method. A new desktop command means registering it in `lib.rs` and adding its types to
 `src/services/desktop.ts` by hand.
 
-The renderer spells a Godot command with `GodotCommandName`, emitted into
-`src/models/godot-commands.ts`. Give a command a real params or result type by adding one entry to
-`KnownGodotCommands` in that file; leave it out and it keeps the generic dictionary shape.
+The renderer spells a Godot command with `GodotCommandName`, and reads its parameters and its answer
+off `GodotCommandMap` — both emitted into `src/models/godot-commands.ts` for all 68 commands, along
+with the shapes they carry. Nothing there is hand-written any more. What a command answers with is
+`result` on its own row of `params.json`, or of `commands.json` for the eight no AI tool operation
+reaches, and the generator refuses a command that declares one nowhere. The same row emits a Rust
+struct per command into `src-tauri/src/tool_results.rs`, and a debug build deserializes every addon
+answer into it at the socket — so a declaration the handler has grown out of is a red
+`npm run test:godot` naming the command, the answer and what serde could not make of it, rather than
+a renderer reading a key nothing sends. The model never sees any of it.
 
 ## Commands fail in one shape
 
@@ -154,6 +160,14 @@ answer stops the turn by name. A new tool needs a probe: a domain added to `CATA
 `src-tauri/src/ai_tools.rs` must be answered by `probe()` in the same file, and a new local tool
 needs a step in `WORKSPACE_PROBES` in `scripts/ai-reachability.mjs`. A domain with no probe fails
 loudly rather than being assumed reachable.
+
+A probe says a tool can answer; it says nothing about the operations under it. `npm run test:godot`
+settles that: under the acceptance feature every operation reaching `run_one` appends its dotted
+name to `GOFER_DISPATCH_LEDGER`, and the lane ends by subtracting what ran from every `op` const in
+`protocol/schemas/v2/godot-tool.json`. An operation nothing drove through the router is named and
+fails the lane, so a new one needs a real call in a `godot_*_acceptance` test — against the real
+editor, with an assertion on the answer. Driving the addon command straight down the wire does not
+count: the router is the door the model knocks on.
 
 ## Waiting
 

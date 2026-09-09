@@ -171,11 +171,26 @@ async function rustMutating() {
 
 async function typescriptCommandShapes() {
     const path = 'src/models/godot-commands.ts'
-    const body = slice(await read(path), path, 'interface KnownGodotCommands {', '\n}')
+    const body = slice(await read(path), path, 'export interface GodotCommandMap {', '\n}')
     return {
-        path: `${path} KnownGodotCommands`,
-        names: [...body.matchAll(/^ {4}'([a-z][a-z0-9_]*\.[a-z][a-z0-9_]*)':/gmu)].map(m => m[1])
+        path: `${path} GodotCommandMap`,
+        names: [...body.matchAll(/^ {4}readonly '([a-z][a-z0-9_]*\.[a-z][a-z0-9_]*)':/gmu)].map(
+            match => match[1]
+        )
     }
+}
+
+/**
+ * The answer shapes are the chain's, never the prompt's.
+ *
+ * `result` is declared for every operation and every command, and the tool the model reads is
+ * printed from the same file — so the one thing that must not travel with it is what comes back.
+ */
+async function toolCarriesNoResults() {
+    const path = 'protocol/schemas/v2/godot-tool.json'
+    const text = await read(path)
+    if (/"result"/u.test(text))
+        fail(`${path} carries a result shape, which the model must not read`)
 }
 
 async function catalogueCommands() {
@@ -572,11 +587,16 @@ for (const {path, command, error} of await rustCommandFailures()) {
         fail(`${path} has ${command} reject with a bare String rather than a coded failure`)
 }
 
+await toolCarriesNoResults()
+
 const shapes = await typescriptCommandShapes()
 checkForDuplicates(shapes)
 const everyCommand = new Set([...catalogued.names, ...runtime[0].names])
 for (const name of shapes.names) {
     if (!everyCommand.has(name)) fail(`${shapes.path} declares ${name}, which no surface offers`)
+}
+for (const name of everyCommand) {
+    if (!shapes.names.includes(name)) fail(`${shapes.path} types nothing for ${name}`)
 }
 
 const {
