@@ -58,6 +58,14 @@ const FIXED_SCRIPT: &str = "extends Node\n\nfunc explode() -> void:\n\tpass\n";
 const SCENE_PATH: &str = "res://main.tscn";
 const BROKEN_PATH: &str = "scripts/broken.gd";
 const PROBE_PATH: &str = "scripts/main_probe.gd";
+/// The language server answers `definition` and `prepare_rename` about a name declared in one file
+/// and used in another, and about nothing else — so the pair the LSP suite navigates is written
+/// into this project too, rather than a second probe that means the same thing.
+const MATH_PATH: &str = "scripts/math_utils.gd";
+const KEEPER_PATH: &str = "scripts/score_keeper.gd";
+/// A root script for the scene the node operations are exercised on, carrying the one handler
+/// `connect_signal` and `disconnect_signal` need to have something to wire.
+const LEVEL_SCRIPT: &str = "extends Node2D\n\nfunc _on_timer_timeout() -> void:\n\tpass\n";
 
 /// The live fixture's own art: a real 8x2 atlas of 16x16 tiles, which is what makes
 /// `create_tileset` answer with a grid rather than refuse a texture it cannot cut.
@@ -73,6 +81,17 @@ fn worktree_with_probes(directory: &TempDir) -> PathBuf {
     std::fs::create_dir_all(&scripts).expect("create scripts directory");
     std::fs::write(scripts.join("main_probe.gd"), PROBE_SCRIPT).expect("write the probe script");
     std::fs::write(scripts.join("broken.gd"), BROKEN_SCRIPT).expect("write the broken script");
+    std::fs::write(
+        scripts.join("math_utils.gd"),
+        crate::godot_lsp_acceptance::MATH_UTILS,
+    )
+    .expect("write the script that declares add_score");
+    std::fs::write(
+        scripts.join("score_keeper.gd"),
+        crate::godot_lsp_acceptance::SCORE_KEEPER,
+    )
+    .expect("write the script that calls add_score");
+    std::fs::write(scripts.join("level.gd"), LEVEL_SCRIPT).expect("write the level script");
     std::fs::write(worktree.join("main.tscn"), PROBE_SCENE).expect("write the probe scene");
     std::fs::write(worktree.join("tiles.png"), ATLAS).expect("write the atlas");
     worktree
@@ -806,6 +825,18 @@ fn a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits() {
         )
     };
 
+    let locations = call(
+        "godot_debug",
+        json!({"ops": [{"op": "breakpoint_locations", "path": PROBE_PATH, "line": BREAK_LINE}]}),
+    )
+    .expect("the adapter answers where a breakpoint can go");
+    assert!(
+        locations["ops"][0]["result"]["locations"]
+            .as_array()
+            .is_some_and(|found| found.iter().any(|location| location["line"] == BREAK_LINE)),
+        "the line the breakpoint is moved onto has to be one the adapter offers: {locations}"
+    );
+
     call(
         "godot_debug",
         json!({"ops": [{
@@ -894,17 +925,65 @@ fn a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits() {
         );
     }
 
+    // A running game stopped where it is, rather than at a breakpoint, and the threads it reports
+    // there. Godot debugs one thread, and the adapter's own answer is the only thing that says so.
+    call("godot_debug", json!({"ops": [{"op": "pause"}]})).expect("pause the running game");
+    let paused = call(
+        "godot_debug",
+        json!({"ops": [{"op": "await_stop", "timeoutMs": 60000}]}),
+    )
+    .expect("a paused game stops");
+    assert_eq!(
+        paused["ops"][0]["result"]["stopped"]["reason"], "paused",
+        "the game stopped because it was told to, not because it hit anything: {paused}"
+    );
+    let threads = call("godot_debug", json!({"ops": [{"op": "threads"}]}))
+        .expect("the adapter lists its threads");
+    assert_eq!(
+        threads["ops"][0]["result"]["threads"]
+            .as_array()
+            .map(Vec::len),
+        Some(1),
+        "Godot debugs exactly one thread: {threads}"
+    );
+
     let _ = call("godot_debug", json!({"ops": [{"op": "terminate"}]}));
     assert_eq!(
         crate::debug::armed_breakpoints(),
         vec![PROBE_PATH.to_owned()]
     );
+
+    // The armed breakpoint outlives the game it was set on, so a restart is a fresh game that
+    // stops in the same place — which is the whole reason the operation exists.
+    call("godot_debug", json!({"ops": [{"op": "restart"}]})).expect("restart the debuggee");
+    let again = call(
+        "godot_debug",
+        json!({"ops": [{"op": "await_stop", "timeoutMs": 60000}]}),
+    )
+    .expect("the replacement game stops too");
+    assert!(
+        !again["ops"][0]["result"]["stopped"].is_null(),
+        "a restart carries the breakpoints of the launch before it: {again}"
+    );
+    let _ = call("godot_debug", json!({"ops": [{"op": "terminate"}]}));
+
     call(
         "godot_debug",
         json!({"ops": [{"op": "set_breakpoints", "path": PROBE_PATH, "lines": []}]}),
     )
     .expect("clear the breakpoint");
     assert!(crate::debug::armed_breakpoints().is_empty());
+
+    // Last, because it ends the session every call above needed.
+    call(
+        "godot_debug",
+        json!({"ops": [{"op": "disconnect", "terminateDebuggee": true}]}),
+    )
+    .expect("let go of the adapter");
+    assert!(
+        !crate::debug::holds_a_game(),
+        "a disconnect that terminates the debuggee leaves no game behind"
+    );
 }
 
 #[test]
@@ -1032,6 +1111,248 @@ fn every_operation_no_turn_has_ever_used_still_answers() {
         );
     }
 
+    let state = call("godot_session", json!({"ops": [{"op": "get_state"}]}))
+        .expect("the addon reports the session state");
+    assert_eq!(state["ops"][0]["result"]["scene"], SCENE_PATH, "{state}");
+    assert!(
+        state["ops"][0]["result"]["dialog"].is_null(),
+        "a session nobody asked a question is waiting on nothing: {state}"
+    );
+
+    // The navigation half of the language server. It answers about a name declared in one file and
+    // used in another, so the pair goes through the router together.
+    call(
+        "godot_script",
+        json!({"ops": [{"op": "open", "paths": [MATH_PATH, KEEPER_PATH]}]}),
+    )
+    .expect("open the pair of scripts");
+    let usage = crate::godot_lsp_acceptance::position_of(
+        crate::godot_lsp_acceptance::SCORE_KEEPER,
+        "add_score",
+    );
+    let at_usage = json!({"line": usage.line, "character": usage.character});
+    let defined = call(
+        "godot_script",
+        json!({"ops": [{"op": "definition", "path": KEEPER_PATH, "position": at_usage}]}),
+    )
+    .expect("definition");
+    assert!(
+        defined["ops"][0]["result"]["locations"]
+            .as_array()
+            .is_some_and(|locations| locations
+                .iter()
+                .any(|location| location["path"] == MATH_PATH)),
+        "add_score must resolve into the script that declares it: {defined}"
+    );
+
+    let declaration = crate::godot_lsp_acceptance::position_of(
+        crate::godot_lsp_acceptance::MATH_UTILS,
+        "add_score",
+    );
+    let hovered = call(
+        "godot_script",
+        json!({"ops": [{
+            "op": "hover",
+            "path": MATH_PATH,
+            "position": {"line": declaration.line, "character": declaration.character},
+        }]}),
+    )
+    .expect("hover");
+    assert!(
+        hovered["ops"][0]["result"]
+            .as_object()
+            .is_some_and(|answer| answer.contains_key("hover")),
+        "a hover answer carries the field whether or not the server had anything to say, and only \
+         the real route produces it: {hovered}"
+    );
+
+    let prepared = call(
+        "godot_script",
+        json!({"ops": [{"op": "prepare_rename", "path": KEEPER_PATH, "position": at_usage}]}),
+    )
+    .expect("prepare_rename");
+    assert_eq!(
+        prepared["ops"][0]["result"]["renameable"], true,
+        "the server renames add_score, so the position it is asked about is renameable: {prepared}"
+    );
+
+    let symbols = call(
+        "godot_script",
+        json!({"ops": [{"op": "workspace_symbols", "query": "mathutils"}]}),
+    )
+    .expect("workspace_symbols");
+    assert!(
+        symbols["ops"][0]["result"]["symbols"]
+            .as_array()
+            .is_some_and(|found| found.iter().any(|symbol| symbol["name"] == "MathUtils")),
+        "the class the project declares must be findable by name: {symbols}"
+    );
+
+    let edited = call(
+        "godot_script",
+        json!({"ops": [{"op": "edit", "files": [{
+            "path": KEEPER_PATH,
+            "edits": [{"oldText": "var total := 0", "newText": "var total := 1"}],
+        }]}]}),
+    )
+    .expect("edit the script through the language server");
+    assert_eq!(edited["ops"][0]["result"]["files"][0]["path"], KEEPER_PATH);
+    assert!(
+        std::fs::read_to_string(session.worktree.join(KEEPER_PATH))
+            .expect("read the edited script")
+            .contains("var total := 1"),
+        "an edit the router answered has to be on disk: {edited}"
+    );
+
+    let closed = call(
+        "godot_script",
+        json!({"ops": [{"op": "close", "paths": [MATH_PATH, KEEPER_PATH]}]}),
+    )
+    .expect("close the pair");
+    assert_eq!(closed["ops"][0]["result"]["files"][0]["closed"], true);
+
+    // The project configuration the turn above never touches. Every one of these writes
+    // project.godot, so each is read back through the command that lists what it wrote.
+    let searched = call(
+        "godot_project",
+        json!({"ops": [{"op": "search_settings", "query": "default gravity"}]}),
+    )
+    .expect("search the project settings");
+    assert!(
+        searched["ops"][0]["result"]["settings"]
+            .as_array()
+            .is_some_and(|settings| settings
+                .iter()
+                .any(|setting| setting["name"] == "physics/2d/default_gravity")),
+        "a search for the words of a setting has to find it: {searched}"
+    );
+
+    call(
+        "godot_project",
+        json!({"ops": [{"op": "set_setting", "name": "gofer/probe", "value": {"type": "int", "value": 7}}]}),
+    )
+    .expect("write a setting to reset");
+    let reset = call(
+        "godot_project",
+        json!({"ops": [{"op": "reset_setting", "name": "gofer/probe"}]}),
+    )
+    .expect("reset the setting");
+    assert_eq!(reset["ops"][0]["result"]["changed"], true, "{reset}");
+    assert_eq!(
+        reset["ops"][0]["result"]["previous"],
+        json!({"type": "int", "value": 7}),
+        "a reset reports what it took away: {reset}"
+    );
+
+    call(
+        "godot_project",
+        json!({"ops": [{"op": "set_autoload", "name": "AiProbeHelper", "path": "res://tests/protocol_test.gd"}]}),
+    )
+    .expect("register an autoload");
+    let autoloads = call("godot_project", json!({"ops": [{"op": "list_autoloads"}]}))
+        .expect("list the autoloads");
+    assert!(
+        autoloads["ops"][0]["result"]["autoloads"]
+            .as_array()
+            .is_some_and(|listed| listed.iter().any(|entry| entry["name"] == "AiProbeHelper")),
+        "an autoload that was registered has to be listed: {autoloads}"
+    );
+    call(
+        "godot_project",
+        json!({"ops": [{"op": "remove_autoload", "name": "AiProbeHelper"}]}),
+    )
+    .expect("remove the autoload");
+    let without = call("godot_project", json!({"ops": [{"op": "list_autoloads"}]}))
+        .expect("list the autoloads again");
+    assert!(
+        without["ops"][0]["result"]["autoloads"]
+            .as_array()
+            .is_some_and(|listed| listed.iter().all(|entry| entry["name"] != "AiProbeHelper")),
+        "an autoload reported removed has to be gone: {without}"
+    );
+
+    let action = call(
+        "godot_project",
+        json!({"ops": [{
+            "op": "set_input_action",
+            "name": "ai_probe_jump",
+            "events": [{"kind": "key", "key": "Space"}],
+        }]}),
+    )
+    .expect("declare an input action");
+    assert_eq!(
+        action["ops"][0]["result"]["events"],
+        json!([{"kind": "key", "key": "Space"}]),
+        "the action answers with the events it now holds: {action}"
+    );
+    let actions = call(
+        "godot_project",
+        json!({"ops": [{"op": "list_input_actions"}]}),
+    )
+    .expect("list the input actions");
+    assert!(
+        actions["ops"][0]["result"]["actions"]
+            .as_array()
+            .is_some_and(|listed| listed.iter().any(|entry| entry["name"] == "ai_probe_jump")),
+        "an action that was declared has to be listed: {actions}"
+    );
+    call(
+        "godot_project",
+        json!({"ops": [{"op": "remove_input_action", "name": "ai_probe_jump"}]}),
+    )
+    .expect("remove the input action");
+    assert!(
+        !std::fs::read_to_string(session.worktree.join("project.godot"))
+            .expect("read project.godot")
+            .contains("ai_probe_jump"),
+        "an action reported removed has to be out of project.godot"
+    );
+
+    let plugins =
+        call("godot_project", json!({"ops": [{"op": "list_plugins"}]})).expect("list the plugins");
+    let gofer = plugins["ops"][0]["result"]["plugins"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the plugin listing must carry plugins: {plugins}"))
+        .iter()
+        .find(|plugin| plugin["name"] == "gofer")
+        .unwrap_or_else(|| panic!("the addon answering this call must list itself: {plugins}"))
+        .clone();
+    assert_eq!(gofer["enabled"], true, "{plugins}");
+    assert_eq!(gofer["goferManaged"], true, "{plugins}");
+
+    // Drawn rather than copied, because `create_texture` is the only way a model has of making one.
+    let drawn = call(
+        "godot_resource",
+        json!({"ops": [{
+            "op": "create_texture",
+            "path": "res://art/probe.png",
+            "width": 32,
+            "height": 16,
+            "background": "#3b2a1a",
+            "rects": [{"x": 0, "y": 0, "width": 16, "height": 4, "color": "forestgreen"}],
+        }]}),
+    )
+    .expect("draw a texture");
+    assert_eq!(drawn["ops"][0]["result"]["width"], 32, "{drawn}");
+    assert_eq!(drawn["ops"][0]["result"]["replaced"], false, "{drawn}");
+    assert!(session.worktree.join("art/probe.png").exists(), "{drawn}");
+
+    let shape = call(
+        "godot_resource",
+        json!({"ops": [{
+            "op": "create_shape",
+            "path": "res://art/hitbox.tres",
+            "shapeType": "RectangleShape2D",
+            "size": [32, 48],
+        }]}),
+    )
+    .expect("write a shape");
+    assert_eq!(
+        shape["ops"][0]["result"]["shapeType"], "RectangleShape2D",
+        "{shape}"
+    );
+    assert!(session.worktree.join("art/hitbox.tres").exists(), "{shape}");
+
     let _gate = crate::approvals::serialize_gate_tests();
     crate::approvals::open();
     let approving = crate::godot_journey_acceptance::approve_when_asked();
@@ -1046,6 +1367,455 @@ fn every_operation_no_turn_has_ever_used_still_answers() {
         "moving a file is gated, so the move must have been approved rather than waved through"
     );
     assert!(session.worktree.join("scripts/broken_moved.gd").exists());
+
+    let approving = crate::godot_journey_acceptance::approve_when_asked();
+    let deleted = call(
+        "godot_resource",
+        json!({"ops": [{"op": "delete", "path": "art/hitbox.tres"}]}),
+    )
+    .expect("delete a file inside the worktree");
+    assert_eq!(deleted["ops"][0]["result"]["deleted"], true, "{deleted}");
+    assert_eq!(
+        approving.join().expect("the approval responder"),
+        1,
+        "deleting a file is gated, so the delete must have been approved rather than waved through"
+    );
+    assert!(!session.worktree.join("art/hitbox.tres").exists());
+
+    // Enabling the plugin that is already enabled: the one call this command answers without
+    // severing the session that carries it, and the editor's own `changed: false` is the proof it
+    // reached the editor rather than a table in Rust.
+    let approving = crate::godot_journey_acceptance::approve_when_asked();
+    let toggled = call(
+        "godot_project",
+        json!({"ops": [{"op": "set_plugin_enabled", "plugin": "gofer", "enabled": true}]}),
+    )
+    .expect("enable the plugin that is already enabled");
+    assert_eq!(toggled["ops"][0]["result"]["changed"], false, "{toggled}");
+    assert_eq!(toggled["ops"][0]["result"]["enabled"], true, "{toggled}");
+    assert_eq!(
+        approving.join().expect("the approval responder"),
+        1,
+        "changing a plugin is gated"
+    );
+}
+
+/// Every scene and node operation no turn has ever used answers from a real editor.
+///
+/// The twin of [`every_operation_no_turn_has_ever_used_still_answers`], split off because it needs
+/// a scene of its own to cut up: the operations here create, copy, move, retype and delete nodes,
+/// and doing that to the scene the turn above works on would make every assertion in this file
+/// depend on the order the suite happens to run in. The addon suites drive the same commands
+/// straight down the wire; what is proven here is the door the model actually knocks on.
+#[test]
+fn every_scene_and_node_operation_no_turn_has_ever_used_still_answers() {
+    let session = start_session();
+    let app = mock_app();
+    let data = TempDir::new().expect("temporary application data");
+    let storage = crate::storage::ProjectStorage::open(data.path(), &session.worktree)
+        .expect("open project storage");
+    app.manage(crate::storage::StorageSlot::new(Ok(storage)));
+
+    let call = |tool: &str, params: Value| {
+        ai_tools::dispatch(
+            app.handle(),
+            ai_tools::ToolRequest {
+                tool: tool.to_owned(),
+                params,
+            },
+        )
+    };
+    let result = |answer: &Value| answer["ops"][0]["result"].clone();
+    let tree = || {
+        call("godot_scene", json!({"ops": [{"op": "get_tree"}]}))
+            .expect("the edited scene answers with its tree")
+    };
+
+    let created = call(
+        "godot_scene",
+        json!({"ops": [{"op": "create", "path": "res://level.tscn", "rootType": "Node2D"}]}),
+    )
+    .expect("create a scene of this test's own");
+    assert_eq!(result(&created)["scene"], "res://level.tscn", "{created}");
+    assert_eq!(tree()["ops"][0]["result"]["root"]["name"], "level");
+
+    call(
+        "godot_node",
+        json!({"ops": [{"op": "set_properties", "properties": [{
+            "node": "/level",
+            "property": "script",
+            "value": {"type": "Resource", "value": {"path": "res://scripts/level.gd"}},
+        }]}]}),
+    )
+    .expect("give the root the script the signal is wired to");
+    call(
+        "godot_node",
+        json!({"ops": [{"op": "create_nodes", "nodes": [
+            {"parent": "/level", "name": "Timer", "type": "Timer"},
+            {"parent": "/level", "name": "Prop", "type": "Marker2D"},
+            {"parent": "/level", "name": "Holder", "type": "Node2D"},
+            {"parent": "/level", "name": "Terrain", "type": "TileMapLayer"},
+        ]}]}),
+    )
+    .expect("build the scene the operations below work on");
+
+    let wired = call(
+        "godot_node",
+        json!({"ops": [{
+            "op": "connect_signal",
+            "node": "/level/Timer",
+            "signal": "timeout",
+            "method": "_on_timer_timeout",
+        }]}),
+    )
+    .expect("wire the timer to the root's handler");
+    assert_eq!(result(&wired)["persistent"], true, "{wired}");
+    let cut = call(
+        "godot_node",
+        json!({"ops": [{
+            "op": "disconnect_signal",
+            "node": "/level/Timer",
+            "signal": "timeout",
+            "method": "_on_timer_timeout",
+        }]}),
+    )
+    .expect("unwire it again");
+    assert_eq!(result(&cut)["connected"], false, "{cut}");
+    let bare = call(
+        "godot_node",
+        json!({"ops": [{"op": "inspect", "node": "/level/Timer"}]}),
+    )
+    .expect("inspect the timer");
+    assert!(
+        result(&bare)["connections"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "a signal reported disconnected has to be gone from the node: {bare}"
+    );
+
+    let copied = call(
+        "godot_node",
+        json!({"ops": [{"op": "duplicate", "node": "/level/Prop", "name": "PropCopy"}]}),
+    )
+    .expect("duplicate a node");
+    assert_eq!(result(&copied)["node"], "/level/PropCopy", "{copied}");
+    let moved = call(
+        "godot_node",
+        json!({"ops": [{"op": "reparent", "node": "/level/PropCopy", "newParent": "/level/Holder"}]}),
+    )
+    .expect("reparent it");
+    assert_eq!(result(&moved)["node"], "/level/Holder/PropCopy", "{moved}");
+    let retyped = call(
+        "godot_node",
+        json!({"ops": [{"op": "change_type", "node": "/level/Holder/PropCopy", "type": "Node2D"}]}),
+    )
+    .expect("change its type");
+    assert_eq!(result(&retyped)["type"], "Node2D", "{retyped}");
+    assert_eq!(
+        result(
+            &call(
+                "godot_node",
+                json!({"ops": [{"op": "inspect", "node": "/level/Holder/PropCopy"}]}),
+            )
+            .expect("inspect the retyped node")
+        )["type"],
+        "Node2D",
+        "the tree has to hold the type the answer claimed"
+    );
+
+    let grouped = call(
+        "godot_node",
+        json!({"ops": [{"op": "add_to_group", "node": "/level/Prop", "group": "pickups"}]}),
+    )
+    .expect("add a node to a group");
+    assert_eq!(result(&grouped)["groups"], json!(["pickups"]), "{grouped}");
+    let ungrouped = call(
+        "godot_node",
+        json!({"ops": [{"op": "remove_from_group", "node": "/level/Prop", "group": "pickups"}]}),
+    )
+    .expect("take it out again");
+    assert_eq!(result(&ungrouped)["groups"], json!([]), "{ungrouped}");
+
+    call(
+        "godot_resource",
+        json!({"ops": [{
+            "op": "create_tileset",
+            "path": TILESET_PATH,
+            "texture": ATLAS_PATH,
+            "tileWidth": 16,
+            "tileHeight": 16,
+        }]}),
+    )
+    .expect("cut the atlas into a tileset");
+    call(
+        "godot_node",
+        json!({"ops": [{"op": "set_properties", "properties": [{
+            "node": "/level/Terrain",
+            "property": "tile_set",
+            "value": {"type": "Resource", "value": {"path": TILESET_PATH}},
+        }]}]}),
+    )
+    .expect("give the layer its tileset");
+    let painted = call(
+        "godot_node",
+        json!({"ops": [{"op": "set_cells", "node": "/level/Terrain", "cells": [
+            {"x": 0, "y": 0, "width": 4, "height": 2, "atlas": [0, 0]},
+        ]}]}),
+    )
+    .expect("paint cells");
+    assert_eq!(result(&painted)["painted"], 8, "{painted}");
+    let read = call(
+        "godot_node",
+        json!({"ops": [{"op": "get_cells", "node": "/level/Terrain", "limit": 4}]}),
+    )
+    .expect("read the cells back");
+    assert_eq!(result(&read)["cells"], 8, "{read}");
+    assert_eq!(result(&read)["truncated"], true, "{read}");
+
+    let placed = call(
+        "godot_node",
+        json!({"ops": [{
+            "op": "instantiate",
+            "parent": "/level",
+            "path": SCENE_PATH,
+            "name": "Fixture",
+        }]}),
+    )
+    .expect("place an instance of the scene next door");
+    assert_eq!(result(&placed)["node"], "/level/Fixture", "{placed}");
+    assert_eq!(result(&placed)["path"], SCENE_PATH, "{placed}");
+
+    let deleted = call(
+        "godot_node",
+        json!({"ops": [{"op": "delete", "node": "/level/Holder/PropCopy"}]}),
+    )
+    .expect("delete a node");
+    assert_eq!(result(&deleted)["deleted"], true, "{deleted}");
+    assert!(
+        !tree().to_string().contains("PropCopy"),
+        "a node reported deleted has to be out of the tree"
+    );
+
+    let elsewhere = call(
+        "godot_scene",
+        json!({"ops": [{"op": "save_as", "path": "res://level_copy.tscn"}]}),
+    )
+    .expect("save the scene under another name");
+    assert_eq!(
+        result(&elsewhere)["scene"],
+        "res://level_copy.tscn",
+        "{elsewhere}"
+    );
+    let on_disk = std::fs::read_to_string(session.worktree.join("level_copy.tscn"))
+        .expect("save_as must leave the file on disk");
+    assert!(on_disk.contains("name=\"Terrain\""), "{on_disk}");
+
+    call(
+        "godot_node",
+        json!({"ops": [{"op": "create_nodes", "nodes": [
+            {"parent": "/level", "name": "Unsaved", "type": "Marker2D"},
+        ]}]}),
+    )
+    .expect("something the file does not hold");
+    call("godot_scene", json!({"ops": [{"op": "reload"}]})).expect("reload the scene from disk");
+    let reloaded = tree().to_string();
+    assert!(
+        !reloaded.contains("Unsaved"),
+        "a reload has to drop what the file never had: {reloaded}"
+    );
+    assert!(
+        reloaded.contains("Terrain"),
+        "a reload has to bring back what the file holds: {reloaded}"
+    );
+}
+
+/// Every runtime operation no turn has ever used answers from a game that is really running.
+///
+/// The turn above runs the game and photographs it; what it never does is hold it still. Pausing,
+/// resuming and replacing a running game are three of the four operations a model reaches for when
+/// it is trying to see what a frame did, and none of them had ever been through this router.
+/// The probe's own counter is what every assertion here reads: it climbs once per `_process`, so a
+/// paused game is one whose counter stands still, and a restarted game is one whose counter starts
+/// again.
+#[test]
+fn every_runtime_operation_no_turn_has_ever_used_still_answers() {
+    let session = start_session();
+    let app = mock_app();
+    let data = TempDir::new().expect("temporary application data");
+    let storage = crate::storage::ProjectStorage::open(data.path(), &session.worktree)
+        .expect("open project storage");
+    app.manage(crate::storage::StorageSlot::new(Ok(storage)));
+
+    let call = |tool: &str, params: Value| {
+        ai_tools::dispatch(
+            app.handle(),
+            ai_tools::ToolRequest {
+                tool: tool.to_owned(),
+                params,
+            },
+        )
+    };
+    let result = |answer: &Value| answer["ops"][0]["result"].clone();
+    let counter = || {
+        let read = call(
+            "godot_runtime",
+            json!({"ops": [{
+                "op": "inspect_node",
+                "path": "/root/AiFixture",
+                "properties": ["counter"],
+            }]}),
+        )
+        .expect("the probe answers about its own counter");
+        result(&read)["properties"]["counter"]["value"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("the counter has to cross the wire as a number: {read}"))
+    };
+
+    let ran = call("godot_runtime", json!({"ops": [{"op": "run"}]})).expect("run the game");
+    assert_eq!(result(&ran)["running"], true, "{ran}");
+
+    let state = call("godot_runtime", json!({"ops": [{"op": "get_state"}]}))
+        .expect("the editor reports what the game is doing");
+    assert_eq!(result(&state)["running"], true, "{state}");
+    assert_eq!(result(&state)["runtimeReady"], true, "{state}");
+
+    let waited = call(
+        "godot_runtime",
+        json!({"ops": [{"op": "wait", "frames": 5}]}),
+    )
+    .expect("let five frames pass");
+    assert_eq!(result(&waited)["frames"], 5, "{waited}");
+
+    let held = counter();
+    let paused = call("godot_runtime", json!({"ops": [{"op": "pause"}]})).expect("pause the game");
+    assert_eq!(result(&paused)["paused"], true, "{paused}");
+    let standing = counter();
+    call("godot_runtime", json!({"ops": [{"op": "wait", "ms": 200}]}))
+        .expect("a paused game still answers a wait");
+    assert_eq!(
+        counter(),
+        standing,
+        "a paused game must not tick, and it stood at {held} before the pause"
+    );
+
+    let resumed = call("godot_runtime", json!({"ops": [{"op": "resume"}]})).expect("resume it");
+    assert_eq!(result(&resumed)["paused"], false, "{resumed}");
+    call(
+        "godot_runtime",
+        json!({"ops": [{"op": "wait", "frames": 20}]}),
+    )
+    .expect("let the resumed game run");
+    assert!(
+        counter() > standing,
+        "a resumed game has to tick again: it stood at {standing}"
+    );
+
+    let running = counter();
+    let restarted =
+        call("godot_runtime", json!({"ops": [{"op": "restart"}]})).expect("restart the game");
+    assert_eq!(result(&restarted)["running"], true, "{restarted}");
+    assert!(
+        counter() < running,
+        "a restart is a fresh game, so its counter cannot carry on from {running}"
+    );
+
+    let stopped = call("godot_runtime", json!({"ops": [{"op": "stop"}]})).expect("stop the game");
+    assert_eq!(result(&stopped)["running"], false, "{stopped}");
+}
+
+/// A script named where a scene belongs, which is the everyday way an editor ends up waiting on a
+/// person: the engine refuses to play it and asks what to do instead.
+const NOT_A_SCENE: &str = "extends Node\n\nfunc _ready() -> void:\n\tpass\n";
+
+/// The dialog an editor is waiting on is read and answered through the router.
+///
+/// `godot_runtime_acceptance` proves the addon reports and clears one; this is the two operations a
+/// model has for it. Nothing else in the catalogue can get past a dialog, so an `answer_dialog`
+/// that only ever ran down the wire is an operation the model is told about and nothing has driven.
+#[test]
+fn a_dialog_the_editor_is_waiting_on_is_answered_through_the_router() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = worktree_with_probes(&directory);
+    std::fs::write(worktree.join("scripts/not_a_scene.gd"), NOT_A_SCENE)
+        .expect("write the script the project will name as its main scene");
+    let project = worktree.join("project.godot");
+    let configured = std::fs::read_to_string(&project)
+        .expect("read the fixture project")
+        .replace(
+            "run/main_scene=\"res://main.tscn\"",
+            "run/main_scene=\"res://scripts/not_a_scene.gd\"",
+        );
+    std::fs::write(&project, configured).expect("write the project");
+    let ledger = directory.path().join("ledger.json");
+    let session = godot_editor_harness::Session::start_on_worktree_with(
+        worktree,
+        ledger,
+        Some(directory),
+        Transports {
+            bind_editor: true,
+            ..Transports::default()
+        },
+    );
+    let app = mock_app();
+    let data = TempDir::new().expect("temporary application data");
+    let storage = crate::storage::ProjectStorage::open(data.path(), &session.worktree)
+        .expect("open project storage");
+    app.manage(crate::storage::StorageSlot::new(Ok(storage)));
+
+    let call = |tool: &str, params: Value| {
+        ai_tools::dispatch(
+            app.handle(),
+            ai_tools::ToolRequest {
+                tool: tool.to_owned(),
+                params,
+            },
+        )
+    };
+
+    let refused = call("godot_runtime", json!({"ops": [{"op": "run"}]}))
+        .expect_err("a launch the editor turned into a question is not a launch");
+    assert_eq!(refused.code, "editor_dialog_open", "{}", refused.message);
+
+    let state = call("godot_session", json!({"ops": [{"op": "get_state"}]}))
+        .expect("the session state carries the question");
+    let dialog = state["ops"][0]["result"]["dialog"].clone();
+    assert!(
+        dialog["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("is not a scene file")),
+        "the state has to carry what the editor asked: {state}"
+    );
+    assert!(
+        dialog["buttons"]
+            .as_array()
+            .is_some_and(|buttons| buttons.iter().any(|button| button == "Cancel")),
+        "the choices the editor is offering have to be listed: {state}"
+    );
+
+    let _gate = crate::approvals::serialize_gate_tests();
+    crate::approvals::open();
+    let approving = crate::godot_journey_acceptance::approve_when_asked();
+    let answered = call(
+        "godot_session",
+        json!({"ops": [{"op": "answer_dialog", "button": "Cancel"}]}),
+    )
+    .expect("press the button");
+    assert_eq!(
+        answered["ops"][0]["result"]["answered"], "Cancel",
+        "{answered}"
+    );
+    assert_eq!(
+        approving.join().expect("the approval responder"),
+        1,
+        "pressing a button in the editor is gated, so it must have been approved"
+    );
+
+    let after = call("godot_session", json!({"ops": [{"op": "get_state"}]}))
+        .expect("the session state after the answer");
+    assert!(
+        after["ops"][0]["result"]["dialog"].is_null(),
+        "an answered dialog is gone from the state: {after}"
+    );
 }
 
 /// The first mutation of a session needs no read before it.

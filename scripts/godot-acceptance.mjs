@@ -1,6 +1,6 @@
 import {cpus} from 'node:os'
 import {dirname, resolve} from 'node:path'
-import {readFileSync, writeFileSync} from 'node:fs'
+import {readFileSync, rmSync, writeFileSync} from 'node:fs'
 import {spawn, spawnSync} from 'node:child_process'
 import {reexecUnderVirtualDisplay} from './virtual-display.mjs'
 
@@ -56,6 +56,10 @@ if (listed.status !== 0) {
     throw new Error('Could not list the Godot acceptance tests')
 }
 const TIMES = resolve('src-tauri/target/godot-test-times.json')
+// Named after this run, because two lanes on one machine would otherwise truncate each other's
+// records and report operations as never run that the other process had just driven.
+const LEDGER = resolve(`src-tauri/target/godot-dispatch-ledger.${process.pid}.txt`)
+const TOOL = resolve('protocol/schemas/v2/godot-tool.json')
 
 function recordedTimes() {
     try {
@@ -86,6 +90,40 @@ if (tests.length === 0) throw new Error('No Godot acceptance tests matched')
 
 const running = new Set()
 
+// The catalogue promises the model these; the run proves which of them a real editor answers.
+function catalogueOperations() {
+    const found = []
+    const walk = node => {
+        if (!node || typeof node !== 'object') return
+        if (Array.isArray(node)) return node.forEach(walk)
+        if (node.properties?.op?.const) found.push(node.properties.op.const)
+        Object.values(node).forEach(walk)
+    }
+    walk(JSON.parse(readFileSync(TOOL, 'utf8')))
+    return found
+}
+
+// Every operation the routers of every test process recorded. A missing ledger is the hook not
+// being compiled in, which is not "all ran", so it throws rather than reporting a full complement.
+function operationsThatRan() {
+    let written
+    try {
+        written = readFileSync(LEDGER, 'utf8')
+    } catch (reason) {
+        throw new Error(
+            `No dispatch ledger at ${LEDGER}: ${reason.message}. `
+                + 'Nothing recorded an operation, so nothing proves any of them ran.'
+        )
+    }
+    const ran = new Set(written.split('\n').filter(Boolean))
+    if (ran.size === 0)
+        throw new Error(
+            `The dispatch ledger at ${LEDGER} is empty. The recording hook in ai_tools::run_one `
+                + 'is not compiled into this build.'
+        )
+    return ran
+}
+
 function reap(child) {
     running.delete(child)
     try {
@@ -100,7 +138,11 @@ function run(name, worker) {
             encoding: 'utf8',
             cwd: PACKAGE,
             detached: true,
-            env: {...process.env, GOFER_GODOT_WORKER: String(worker)}
+            env: {
+                ...process.env,
+                GOFER_GODOT_WORKER: String(worker),
+                GOFER_DISPATCH_LEDGER: LEDGER
+            }
         })
         running.add(child)
         let output = ''
@@ -121,6 +163,8 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 }
 
 const sleep = milliseconds => new Promise(wake => setTimeout(wake, milliseconds))
+
+writeFileSync(LEDGER, '')
 
 const started = Date.now()
 const queue = [...tests]
@@ -153,4 +197,15 @@ process.stdout.write(
     `\n${tests.length - failures.length}/${tests.length} Godot acceptance tests passed `
         + `in ${seconds}s across ${jobs} processes\n`
 )
-process.exitCode = failures.length === 0 ? 0 : 1
+
+const catalogue = catalogueOperations()
+const ran = operationsThatRan()
+rmSync(LEDGER, {force: true})
+const never = catalogue.filter(op => !ran.has(op))
+for (const op of never) process.stdout.write(`never run: ${op}\n`)
+process.stdout.write(
+    `${catalogue.length - never.length}/${catalogue.length} catalogue operations reached a handler`
+        + `${never.length === 0 ? '' : `, ${never.length} never run`}\n`
+)
+
+process.exitCode = failures.length === 0 && never.length === 0 ? 0 : 1

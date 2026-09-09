@@ -245,10 +245,7 @@ fn a_fixture_that_carries_its_own_history_starts_the_turn_without_it() {
     };
     assert_eq!(
         read(&["log", "--oneline"]),
-        {
-            let one = read(&["log", "--oneline", "-1"]);
-            one
-        },
+        read(&["log", "--oneline", "-1"]),
         "one commit, not the run before's as well"
     );
     assert!(

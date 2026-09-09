@@ -790,6 +790,94 @@ fn expecting_what_the_last_entry_produced(entry: &Requested, revision: Option<i6
     params
 }
 
+/// The ledger of operations a real editor answered, kept only while the acceptance suite runs.
+///
+/// The catalogue promises the model an operation, and only a run proves it still answers. The
+/// suite is one process per test with several in flight, so each write opens the file, appends one
+/// short line and closes it: an `O_APPEND` write under `PIPE_BUF` lands whole, so parallel
+/// processes interleave lines instead of clobbering each other.
+#[cfg(all(test, feature = "godot-acceptance"))]
+pub(crate) mod dispatch_ledger {
+    use std::io::Write;
+
+    /// Where `scripts/godot-acceptance.mjs` wants the ledger. Unset everywhere else, and then
+    /// nothing is written.
+    pub(crate) const LEDGER: &str = "GOFER_DISPATCH_LEDGER";
+
+    /// One dispatched operation, spelled the way `protocol/schemas/v2/godot-tool.json` spells it,
+    /// which is what the complement is computed against.
+    pub(crate) fn line(domain: &str, op: &str) -> String {
+        format!("{}.{op}\n", domain.strip_prefix("godot_").unwrap_or(domain))
+    }
+
+    pub(crate) fn record(domain: &str, op: &str) {
+        let Ok(path) = std::env::var(LEDGER) else {
+            return;
+        };
+        let Ok(mut ledger) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        else {
+            return;
+        };
+        let _ = ledger.write_all(line(domain, op).as_bytes());
+    }
+}
+
+/// Records that this operation reached its handler. Compiles to nothing outside the suite.
+#[cfg(all(test, feature = "godot-acceptance"))]
+fn record_dispatched(domain: &ToolDomain, operation: &Operation) {
+    dispatch_ledger::record(domain.name, operation.op);
+}
+
+#[cfg(not(all(test, feature = "godot-acceptance")))]
+fn record_dispatched(_domain: &ToolDomain, _operation: &Operation) {}
+
+#[cfg(all(test, feature = "godot-acceptance"))]
+mod ledger_acceptance_tests {
+    use super::*;
+
+    /// The runner reads what this writes, so the line format is a contract between two files.
+    #[test]
+    fn the_hook_appends_one_dotted_line_per_dispatched_operation() {
+        let directory = tempfile::tempdir().expect("a directory for the ledger");
+        let ledger = directory.path().join("dispatch-ledger.txt");
+        let held = std::env::var(dispatch_ledger::LEDGER).ok();
+        // SAFETY: the acceptance runner gives each test its own process.
+        unsafe { std::env::set_var(dispatch_ledger::LEDGER, &ledger) };
+
+        record_dispatched(
+            &ToolDomain {
+                name: "godot_scene",
+                description: "",
+                operations: &[],
+            },
+            tool_params::operation_of("godot_scene", "open")
+                .expect("scene.open is a catalogue row"),
+        );
+        record_dispatched(
+            &ToolDomain {
+                name: "godot_docs_search",
+                description: "",
+                operations: &[],
+            },
+            tool_params::operation_of("godot_docs_search", "ask")
+                .expect("docs_search.ask is a catalogue row"),
+        );
+
+        // SAFETY: as above.
+        match held {
+            Some(path) => unsafe { std::env::set_var(dispatch_ledger::LEDGER, path) },
+            None => unsafe { std::env::remove_var(dispatch_ledger::LEDGER) },
+        }
+        assert_eq!(
+            std::fs::read_to_string(&ledger).expect("the ledger the hook opened"),
+            "scene.open\ndocs_search.ask\n"
+        );
+    }
+}
+
 /// One operation, routed to the handler the renderer uses for the same thing.
 fn run_one<R: Runtime>(
     app: &AppHandle<R>,
@@ -797,6 +885,7 @@ fn run_one<R: Runtime>(
     operation: &Operation,
     params: Value,
 ) -> Result<Value, ToolFailure> {
+    record_dispatched(domain, operation);
     let op = operation.op;
     match operation.route() {
         tool_params::Answers::Addon(command) => {
