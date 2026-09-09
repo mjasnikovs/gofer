@@ -90,10 +90,11 @@ test('the entry schema types every parameter and pins it to its own operation', 
             summary: 'Diagnostics for a file.',
             params: [
                 {
-                    name: 'path',
-                    kind: 'either',
-                    of: [{kind: 'text'}, {kind: 'list'}],
+                    name: 'paths',
+                    kind: 'listOf',
+                    of: {kind: 'text'},
                     required: true,
+                    minItems: 1,
                     entry: []
                 },
                 {name: 'timeoutMs', kind: 'int', required: false, entry: []}
@@ -120,11 +121,16 @@ test('the entry schema types every parameter and pins it to its own operation', 
     assert.equal(save.properties.expectedRevision, undefined)
 
     assert.deepEqual(diagnostics.properties.timeoutMs, {type: 'integer'})
-    assert.deepEqual(diagnostics.properties.path, {anyOf: [{type: 'string'}, {type: 'array'}]})
-    assert.deepEqual(diagnostics.required, ['op', 'path'])
+    assert.deepEqual(diagnostics.properties.paths, {
+        type: 'array',
+        items: {type: 'string'},
+        minItems: 1
+    })
+    assert.deepEqual(diagnostics.required, ['op', 'paths'])
     assert.deepEqual(diagnostics.properties.op, {const: 'script.diagnostics'})
 
     // save's own shape for `path`, not the union of both operations' shapes
+    assert.equal(save.properties.paths, undefined)
     assert.equal(save.properties.timeoutMs, undefined)
 })
 
@@ -244,4 +250,39 @@ test('one branch per operation of every domain, each pinned to a name no other b
         consts.every(name => /^[a-z_]+\.[a-z_]+$/u.test(name)),
         `these are not dotted operation names: ${consts.filter(name => !name.includes('.')).join(', ')}`
     )
+})
+
+/**
+ * The tagged value is closed, named once, and pointed at from every parameter that takes one.
+ *
+ * This is what retired the repairing table behind the schema: while the payload was `{}` with a
+ * sentence beside it, a constrained sampler could write `{"x": 32, "y": 48}` where a Vector2 goes,
+ * and something had to rewrite it. `scripts/bench/ref-probe.mjs` measured that llama.cpp
+ * constrains a `$ref` into `parameters.$defs`, so the 36 branches cost one copy rather than three.
+ */
+test('every tagged parameter points at the one closed set of tag branches', async () => {
+    const domains = await declaredDomains()
+    const [godot] = createGodotTools(domains, {call: async () => ({})})
+    const tags = godot.parameters.$defs.taggedValue.oneOf
+    assert.equal(tags.length, 36)
+    for (const branch of tags) {
+        assert.equal(branch.additionalProperties, false)
+        assert.deepEqual(branch.required, ['type', 'value'])
+        assert.ok(typeof branch.properties.type.const === 'string')
+        assert.ok(branch.properties.value !== undefined, `${branch.properties.type.const} payload`)
+    }
+
+    const validate = new Ajv({strict: false, allErrors: true})
+    const check = validate.compile(godot.parameters)
+    const setting = value => ({ops: [{op: 'project.set_setting', name: 'a/b', value}]})
+    assert.ok(check(setting({type: 'Vector2', value: [12, 34]})))
+    assert.ok(check(setting({type: 'Array', value: [{type: 'int', value: 1}]})))
+    assert.ok(!check(setting({type: 'Vector2', value: {x: 12, y: 34}})), 'a vector as an object')
+    assert.ok(!check(setting({type: 'Vector2', value: [12, 34, 56]})), 'a vector of three')
+    assert.ok(
+        !check(setting({type: 'String', value: {type: 'String', value: 'hi'}})),
+        'a twice-tagged value'
+    )
+    assert.ok(!check(setting({type: 'Resource', value: 'res://a.gd'})), 'a bare resource path')
+    assert.ok(!check(setting({type: 'Squiggle', value: 1})), 'a tag the engine does not have')
 })

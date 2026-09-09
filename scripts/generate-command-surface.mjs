@@ -3,7 +3,7 @@ import {readFile, writeFile} from 'node:fs/promises'
 import {fileURLToPath} from 'node:url'
 import {createGodotTools} from './godot-tools.mjs'
 import {declaredDomains} from './declared-domains.mjs'
-import {engineWords, readVocabulary} from './godot-vocabulary.mjs'
+import {ANSWER_ONLY, engineWords, readVocabulary, tagPayloads} from './godot-vocabulary.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const GENERATOR = 'scripts/generate-command-surface.mjs'
@@ -106,9 +106,11 @@ const KINDS = [
     'hash',
     'tagged',
     'choice',
-    'either',
     'listOf'
 ]
+
+/** What a `default` may be, per kind. A kind absent here takes no default at all. */
+const DEFAULTS = {text: 'string', choice: 'string', int: 'number'}
 
 function checkKind(path, entry, param, vocabularies) {
     const where = `${path}: ${entry.tool} ${entry.op} ${param.name ?? '(unnamed)'}`
@@ -118,11 +120,8 @@ function checkKind(path, entry, param, vocabularies) {
         throw new Error(`${where} speaks ${param.vocabulary}, which no vocabulary declares`)
     if (param.kind === 'choice' && !Array.isArray(param.of) && !param.vocabulary)
         throw new Error(`${where} lists no choices and names no vocabulary`)
-    if (param.kind === 'either') {
-        if (!Array.isArray(param.of) || param.of.length < 2)
-            throw new Error(`${where} is an either of fewer than two kinds`)
-        for (const one of param.of) checkKind(path, entry, {...one, name: param.name}, vocabularies)
-    }
+    checkDefault(where, param)
+    checkMinItems(where, param)
     if (param.kind === 'listOf') {
         if (!param.of?.kind) throw new Error(`${where} is a listOf nothing`)
         if (param.of.kind === 'list' || param.of.kind === 'listOf' || param.of.kind === 'object')
@@ -137,6 +136,40 @@ function checkKind(path, entry, param, vocabularies) {
         for (const inner of param.entry)
             checkKind(path, entry, {...inner, name: `${param.name}.${inner.name}`}, vocabularies)
     }
+}
+
+/**
+ * A default is a value of the parameter's own kind, and only an optional parameter has one.
+ *
+ * The same row is read twice — the schema advertises it and the router applies it — so a default
+ * the kind refuses would be one word in the prompt and another in the call.
+ */
+function checkDefault(where, param) {
+    if (!('default' in param)) return
+    if (param.required) throw new Error(`${where} is required and declares a default`)
+    const wanted = DEFAULTS[param.kind]
+    if (!wanted) throw new Error(`${where} is a ${param.kind}, which takes no default`)
+    if (typeof param.default !== wanted)
+        throw new Error(
+            `${where} defaults to ${JSON.stringify(param.default)}, which is no ${param.kind}`
+        )
+    if (param.kind === 'int' && !Number.isInteger(param.default))
+        throw new Error(`${where} defaults to ${param.default}, which is not whole`)
+    if (param.kind === 'choice') {
+        const words = param.of ?? []
+        if (words.length > 0 && !words.includes(param.default))
+            throw new Error(
+                `${where} defaults to ${JSON.stringify(param.default)}, which is not one of its own words`
+            )
+    }
+}
+
+function checkMinItems(where, param) {
+    if (!('minItems' in param)) return
+    if (param.kind !== 'list' && param.kind !== 'listOf')
+        throw new Error(`${where} is a ${param.kind}, which has no entries to count`)
+    if (!Number.isInteger(param.minItems) || param.minItems < 1)
+        throw new Error(`${where} asks for at least ${param.minItems} entries`)
 }
 
 /** The addon script a `module` names, as a PascalCase preload constant. */
@@ -413,8 +446,6 @@ function rustKind(param) {
         return param.vocabulary ?
                 `Kind::Choice(${vocabularyConst(param.vocabulary)})`
             :   `Kind::Choice(&[${param.of.map(word => rustString(word)).join(', ')}])`
-    if (param.kind === 'either')
-        return `Kind::Either(&[${param.of.map(one => rustKind(one)).join(', ')}])`
     if (param.kind === 'listOf') return `Kind::ListOf(&${rustKind(param.of)})`
     return param.kind.charAt(0).toUpperCase() + param.kind.slice(1)
 }
@@ -439,10 +470,17 @@ function rustParam(param) {
         : param.required ? 'need'
         : 'opt'
     let call = `${constructor}(${rustString(param.name)}, ${rustKind(param)})`
-    if (param.vocabulary && param.kind !== 'choice')
-        call = `speaking(${call}, ${vocabularyConst(param.vocabulary)})`
+    if (param.vocabulary) call = `speaking(${call}, ${vocabularyConst(param.vocabulary)})`
     if (param.entry) call = `shaped(${call}, &[${param.entry.map(rustParam).join(', ')}])`
+    if ('default' in param) call = `defaulting(${call}, ${rustFallback(param.default)})`
     return param.note ? `noted(${call}, ${rustString(param.note)})` : call
+}
+
+/** The one value a parameter falls back to, as the variant that carries its JSON type. */
+function rustFallback(value) {
+    return typeof value === 'string' ?
+            `Fallback::Text(${rustString(value)})`
+        :   `Fallback::Int(${grouped(value)})`
 }
 
 function rustOperation(entry) {
@@ -467,19 +505,93 @@ function rustOperation(entry) {
  */
 async function godotTool() {
     const [tool] = createGodotTools(await declaredDomains(), {call: async () => ({})})
-    const path = 'protocol/schemas/v2/godot-tool.json'
+    return await asJson('protocol/schemas/v2/godot-tool.json', {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters
+    })
+}
+
+/** A whole generated JSON file, written the way Prettier would. */
+async function asJson(path, document) {
     const prettier = await import('prettier')
-    return await prettier.format(
-        JSON.stringify({
-            name: tool.name,
-            description: tool.description,
-            parameters: tool.parameters
-        }),
+    return await prettier.format(JSON.stringify(document), {
+        ...(await prettier.resolveConfig(new URL(path, `file://${root}`).pathname)),
+        parser: 'json'
+    })
+}
+
+/**
+ * The request half of the protocol's tagged value, printed from the one payload table.
+ *
+ * A whole generated file rather than a region, because JSON carries no comment to hold a marker
+ * in. What only an answer carries is printed after the request branches and says so in its own
+ * `$comment`: nothing may send one, and `Protocol.decode` has no arm for any of them.
+ */
+async function valueSchema(tags) {
+    const payloads = tagPayloads('#')
+    // A Nil carries no payload, so the wire lets the key be left out. The tool's own grammar
+    // requires it on every branch, because one uniform shape is one less thing to get wrong.
+    const request = tags.map(tag => ({
+        ...(payloads[tag].type === 'null' ? {} : {required: ['value']}),
+        properties: {type: {const: tag}, value: payloads[tag]}
+    }))
+    const answers = [
         {
-            ...(await prettier.resolveConfig(new URL(path, `file://${root}`).pathname)),
-            parser: 'json'
-        }
-    )
+            $comment: 'Answer only: a resource comes back naming its class and its UID.',
+            required: ['value'],
+            properties: {type: {const: 'Resource'}, value: ANSWER_ONLY.resource}
+        },
+        ...Object.entries(ANSWER_ONLY.tags).map(([tag, value]) => ({
+            $comment: `Answer only: ${tag} describes something live, which no payload rebuilds.`,
+            required: ['value'],
+            properties: {type: {const: tag}, value}
+        }))
+    ]
+    return await asJson('protocol/schemas/v2/value.schema.json', {
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        $id: 'https://gofer.local/protocol/v2/value.schema.json',
+        title: 'Gofer protocol v2 tagged Godot value',
+        description:
+            'Every tag is the spelling type_string gives that Variant type, and every payload is'
+            + ' the one shape that tag takes. Generated by '
+            + GENERATOR
+            + ' from the same table the godot tool and the router read.',
+        type: 'object',
+        required: ['type'],
+        properties: {type: {type: 'string'}},
+        additionalProperties: true,
+        oneOf: [...request, ...answers]
+    })
+}
+
+/** The `Payload` variant a tag's JSON-schema shape stands for. See `tool_params.rs`. */
+function rustPayload(tag, shape) {
+    if (shape.oneOf) return 'Payload::Colour'
+    if (shape.type === 'null') return 'Payload::Null'
+    if (shape.type === 'boolean') return 'Payload::Boolean'
+    if (shape.type === 'integer' || shape.type === 'number') return 'Payload::Numeric'
+    if (shape.type === 'string') return 'Payload::Str'
+    if (shape.type === 'object') return 'Payload::ResourcePath'
+    if (shape.type === 'array') {
+        if (shape.minItems !== undefined) return `Payload::Numbers(${shape.minItems})`
+        if (shape.items.$ref) return 'Payload::Items'
+        if (shape.items.type === 'object') return 'Payload::Pairs'
+        if (shape.items.type === 'integer') return 'Payload::PackedIntegers'
+        if (shape.items.type === 'number') return 'Payload::PackedNumbers'
+        if (shape.items.type === 'string') return 'Payload::PackedStrings'
+        if (shape.items.type === 'array')
+            return `Payload::PackedComponents(${shape.items.minItems})`
+    }
+    throw new Error(`the ${tag} payload is a shape no Payload variant stands for`)
+}
+
+function rustTagPayloads(tags) {
+    const payloads = tagPayloads('#')
+    const rows = tags
+        .map(tag => `    (${rustString(tag)}, ${rustPayload(tag, payloads[tag])}),\n`)
+        .join('')
+    return `pub const GODOT_TAG_PAYLOAD: &[(&str, Payload)] = &[\n${rows}];\n`
 }
 
 /**
@@ -570,6 +682,25 @@ function gdCommandParams(operations, commands, runtime) {
         })
         .join('')
     return `const COMMAND_PARAMS: Dictionary = {\n${rows}}\n`
+}
+
+/**
+ * The three input enums, as dictionaries the engine fills in itself.
+ *
+ * Only the names are written down. GDScript resolves each value against the same engine the
+ * schema's enum was dumped from, so no number is copied and a renamed constant stops the addon
+ * loading rather than injecting the wrong click. `ClassDB` cannot answer for these — `@GlobalScope`
+ * is not one of its classes, measured on the pinned 4.7.2 — which is why they are a table at all.
+ */
+function gdInputConstants(vocabulary) {
+    const table = (name, what, words) =>
+        `## Every ${what} the engine publishes, under the name it publishes it under.\n`
+        + `const ${name} := {\n${words.map(word => `    "${word}": ${word},\n`).join('')}}\n`
+    return [
+        table('MOUSE_BUTTONS', 'mouse button', vocabulary.mouseButtons),
+        table('JOY_BUTTONS', 'joypad button', vocabulary.joyButtons),
+        table('JOY_AXES', 'joypad axis', vocabulary.joyAxes)
+    ].join('\n')
 }
 
 function tomlAllowList(names) {
@@ -886,6 +1017,8 @@ export async function generateSurfaces() {
     const runtime = await runtimeCatalogue()
     const desktop = await registeredDesktopCommands()
     const {operations: parameters, domains: toolDomains, vocabularies} = await parameterCatalogue()
+    const engine = await readVocabulary()
+    const valueTags = engineWords(engine, 'valueTags', 'the tagged value')
     const subagentBounds = await subagentBoundsCatalogue()
     const cerebrasModels = await shippedModelCatalogue('protocol/cerebras-models.json')
     const qwenModels = await shippedModelCatalogue('protocol/qwen-models.json')
@@ -928,7 +1061,8 @@ export async function generateSurfaces() {
             path: 'src-tauri/addon/params.gd',
             comment: '#',
             regions: [
-                {name: 'command-params', body: gdCommandParams(parameters, commands, runtime)}
+                {name: 'command-params', body: gdCommandParams(parameters, commands, runtime)},
+                {name: 'input-constants', body: gdInputConstants(engine)}
             ]
         },
         {
@@ -948,6 +1082,7 @@ export async function generateSurfaces() {
             rustfmt: true,
             regions: [
                 {name: 'vocabularies', body: rustVocabularies(vocabularies)},
+                {name: 'tag-payloads', body: rustTagPayloads(valueTags)},
                 {name: 'operations', body: rustOperations(parameters)}
             ]
         },
@@ -1011,6 +1146,10 @@ export async function generateSurfaces() {
         {
             path: 'protocol/schemas/v2/godot-tool.json',
             body: await godotTool()
+        },
+        {
+            path: 'protocol/schemas/v2/value.schema.json',
+            body: await valueSchema(valueTags)
         }
     ]
 

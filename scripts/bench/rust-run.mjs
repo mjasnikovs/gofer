@@ -3,7 +3,7 @@ import {execFileSync} from 'node:child_process'
 import Ajv from 'ajv'
 import {declaredDomains} from '../declared-domains.mjs'
 import {createGodotTools, normalizeGodotCall} from '../godot-tools.mjs'
-import {jsonSchemaOfEntry} from '../tool-schema.mjs'
+import {jsonSchemaOfEntry} from './tool-schema-2026-09-09.mjs'
 
 const S = process.env.SCRATCH ?? import.meta.dirname
 const corpus = JSON.parse(readFileSync(`${S}/corpus.json`, 'utf8'))

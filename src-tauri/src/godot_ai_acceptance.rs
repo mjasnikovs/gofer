@@ -167,21 +167,22 @@ fn next_turn(index: usize, results: &[Value]) -> ModelTurn {
         ),
         1 => tool(
             "godot",
-            json!({"op": "node.create", "params": {
-                "parent": "/AiFixture",
-                "name": "AiMarker",
-                "type": "Marker2D",
+            json!({"op": "node.create_nodes", "params": {
+                "nodes": [{"parent": "/AiFixture", "name": "AiMarker", "type": "Marker2D"}],
             }}),
         ),
         2 => tool("godot", json!({"op": "scene.get_tree", "params": {}})),
         3 => tool("godot", json!({"op": "scene.save", "params": {}})),
         4 => tool(
             "godot",
-            json!({"op": "script.open", "params": {"path": BROKEN_PATH}}),
+            json!({"op": "script.open", "params": {"paths": [BROKEN_PATH]}}),
         ),
         5 => tool(
             "godot",
-            json!({"op": "script.diagnostics", "params": {"path": BROKEN_PATH, "timeoutMs": 30000}}),
+            json!({"op": "script.diagnostics", "params": {
+                "paths": [BROKEN_PATH],
+                "timeoutMs": 30000,
+            }}),
         ),
         6 => tool(
             "godot",
@@ -189,7 +190,10 @@ fn next_turn(index: usize, results: &[Value]) -> ModelTurn {
         ),
         7 => tool(
             "godot",
-            json!({"op": "script.diagnostics", "params": {"path": BROKEN_PATH, "timeoutMs": 30000}}),
+            json!({"op": "script.diagnostics", "params": {
+                "paths": [BROKEN_PATH],
+                "timeoutMs": 30000,
+            }}),
         ),
         8 => tool(
             "godot",
@@ -224,7 +228,7 @@ fn next_turn(index: usize, results: &[Value]) -> ModelTurn {
         18 => tool("godot", json!({"op": "runtime.stop", "params": {}})),
         19 => tool(
             "godot",
-            json!({"op": "logs.read", "params": {"limit": 200}}),
+            json!({"op": "logs.read", "params": {"limit": 200, "minSeverity": "info"}}),
         ),
         20 => tool("godot", json!({"op": "resource.rescan", "params": {}})),
         21 => tool("godot", json!({"op": "project.get_settings", "params": {}})),
@@ -241,7 +245,8 @@ fn next_turn(index: usize, results: &[Value]) -> ModelTurn {
             json!({"op": "resource.create_tileset", "params": {
                 "path": TILESET_PATH,
                 "texture": ATLAS_PATH,
-                "tileSize": 16,
+                "tileWidth": 16,
+                "tileHeight": 16,
                 "solid": [[0, 0], [1, 0], [4, 0], [5, 0]],
             }}),
         ),
@@ -502,18 +507,30 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
     let saved = std::fs::read_to_string(session.worktree.join("main.tscn")).expect("read scene");
     assert!(saved.contains("AiMarker"), "{saved}");
 
-    assert_eq!(results[4]["text"], BROKEN_SCRIPT);
-    assert_eq!(results[5]["published"], true, "{}", quote("diagnostics"));
+    assert_eq!(results[4]["files"][0]["text"], BROKEN_SCRIPT);
+    assert_eq!(
+        results[5]["files"][0]["published"],
+        true,
+        "{}",
+        quote("diagnostics")
+    );
     assert!(
-        results[5]["diagnostics"]
+        results[5]["files"][0]["diagnostics"]
             .as_array()
             .is_some_and(|diagnostics| !diagnostics.is_empty()),
         "{}",
         quote("the broken script must report a diagnostic")
     );
-    assert_eq!(results[7]["published"], true, "{}", quote("diagnostics"));
     assert_eq!(
-        results[7]["diagnostics"].as_array().map(Vec::len),
+        results[7]["files"][0]["published"],
+        true,
+        "{}",
+        quote("diagnostics")
+    );
+    assert_eq!(
+        results[7]["files"][0]["diagnostics"]
+            .as_array()
+            .map(Vec::len),
         Some(0),
         "{}",
         quote("the fixed script must report no diagnostics")
@@ -922,7 +939,7 @@ fn every_operation_no_turn_has_ever_used_still_answers() {
     };
     call(
         "godot_script",
-        json!({"ops": [{"op": "open", "path": PROBE_PATH}]}),
+        json!({"ops": [{"op": "open", "paths": [PROBE_PATH]}]}),
     )
     .expect("open the probe script");
 
@@ -979,10 +996,8 @@ fn every_operation_no_turn_has_ever_used_still_answers() {
     call(
         "godot_node",
         json!({"ops": [{
-            "op": "create",
-            "parent": "/AiFixture",
-            "name": "Undone",
-            "type": "Marker2D",
+            "op": "create_nodes",
+            "nodes": [{"parent": "/AiFixture", "name": "Undone", "type": "Marker2D"}],
         }]}),
     )
     .expect("something to undo");
@@ -1053,10 +1068,8 @@ fn the_first_mutation_of_a_session_needs_no_read_before_it() {
         ai_tools::ToolRequest {
             tool: "godot_node".to_owned(),
             params: json!({"ops": [{
-                "op": "create",
-                "parent": "/AiFixture",
-                "name": "FirstMarker",
-                "type": "Marker2D",
+                "op": "create_nodes",
+                "nodes": [{"parent": "/AiFixture", "name": "FirstMarker", "type": "Marker2D"}],
             }]}),
         },
     )
@@ -1066,22 +1079,26 @@ fn the_first_mutation_of_a_session_needs_no_read_before_it() {
             failure.code, failure.message
         )
     });
-    assert_eq!(answer["ops"][0]["result"]["node"], "/AiFixture/FirstMarker");
+    assert_eq!(
+        answer["ops"][0]["result"]["nodes"][0],
+        "/AiFixture/FirstMarker"
+    );
 
     let again = ai_tools::dispatch(
         app.handle(),
         ai_tools::ToolRequest {
             tool: "godot_node".to_owned(),
             params: json!({"ops": [{
-                "op": "create",
-                "parent": "/AiFixture",
-                "name": "SecondMarker",
-                "type": "Marker2D",
+                "op": "create_nodes",
+                "nodes": [{"parent": "/AiFixture", "name": "SecondMarker", "type": "Marker2D"}],
             }]}),
         },
     )
     .expect("the mutation after the first needs no read either");
-    assert_eq!(again["ops"][0]["result"]["node"], "/AiFixture/SecondMarker");
+    assert_eq!(
+        again["ops"][0]["result"]["nodes"][0],
+        "/AiFixture/SecondMarker"
+    );
 }
 
 /// A handler the editor cannot compile is refused for the reason it really is.
@@ -1127,10 +1144,14 @@ fn a_handler_the_editor_cannot_compile_says_so_rather_than_blaming_the_script() 
     call(
         "godot_node",
         json!({"ops": [
-            {"op": "create", "parent": "/AiFixture", "name": "Thing", "type": "Node2D"},
-            {"op": "set_property", "node": "/AiFixture/Thing", "property": "script",
-             "value": {"type": "Resource", "value": {"path": "res://scripts/thing.gd"}}},
-            {"op": "create", "parent": "/AiFixture", "name": "Ticker", "type": "Timer"}
+            {"op": "create_nodes", "nodes": [
+                {"parent": "/AiFixture", "name": "Thing", "type": "Node2D"},
+                {"parent": "/AiFixture", "name": "Ticker", "type": "Timer"}
+            ]},
+            {"op": "set_properties", "properties": [
+                {"node": "/AiFixture/Thing", "property": "script",
+                 "value": {"type": "Resource", "value": {"path": "res://scripts/thing.gd"}}}
+            ]}
         ]}),
     )
     .expect("attach the script and add a timer");
@@ -1160,7 +1181,7 @@ fn a_handler_the_editor_cannot_compile_says_so_rather_than_blaming_the_script() 
     .expect("register the autoload");
     call(
         "godot_script",
-        json!({"ops": [{"op": "open", "path": "scripts/thing.gd"}]}),
+        json!({"ops": [{"op": "open", "paths": ["scripts/thing.gd"]}]}),
     )
     .expect("read before writing");
     save(
@@ -1229,8 +1250,8 @@ fn a_class_name_written_this_session_is_a_type_the_next_script_can_use() {
             panic!("{tool} was refused: {} {}", failure.code, failure.message)
         })
     };
-    let complaints = |answer: &Value| -> Vec<String> {
-        answer["ops"][0]["result"]["diagnostics"]
+    let complaints = |reported: &Value| -> Vec<String> {
+        reported["diagnostics"]
             .as_array()
             .map(|list| {
                 list.iter()
@@ -1245,7 +1266,10 @@ fn a_class_name_written_this_session_is_a_type_the_next_script_can_use() {
         json!({"ops": [{"op": "save", "path": "scripts/coin.gd",
                         "text": "class_name Coin\nextends Area2D\n\n\nfunc value() -> int:\n\treturn 1\n"}]}),
     );
-    assert!(complaints(&declared).is_empty(), "{declared}");
+    assert!(
+        complaints(&declared["ops"][0]["result"]).is_empty(),
+        "{declared}"
+    );
 
     let user = call(
         "godot_script",
@@ -1253,15 +1277,18 @@ fn a_class_name_written_this_session_is_a_type_the_next_script_can_use() {
                         "text": "extends Node\n\nvar held: Coin = null\n"}]}),
     );
     assert!(
-        complaints(&user).is_empty(),
+        complaints(&user["ops"][0]["result"]).is_empty(),
         "a class declared a moment ago must be a type the next script can name: {user}"
     );
 
     let asked = call(
         "godot_script",
-        json!({"ops": [{"op": "diagnostics", "path": "scripts/holder.gd"}]}),
+        json!({"ops": [{"op": "diagnostics", "paths": ["scripts/holder.gd"]}]}),
     );
-    assert!(complaints(&asked).is_empty(), "{asked}");
+    assert!(
+        complaints(&asked["ops"][0]["result"]["files"][0]).is_empty(),
+        "{asked}"
+    );
 }
 
 #[test]
@@ -1294,7 +1321,7 @@ fn a_script_is_read_again_once_an_autoload_declares_the_name_it_uses() {
         })
     };
     let named = |answer: &Value| -> Vec<String> {
-        answer["ops"][0]["result"]["diagnostics"]
+        answer["ops"][0]["result"]["files"][0]["diagnostics"]
             .as_array()
             .map(|list| {
                 list.iter()
@@ -1306,11 +1333,11 @@ fn a_script_is_read_again_once_an_autoload_declares_the_name_it_uses() {
 
     call(
         "godot_script",
-        json!({"ops": [{"op": "open", "path": "scripts/uses_autoload.gd"}]}),
+        json!({"ops": [{"op": "open", "paths": ["scripts/uses_autoload.gd"]}]}),
     );
     let before = call(
         "godot_script",
-        json!({"ops": [{"op": "diagnostics", "path": "scripts/uses_autoload.gd"}]}),
+        json!({"ops": [{"op": "diagnostics", "paths": ["scripts/uses_autoload.gd"]}]}),
     );
     assert!(
         named(&before)
@@ -1326,7 +1353,7 @@ fn a_script_is_read_again_once_an_autoload_declares_the_name_it_uses() {
     );
     let after = call(
         "godot_script",
-        json!({"ops": [{"op": "diagnostics", "path": "scripts/uses_autoload.gd"}]}),
+        json!({"ops": [{"op": "diagnostics", "paths": ["scripts/uses_autoload.gd"]}]}),
     );
     assert_eq!(
         named(&after),

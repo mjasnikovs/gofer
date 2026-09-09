@@ -748,7 +748,7 @@ fn a_script_travels_with_a_type_change_or_the_change_is_refused() {
         "extends Node2D\n\n@export var speed := 24.0\n",
     )
     .expect("write the script");
-    session.call("resource.rescan", json!({"path": "res://player.gd"}));
+    session.call("resource.rescan", json!({"paths": ["res://player.gd"]}));
     session.mutate(
         "node.set_property",
         json!({
@@ -784,7 +784,7 @@ fn a_script_travels_with_a_type_change_or_the_change_is_refused() {
         "extends CharacterBody2D\n",
     )
     .expect("write the script");
-    session.call("resource.rescan", json!({"path": "res://body.gd"}));
+    session.call("resource.rescan", json!({"paths": ["res://body.gd"]}));
     session.mutate(
         "node.set_property",
         json!({

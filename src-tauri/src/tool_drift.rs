@@ -676,7 +676,8 @@ fn rust_request_behind(domain: &str, op: &str) -> Option<&'static [(&'static str
         ("godot_resource", "move") => Some(crate::files::MOVE_PATH_FIELDS),
         ("godot_resource", "delete") => Some(crate::files::DELETE_PATH_FIELDS),
         ("godot_script", "list") => Some(crate::script::LIST_SCRIPTS_FIELDS),
-        ("godot_script", "open" | "close") => Some(crate::script::OPEN_SCRIPT_FIELDS),
+        ("godot_script", "open" | "close") => Some(crate::script::NAMED_SCRIPTS_FIELDS),
+        ("godot_script", "diagnostics") => Some(crate::script::DIAGNOSE_SCRIPTS_FIELDS),
         ("godot_script", "update") => Some(crate::script::UPDATE_SCRIPT_FIELDS),
         ("godot_script", "save") => Some(crate::script::SAVE_SCRIPT_FIELDS),
         ("godot_script", "edit") => Some(crate::script::EDIT_SCRIPT_FIELDS),
@@ -803,23 +804,50 @@ fn committed_enum(schema: &serde_json::Value) -> Vec<String> {
 /// below refuses outright.
 #[test]
 fn every_word_a_vocabulary_holds_reaches_the_model_as_a_schema_enum() {
-    use crate::tool_params::{GODOT_KEY_NAME, GODOT_MONITOR_NAME, GODOT_VALUE_TAG};
+    use crate::tool_params::{
+        GODOT_JOY_AXIS, GODOT_JOY_BUTTON, GODOT_KEY_NAME, GODOT_MONITOR_NAME, GODOT_MOUSE_BUTTON,
+        GODOT_VALUE_TAG,
+    };
 
     let tool = committed_tool();
+    let inside = |op: &str, field: &str| {
+        committed_enum(
+            &committed_branch(&tool, op)["properties"]["events"]["items"]["properties"][field],
+        )
+    };
     for op in ["project.set_input_action", "runtime.input"] {
-        let key =
-            &committed_branch(&tool, op)["properties"]["events"]["items"]["properties"]["key"];
+        assert_eq!(inside(op, "key"), GODOT_KEY_NAME, "{op} offers other keys");
         assert_eq!(
-            committed_enum(key),
-            GODOT_KEY_NAME,
-            "{op} offers other keys"
+            inside(op, "button"),
+            GODOT_MOUSE_BUTTON,
+            "{op} offers other mouse buttons"
+        );
+        assert_eq!(
+            inside(op, "joypadButton"),
+            GODOT_JOY_BUTTON,
+            "{op} offers other joypad buttons"
         );
     }
+    assert_eq!(inside("runtime.input", "axis"), GODOT_JOY_AXIS);
     let monitors =
         &committed_branch(&tool, "runtime.get_monitors")["properties"]["monitors"]["items"];
     assert_eq!(committed_enum(monitors), GODOT_MONITOR_NAME);
+    // A tagged value is one branch per tag rather than a `type` enum beside an open payload, so
+    // what has to hold is that the branches are the vocabulary and every parameter points at them.
+    let branches = tool["parameters"]["$defs"]["taggedValue"]["oneOf"]
+        .as_array()
+        .expect("the tool names the tagged value once");
+    let tags: Vec<String> = branches
+        .iter()
+        .map(|branch| {
+            branch["properties"]["type"]["const"]
+                .as_str()
+                .expect("a branch pinned to one tag")
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(tags, GODOT_VALUE_TAG);
     for (op, path) in [
-        ("node.set_property", vec!["value"]),
         ("node.set_properties", vec!["properties", "items", "value"]),
         ("project.set_setting", vec!["value"]),
         ("project.set_editor_setting", vec!["value"]),
@@ -836,9 +864,9 @@ fn every_word_a_vocabulary_holds_reaches_the_model_as_a_schema_enum() {
             }
         }
         assert_eq!(
-            committed_enum(&walked["type"]),
-            GODOT_VALUE_TAG,
-            "{op} tags"
+            walked["$ref"].as_str(),
+            Some("#/$defs/taggedValue"),
+            "{op} spells its own tagged value out"
         );
     }
 }
@@ -993,7 +1021,10 @@ fn prose_the_model_reads() -> Vec<(String, &'static str)> {
 /// because `Left`, `Open`, `Delete` and `A` are all key names and all ordinary English.
 #[test]
 fn no_sentence_the_model_reads_recites_a_vocabulary() {
-    use crate::tool_params::{GODOT_KEY_NAME, GODOT_MONITOR_NAME, GODOT_VALUE_TAG};
+    use crate::tool_params::{
+        GODOT_JOY_AXIS, GODOT_JOY_BUTTON, GODOT_KEY_NAME, GODOT_MONITOR_NAME, GODOT_MOUSE_BUTTON,
+        GODOT_VALUE_TAG,
+    };
 
     // A one-character key is `A` or `7`. Held to this rule, "[0, 0]" is a recitation of two of
     // them and every coordinate in the catalogue is a failure.
@@ -1007,6 +1038,9 @@ fn no_sentence_the_model_reads_recites_a_vocabulary() {
         ("a key name", keys.as_slice()),
         ("a performance monitor", GODOT_MONITOR_NAME),
         ("a value tag", GODOT_VALUE_TAG),
+        ("a mouse button", GODOT_MOUSE_BUTTON),
+        ("a joypad button", GODOT_JOY_BUTTON),
+        ("a joypad axis", GODOT_JOY_AXIS),
     ] {
         for (at, text) in prose_the_model_reads() {
             for run in recited_runs(text, words) {
@@ -1025,6 +1059,75 @@ fn no_sentence_the_model_reads_recites_a_vocabulary() {
         "the schema already carries these, and a list beside it goes stale:\n{}",
         recited.join("\n")
     );
+}
+
+/// The value a call leaving a parameter out is treated as having sent is the one the model is shown.
+///
+/// Two readers of one row: the schema carries `default` for the sampler, and the router fills the
+/// same value in before the handler deserializes. A router that defaulted to something else would
+/// answer a question the model never asked, so the two are compared rather than trusted.
+#[test]
+fn every_default_the_router_applies_is_the_one_the_committed_tool_advertises() {
+    let tool = committed_tool();
+    let mut checked = 0;
+    for domain in CATALOG {
+        for operation in domain.operations {
+            let short = domain.name.trim_start_matches("godot_");
+            let branch = committed_branch(&tool, &format!("{short}.{}", operation.op));
+            for param in operation.params {
+                let advertised = &branch["properties"][param.name]["default"];
+                match param.default {
+                    None => assert!(
+                        advertised.is_null(),
+                        "{} {} `{}` is advertised with a default this build does not apply",
+                        domain.name,
+                        operation.op,
+                        param.name
+                    ),
+                    Some(default) => {
+                        assert_eq!(
+                            advertised,
+                            &serde_json::to_value(default).expect("a default is JSON"),
+                            "{} {} `{}`",
+                            domain.name,
+                            operation.op,
+                            param.name
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(checked > 0, "no operation declares a default at all");
+}
+
+/// The tile size a call names none of is the one the addon falls back to.
+///
+/// Two halves default it: the schema tells the model what it gets for free, and `Params.tile_size`
+/// is what actually cuts the atlas when the call is silent. A model told 16 and given 32 would be
+/// reading a number that is true of nothing.
+#[test]
+fn the_tile_size_the_schema_advertises_is_the_one_the_addon_falls_back_to() {
+    let declared = PARAMS_ADDON
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("const DEFAULT_TILE_SIZE := "))
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .expect("params.gd declares the tile size a command naming none takes");
+    let params = crate::tool_params::params_of("godot_resource", "create_tileset")
+        .expect("create_tileset declares its parameters");
+    for side in ["tileWidth", "tileHeight"] {
+        let advertised = params
+            .iter()
+            .find(|param| param.name == side)
+            .and_then(|param| param.default)
+            .unwrap_or_else(|| panic!("create_tileset advertises a default for {side}"));
+        assert_eq!(
+            advertised,
+            crate::tool_params::Fallback::Int(declared),
+            "{side} is advertised as one number and cut as another"
+        );
+    }
 }
 
 /// A value the addon decodes has to be documented as the tagged object it decodes.
@@ -1134,48 +1237,52 @@ fn the_input_event_shape_the_catalog_documents_is_the_one_the_addon_reads() {
     }
 }
 
-/// Every mutation the addon guards with a revision has to say so where the model reads it.
+/// Every mutation the model can reach has to say where its revision comes from.
 ///
 /// Without this the catalog documented the parameter nowhere an operation names its arguments,
 /// and a live agent spent a whole turn being refused with `revision_conflict` on every
-/// authoring call it made. The list is the protocol's own, so an operation added to the
-/// contract cannot reach the model without its revision documented.
+/// authoring call it made. Walked from the catalogue rather than from the protocol's own list,
+/// because the addon answers mutations the model has no operation for: `node.create` and
+/// `node.set_property` are the desktop client's and the batch operations' doors, and are not
+/// offered to a model that would then split a batch across them.
 #[test]
 fn mutating_operations_document_the_revision_they_require() {
-    let mutating = crate::protocol_v2::MUTATING_COMMANDS.map(|command| {
-        let (domain, op) = command
-            .split_once('.')
-            .unwrap_or_else(|| panic!("{command} names a domain and an operation"));
-        (format!("godot_{domain}"), op)
-    });
-    for (tool, op) in &mutating {
-        let tool = tool.as_str();
-        let op = *op;
-        let domain = CATALOG
-            .iter()
-            .find(|domain| domain.name == tool)
-            .unwrap_or_else(|| panic!("{tool} is in the catalog"));
-        assert!(
-            domain.operations.iter().any(|operation| operation.op == op),
-            "{tool} {op} is in the catalog"
-        );
-        let params = crate::tool_params::params_of(tool, op)
-            .unwrap_or_else(|| panic!("{tool} {op} declares its parameters"));
-        let revision = params
-            .iter()
-            .find(|param| param.name == "expectedRevision")
-            .unwrap_or_else(|| {
-                panic!(
-                    "{tool} {op} must declare expectedRevision: {}",
-                    crate::tool_params::signature(params)
-                )
-            });
-        assert!(
-            revision.hidden && !revision.required,
-            "{tool} {op} must hide expectedRevision rather than ask for it: {}",
-            crate::tool_params::signature(params)
-        );
+    let mutating = crate::protocol_v2::MUTATING_COMMANDS;
+    let mut checked = 0;
+    for domain in CATALOG {
+        for operation in domain.operations {
+            let Some(command) = addon_command_behind(domain.name, operation.op) else {
+                continue;
+            };
+            if !mutating.contains(&command.as_str()) {
+                continue;
+            }
+            let params = operation.params;
+            let revision = params
+                .iter()
+                .find(|param| param.name == "expectedRevision")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} {} must declare expectedRevision: {}",
+                        domain.name,
+                        operation.op,
+                        crate::tool_params::signature(params)
+                    )
+                });
+            assert!(
+                revision.hidden && !revision.required,
+                "{} {} must hide expectedRevision rather than ask for it: {}",
+                domain.name,
+                operation.op,
+                crate::tool_params::signature(params)
+            );
+            checked += 1;
+        }
     }
+    assert!(
+        checked > 10,
+        "the catalogue reaches more of the protocol's mutations than this walked: {checked}"
+    );
 }
 
 /// The one line the log summary promises is never about the project.

@@ -1,6 +1,6 @@
 import {normalizeToolCalls} from './tool-call-repair.mjs'
 import {toolResult} from './tool-result.mjs'
-import {jsonSchemaOfEntry, signatureOf} from './tool-schema.mjs'
+import {jsonSchemaOfEntry, signatureOf, taggedValueDefs} from './tool-schema.mjs'
 
 export const GODOT_TOOL_NAME = 'godot'
 
@@ -71,6 +71,9 @@ export function createGodotTools(domains, host) {
                     .join('\n\n'),
             parameters: {
                 type: 'object',
+                // The tagged value's 36 branches, named once and pointed at from each of the three
+                // parameters that take one. See `TAGGED_VALUE_REF`.
+                ...(taggedValueDefs(operations) ? {$defs: taggedValueDefs(operations)} : {}),
                 properties: {
                     ops: {
                         type: 'array',

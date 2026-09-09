@@ -61,17 +61,17 @@ func _said(answer: Variant) -> String:
 
 func _test_tile_size(params: GDScript, failures: Array[String]) -> void:
     if params.call("tile_size", {})["value"] != Vector2i(16, 16):
-        failures.append("A command naming no tileSize must take the 16x16 default")
-    if params.call("tile_size", {"tileSize": 32})["value"] != Vector2i(32, 32):
-        failures.append("One number is a square tile")
-    if params.call("tile_size", {"tileSize": [24, 8]})["value"] != Vector2i(24, 8):
+        failures.append("A command naming no tile size must take the 16x16 default")
+    if params.call("tile_size", {"tileWidth": 32})["value"] != Vector2i(32, 16):
+        failures.append("One side named is the only side that moves")
+    if params.call("tile_size", {"tileWidth": 24, "tileHeight": 8})["value"] != Vector2i(24, 8):
         failures.append("Two numbers are width and height")
-    if _refusal(params.call("tile_size", {"tileSize": 0})) != "invalid_params":
-        failures.append("A tileSize of zero must be refused")
-    if _refusal(params.call("tile_size", {"tileSize": [16, -1]})) != "invalid_params":
-        failures.append("A negative tileSize must be refused")
-    if _refusal(params.call("tile_size", {"tileSize": "big"})) != "invalid_params":
-        failures.append("A tileSize that is not numbers must be refused")
+    if _refusal(params.call("tile_size", {"tileWidth": 0})) != "invalid_params":
+        failures.append("A tile with no width must be refused")
+    if _refusal(params.call("tile_size", {"tileHeight": -1})) != "invalid_params":
+        failures.append("A negative tile height must be refused")
+    if _refusal(params.call("tile_size", {"tileWidth": "big"})) != "invalid_params":
+        failures.append("A tile size that is not numbers must be refused")
 
 func _test_atlas_coords(params: GDScript, failures: Array[String]) -> void:
     var grid := Vector2i(4, 4)
@@ -133,11 +133,43 @@ func _test_input_events(params: GDScript, failures: Array[String]) -> void:
     if params.call("decode_input_events", "A")["ok"]:
         failures.append("Events that are not a list must be refused")
 
+    var named: Dictionary = params.call(
+        "decode_input_events",
+        [{"kind": "mouse_button", "button": "MOUSE_BUTTON_RIGHT"}]
+    )
+    if not named["ok"]:
+        failures.append("A mouse button named as the engine names it must decode: %s" % str(named))
+    elif (named["events"] as Array)[0].button_index != MOUSE_BUTTON_RIGHT:
+        failures.append("A named mouse button decodes to the engine's own value: %s" % str(named))
+    var indexed: Dictionary = params.call(
+        "decode_input_events", [{"kind": "mouse_button", "button": 1}]
+    )
+    if indexed["ok"]:
+        failures.append("A mouse button index is not a name and must be refused")
+    var padded: Dictionary = params.call(
+        "decode_input_events",
+        [{"kind": "joypad_button", "joypadButton": "JOY_BUTTON_A"}]
+    )
+    if not padded["ok"]:
+        failures.append("A joypad button named as the engine names it must decode: %s" % str(padded))
+
     var event := InputEventKey.new()
     event.keycode = OS.find_keycode_from_string("Escape")
     var encoded: Variant = params.call("encode_input_events", [event])
     if (encoded as Array).size() != 1 or (encoded as Array)[0]["key"] != "Escape":
         failures.append("An encoded key event names the key the way Godot does: %s" % str(encoded))
+
+    var click := InputEventMouseButton.new()
+    click.button_index = MOUSE_BUTTON_MIDDLE
+    var clicked: Variant = params.call("encode_input_events", [click])
+    if (clicked as Array)[0]["button"] != "MOUSE_BUTTON_MIDDLE":
+        failures.append("An encoded click names the button the way Godot does: %s" % str(clicked))
+
+    var pad := InputEventJoypadButton.new()
+    pad.button_index = JOY_BUTTON_Y
+    var padded_out: Variant = params.call("encode_input_events", [pad])
+    if (padded_out as Array)[0]["joypadButton"] != "JOY_BUTTON_Y":
+        failures.append("An encoded pad button names it the way Godot does: %s" % str(padded_out))
 
 
 ## The backstop behind the router's own check, which used to cost a booted editor to reach.
@@ -391,18 +423,17 @@ func _test_readback(params: GDScript, failures: Array[String]) -> void:
 ## `res://` prefix. Reaching one cost a staged addon and an xvfb boot. They cost a second here, and
 ## this is the test that says the move kept their answers.
 func _test_moved_from_the_editor(params: GDScript, failures: Array[String]) -> void:
-    for asked: Variant in [8, [8, 8]]:
-        var square: Dictionary = params.call("texture_size", asked)
-        if square.get("value") != Vector2i(8, 8):
-            failures.append("texture_size %s must be 8x8, and is %s" % [asked, square])
-    if _refusal(params.call("texture_size", "16")) != "invalid_params":
-        failures.append("a texture size that is neither a number nor a pair is refused")
-    if _refusal(params.call("texture_size", 0)) != "invalid_params":
-        failures.append("a texture with no pixels on a side is refused")
-    var wide: Dictionary = params.call("texture_size", [8192, 1])
+    var square: Dictionary = params.call("texture_size", {"width": 8, "height": 8})
+    if square.get("value") != Vector2i(8, 8):
+        failures.append("texture_size must be 8x8, and is %s" % square)
+    if _refusal(params.call("texture_size", {"width": "16", "height": 16})) != "invalid_params":
+        failures.append("a texture side that is not a number is refused")
+    if _refusal(params.call("texture_size", {})) != "invalid_params":
+        failures.append("a texture that names no size is refused")
+    var wide: Dictionary = params.call("texture_size", {"width": 8192, "height": 1})
     if _refusal(wide) != "invalid_params" or not _said(wide).contains("on a side"):
         failures.append("a texture past the edge limit is refused for its edge, not %s" % wide)
-    var heavy: Dictionary = params.call("texture_size", [4096, 4096])
+    var heavy: Dictionary = params.call("texture_size", {"width": 4096, "height": 4096})
     if _refusal(heavy) != "invalid_params" or not _said(heavy).contains("at most"):
         failures.append("a texture inside both edges is refused for its pixels, not %s" % heavy)
 
@@ -413,17 +444,19 @@ func _test_moved_from_the_editor(params: GDScript, failures: Array[String]) -> v
     if params.call("as_resource_path", "  ") != "":
         failures.append("a path of nothing but spaces names nothing")
 
-    var listed: Dictionary = params.call("rescan_paths_param", {"path": ["a.png", "a.png", ""]})
+    var listed: Dictionary = params.call("rescan_paths_param", {"paths": ["a.png", "a.png", ""]})
     if listed.get("value") != ["res://a.png"]:
         failures.append("a rescan list is prefixed, deduplicated and emptied, not %s" % listed)
     if (params.call("rescan_paths_param", {}) as Dictionary).get("value") != []:
-        failures.append("a rescan with no path at all asks for nothing")
-    if _refusal(params.call("rescan_paths_param", {"path": 7})) != "invalid_params":
+        failures.append("a rescan naming no path at all asks for nothing")
+    if _refusal(params.call("rescan_paths_param", {"paths": "a.png"})) != "invalid_params":
+        failures.append("a rescan path outside a list is refused")
+    if _refusal(params.call("rescan_paths_param", {"paths": [7]})) != "invalid_params":
         failures.append("a rescan path that is not text is refused")
     var too_many: Array = []
     for index in range(300):
         too_many.append("a%d.png" % index)
-    if _refusal(params.call("rescan_paths_param", {"path": too_many})) != "too_many_paths":
+    if _refusal(params.call("rescan_paths_param", {"paths": too_many})) != "too_many_paths":
         failures.append("a rescan past the path limit is refused by its own code")
 
     for pair: Array in [
@@ -573,7 +606,7 @@ func _test_node_decisions(params: GDScript, failures: Array[String]) -> void:
 func _test_tileset_plan(params: GDScript, failures: Array[String]) -> void:
     var atlas := Vector2i(32, 16)
 
-    var whole: Dictionary = params.call("tileset_plan", {"tileSize": 16}, "res://a.png", atlas)
+    var whole: Dictionary = params.call("tileset_plan", {}, "res://a.png", atlas)
     var plan: Dictionary = whole.get("value", {})
     if plan.get("grid") != Vector2i(2, 1):
         failures.append("a 32x16 atlas cut at 16 is a 2x1 grid, not %s" % [plan.get("grid")])
@@ -583,26 +616,32 @@ func _test_tileset_plan(params: GDScript, failures: Array[String]) -> void:
         failures.append("naming no solid tiles gives collision to none of them")
 
     var all_solid: Dictionary = params.call(
-        "tileset_plan", {"tileSize": 16, "solid": "all"}, "res://a.png", atlas
+        "tileset_plan", {"allSolid": true}, "res://a.png", atlas
     )
     if all_solid["value"]["solid"] != all_solid["value"]["tiles"]:
-        failures.append("solid: all is every tile the plan cuts")
+        failures.append("allSolid is every tile the plan cuts")
+
+    var both: Dictionary = params.call(
+        "tileset_plan", {"allSolid": true, "solid": [[0, 0]]}, "res://a.png", atlas
+    )
+    if _refusal(both) != "invalid_param":
+        failures.append("asking for every tile and for named tiles is refused: %s" % [both])
 
     var too_big: Dictionary = params.call(
-        "tileset_plan", {"tileSize": 64}, "res://a.png", atlas
+        "tileset_plan", {"tileWidth": 64, "tileHeight": 64}, "res://a.png", atlas
     )
     if _refusal(too_big) != "tile_size_too_large":
         failures.append("an atlas that does not hold one tile is refused: %s" % [too_big])
 
     var too_many: Dictionary = params.call(
-        "tileset_plan", {"tileSize": 1}, "res://a.png", Vector2i(4096, 4096)
+        "tileset_plan", {"tileWidth": 1, "tileHeight": 1}, "res://a.png", Vector2i(4096, 4096)
     )
     if _refusal(too_many) != "too_many_tiles":
         failures.append("a grid past the tile cap is refused: %s" % [too_many])
 
     var undefined: Dictionary = params.call(
         "tileset_plan",
-        {"tileSize": 16, "tiles": [[0, 0]], "solid": [[1, 0]]},
+        {"tiles": [[0, 0]], "solid": [[1, 0]]},
         "res://a.png",
         atlas
     )
@@ -621,13 +660,14 @@ func _test_tileset_plan(params: GDScript, failures: Array[String]) -> void:
 func _test_texture_plan(params: GDScript, failures: Array[String]) -> void:
     var drawn: Dictionary = params.call("texture_plan", {
         "path": "res://tile.png",
-        "size": 8,
+        "width": 8,
+        "height": 8,
         "background": "skyblue",
         "rects": [{"x": 0, "y": 0, "width": 4, "height": 4, "color": "#8b5a2b"}],
     })
     var plan: Dictionary = drawn.get("value", {})
     if plan.get("size") != Vector2i(8, 8):
-        failures.append("one number is both sides of the texture, not %s" % [plan.get("size")])
+        failures.append("the two sides are the texture's size, not %s" % [plan.get("size")])
     if plan.get("background") != Color.SKY_BLUE:
         failures.append("a named background is that colour, not %s" % [plan.get("background")])
     var rects: Array = plan.get("rects", [])
@@ -636,29 +676,31 @@ func _test_texture_plan(params: GDScript, failures: Array[String]) -> void:
 
     var clipped: Dictionary = params.call("texture_plan", {
         "path": "res://tile.png",
-        "size": 8,
+        "width": 8,
+        "height": 8,
         "rects": [{"x": 6, "y": 6, "width": 8, "height": 8, "color": "red"}],
     })
     if clipped["value"]["rects"][0]["area"] != Rect2i(6, 6, 2, 2):
         failures.append("a rect over the edge is clipped to the canvas")
 
-    if _refusal(params.call("texture_plan", {"path": "res://t.tres", "size": 8})) != "invalid_params":
+    if _refusal(params.call("texture_plan", {"path": "res://t.tres", "width": 8, "height": 8})) != "invalid_params":
         failures.append("a texture written anywhere but a .png is refused")
-    if _refusal(params.call("texture_plan", {"path": "res://t.png", "size": 8, "background": "notacolour"})) != "unsupported_color":
+    if _refusal(params.call("texture_plan", {"path": "res://t.png", "width": 8, "height": 8, "background": "notacolour"})) != "unsupported_color":
         failures.append("a background nobody can read is refused")
 
     var runaway: Array = []
     for _index in range(513):
         runaway.append({"x": 0, "y": 0, "width": 1, "height": 1, "color": "red"})
     var too_many: Dictionary = params.call(
-        "texture_plan", {"path": "res://t.png", "size": 8, "rects": runaway}
+        "texture_plan", {"path": "res://t.png", "width": 8, "height": 8, "rects": runaway}
     )
     if _refusal(too_many) != "too_many_rects":
         failures.append("a paint past the rect cap is refused: %s" % [too_many])
 
     var outside: Dictionary = params.call("texture_plan", {
         "path": "res://t.png",
-        "size": 8,
+        "width": 8,
+        "height": 8,
         "rects": [{"x": 20, "y": 20, "width": 4, "height": 4, "color": "red"}],
     })
     if _refusal(outside) != "invalid_params":

@@ -10,7 +10,7 @@ const EDITOR_OWNED = [
         matches: path => ['.tscn', '.scn'].includes(extname(path)),
         instead:
             'Scenes belong to the running editor. Build this one with scene.create, '
-            + 'node.create and node.set_property, then scene.save. A .tscn '
+            + 'node.create_nodes and node.set_properties, then scene.save. A .tscn '
             + 'written as text makes the editor stop and ask which copy to keep.'
     },
     {

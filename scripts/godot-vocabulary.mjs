@@ -1,7 +1,7 @@
 import {spawn} from 'node:child_process'
 import {mkdtemp, readFile, rm, writeFile} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
-import {join, resolve} from 'node:path'
+import {join} from 'node:path'
 import {fileURLToPath} from 'node:url'
 import {resolveGodotBinary} from './godot-binary.mjs'
 
@@ -169,16 +169,152 @@ export const UNDECODABLE_TAGS = {
     RID: 'a server-side handle, valid only inside the process that issued it'
 }
 
+/** A fixed-length array of numbers, which is how every vector, rect, basis and transform reads. */
+function numbers(arity, of = 'number') {
+    return {type: 'array', minItems: arity, maxItems: arity, items: {type: of}}
+}
+
+/** The same, for the types whose components are whole numbers and whose fixtures say so. */
+function whole(arity) {
+    return numbers(arity, 'integer')
+}
+
+function arrayOf(shape) {
+    return {type: 'array', items: shape}
+}
+
+/**
+ * The payload each tag carries, as the JSON schema that refuses everything else.
+ *
+ * One table, three printers: the `taggedValue` branches of `godot-tool.json`, the request half of
+ * `value.schema.json`, and the arity the router's own check reads. The three used to be written
+ * out by hand in three languages, and the schema's half said only "a value" — which is what left
+ * `tool_repair.rs` a live layer, rewriting payloads a closed grammar would never have let a
+ * sampler write.
+ *
+ * `ref` is how a tagged value refers to itself, which differs by target: `Array` and `Dictionary`
+ * hold tagged values, and nothing else here recurses.
+ *
+ * A vector of whole numbers takes JSON integers, which is what the frozen protocol corpus has
+ * always said: `protocol/fixtures/v2/invalid/value-vector2i-float.json` is a Vector2i with a 2.5
+ * in it.
+ */
+export function tagPayloads(ref) {
+    const tagged = {$ref: ref}
+    const pair = {
+        type: 'object',
+        properties: {key: tagged, value: tagged},
+        required: ['key', 'value'],
+        additionalProperties: false
+    }
+    return {
+        Nil: {type: 'null'},
+        bool: {type: 'boolean'},
+        int: {type: 'integer'},
+        float: {type: 'number'},
+        String: {type: 'string'},
+        StringName: {type: 'string'},
+        NodePath: {type: 'string'},
+        Vector2: numbers(2),
+        Vector2i: whole(2),
+        Vector3: numbers(3),
+        Vector3i: whole(3),
+        Vector4: numbers(4),
+        Vector4i: whole(4),
+        Quaternion: numbers(4),
+        Plane: numbers(4),
+        Rect2: numbers(4),
+        Rect2i: whole(4),
+        AABB: numbers(6),
+        Transform2D: numbers(6),
+        Basis: numbers(9),
+        Transform3D: numbers(12),
+        Projection: numbers(16),
+        // Four numbers, or a word the engine reads as one: `Color.from_string` takes "skyblue" and
+        // "#8b5a2b" alike, and a live turn wrote "red" here and was told a colour is four numbers.
+        Color: {oneOf: [numbers(4), {type: 'string'}]},
+        Array: arrayOf(tagged),
+        Dictionary: arrayOf(pair),
+        PackedByteArray: arrayOf({type: 'integer'}),
+        PackedInt32Array: arrayOf({type: 'integer'}),
+        PackedInt64Array: arrayOf({type: 'integer'}),
+        PackedFloat32Array: arrayOf({type: 'number'}),
+        PackedFloat64Array: arrayOf({type: 'number'}),
+        PackedStringArray: arrayOf({type: 'string'}),
+        PackedVector2Array: arrayOf(numbers(2)),
+        PackedVector3Array: arrayOf(numbers(3)),
+        PackedVector4Array: arrayOf(numbers(4)),
+        PackedColorArray: arrayOf(numbers(4)),
+        Resource: {
+            type: 'object',
+            properties: {path: {type: 'string', minLength: 1}},
+            required: ['path'],
+            additionalProperties: false
+        }
+    }
+}
+
+/**
+ * What only an answer carries, kept out of every request-side printer.
+ *
+ * `node`, `object` and `opaque` describe something live that no payload can rebuild, so nothing
+ * may write one; a `Resource` comes back naming its class and its UID, which a caller sending one
+ * has no way to know and `Protocol.decode` never reads.
+ */
+export const ANSWER_ONLY = {
+    tags: {
+        node: {
+            type: 'object',
+            required: ['path', 'nodeType'],
+            properties: {
+                path: {type: 'string', minLength: 1},
+                nodeType: {type: 'string', minLength: 1},
+                instanceId: {type: 'integer'}
+            },
+            additionalProperties: true
+        },
+        object: {
+            type: 'object',
+            required: ['className', 'instanceId'],
+            properties: {
+                className: {type: 'string', minLength: 1},
+                instanceId: {type: 'integer'}
+            },
+            additionalProperties: true
+        },
+        opaque: {
+            type: 'object',
+            required: ['typeName', 'text'],
+            properties: {typeName: {type: 'string', minLength: 1}, text: {type: 'string'}},
+            additionalProperties: true
+        }
+    },
+    resource: {
+        type: 'object',
+        required: ['path', 'resourceType'],
+        properties: {
+            path: {type: 'string', minLength: 1},
+            resourceType: {type: 'string', minLength: 1},
+            uid: {type: 'string', minLength: 1}
+        },
+        additionalProperties: true
+    }
+}
+
 /**
  * The words one vocabulary stands for, out of the engine's own lists.
  *
- * `keys` and `monitors` are lists of this file verbatim. `valueTags` is the one derived list: the
- * `type_string` spelling of every Variant type minus [`UNDECODABLE_TAGS`], plus `Resource` for the
- * `{path}` payload the wire has always carried and the Variant enum has no name for.
+ * `keys`, `monitors`, `mouseButtons`, `joyButtons` and `joyAxes` are lists of this file verbatim.
+ * `valueTags` is the one derived list: the `type_string` spelling of every Variant type minus
+ * [`UNDECODABLE_TAGS`], plus `Resource` for the `{path}` payload the wire has always carried and
+ * the Variant enum has no name for.
  */
 export function engineWords(vocabulary, engine, where) {
     if (engine === 'keys') return vocabulary.keys
     if (engine === 'monitors') return vocabulary.monitors
+    if (engine === 'mouseButtons') return vocabulary.mouseButtons
+    if (engine === 'joyButtons') return vocabulary.joyButtons
+    if (engine === 'joyAxes') return vocabulary.joyAxes
     if (engine === 'valueTags')
         return [
             ...vocabulary.variantTypes
@@ -204,23 +340,5 @@ export function availableGodotBinary() {
         return resolveGodotBinary()
     } catch {
         return undefined
-    }
-}
-
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-    const flag = process.argv.indexOf('--out')
-    const out = flag === -1 ? join(root, VOCABULARY_PATH) : resolve(process.argv[flag + 1])
-    const binary = flag === -1 ? availableGodotBinary() : resolveGodotBinary()
-    if (!binary) {
-        process.stdout.write(
-            `scripts/godot-vocabulary.mjs: no pinned Godot on this machine, so ${VOCABULARY_PATH} stays as committed\n`
-        )
-    } else {
-        const written = serializeVocabulary(await buildVocabulary(binary))
-        const before = await readFile(out, 'utf8').catch(() => '')
-        if (before !== written) await writeFile(out, written)
-        process.stdout.write(
-            `scripts/godot-vocabulary.mjs: ${before === written ? 'unchanged' : 'rewrote'} ${out}\n`
-        )
     }
 }

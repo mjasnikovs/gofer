@@ -672,17 +672,20 @@ fn a_file_the_importer_cannot_read_is_refused_rather_than_waited_out() {
     let sidecar_before = sidecar.exists();
 
     let started = std::time::Instant::now();
-    let refusal =
-        match session.try_call("resource.rescan", json!({"path": "res://broken.png"}), None) {
-            Err(refusal) => refusal,
-            Ok(answer) => panic!(
-                "a file the importer cannot read has no successful rescan: {answer}\n\
+    let refusal = match session.try_call(
+        "resource.rescan",
+        json!({"paths": ["res://broken.png"]}),
+        None,
+    ) {
+        Err(refusal) => refusal,
+        Ok(answer) => panic!(
+            "a file the importer cannot read has no successful rescan: {answer}\n\
              broken.png on disk: {}\nbroken.png.import before the rescan: {sidecar_before}\n\
              broken.png.import after it: {}",
-                worktree.join("broken.png").exists(),
-                sidecar.exists(),
-            ),
-        };
+            worktree.join("broken.png").exists(),
+            sidecar.exists(),
+        ),
+    };
 
     assert!(
         refusal.starts_with("import_failed"),
@@ -723,7 +726,7 @@ fn the_addon_builds_a_tile_level_from_an_atlas() {
         json!({
             "path": "res://tiles/world.tres",
             "texture": "res://tiles.png",
-            "tileSize": 16,
+            "tileWidth": 16, "tileHeight": 16,
             "solid": [[0, 0], [1, 0], [4, 0], [5, 0]]
         }),
     );
@@ -907,11 +910,11 @@ fn the_addon_imports_an_asset_that_arrives_after_startup() {
     let session = Session::start_on_worktree(worktree.clone(), ledger, Some(directory));
 
     std::fs::write(worktree.join("named.png"), ATLAS).expect("write the named atlas");
-    session.call("resource.rescan", json!({"path": "res://named.png"}));
+    session.call("resource.rescan", json!({"paths": ["res://named.png"]}));
     let named = session
         .try_call(
             "resource.create_tileset",
-            json!({"path": "res://named.tres", "texture": "res://named.png", "tileSize": 16}),
+            json!({"path": "res://named.tres", "texture": "res://named.png", "tileWidth": 16, "tileHeight": 16}),
             None,
         )
         .expect("a named rescan must leave the asset loadable");
@@ -922,17 +925,17 @@ fn the_addon_imports_an_asset_that_arrives_after_startup() {
     let swept = session
         .try_call(
             "resource.create_tileset",
-            json!({"path": "res://swept.tres", "texture": "res://swept.png", "tileSize": 16}),
+            json!({"path": "res://swept.tres", "texture": "res://swept.png", "tileWidth": 16, "tileHeight": 16}),
             None,
         )
         .expect("a project rescan must not answer before its own scan has landed");
     assert_eq!(swept["grid"], json!([8, 2]), "{swept}");
 
     std::fs::write(worktree.join("named.png"), NARROW).expect("redraw the named atlas");
-    session.call("resource.rescan", json!({"path": "res://named.png"}));
+    session.call("resource.rescan", json!({"paths": ["res://named.png"]}));
     let redrawn = session.call(
         "resource.create_tileset",
-        json!({"path": "res://redrawn.tres", "texture": "res://named.png", "tileSize": 16}),
+        json!({"path": "res://redrawn.tres", "texture": "res://named.png", "tileWidth": 16, "tileHeight": 16}),
     );
     assert_eq!(
         redrawn["grid"],
@@ -941,10 +944,10 @@ fn the_addon_imports_an_asset_that_arrives_after_startup() {
     );
 
     std::fs::remove_file(worktree.join("swept.png")).expect("delete the swept atlas");
-    session.call("resource.rescan", json!({"path": "res://swept.png"}));
+    session.call("resource.rescan", json!({"paths": ["res://swept.png"]}));
     let vanished = session.error(
         "resource.create_tileset",
-        json!({"path": "res://vanished.tres", "texture": "res://swept.png", "tileSize": 16}),
+        json!({"path": "res://vanished.tres", "texture": "res://swept.png", "tileWidth": 16, "tileHeight": 16}),
         None,
     );
     assert!(
@@ -954,7 +957,7 @@ fn the_addon_imports_an_asset_that_arrives_after_startup() {
 
     let missing = session.error(
         "resource.create_tileset",
-        json!({"path": "res://absent.tres", "texture": "res://absent.png", "tileSize": 16}),
+        json!({"path": "res://absent.tres", "texture": "res://absent.png", "tileWidth": 16, "tileHeight": 16}),
         None,
     );
     assert!(
@@ -1972,7 +1975,7 @@ fn the_addon_imports_every_asset_of_a_batch_rescan() {
     let assets = worktree.join("assets");
     std::fs::create_dir_all(&assets).expect("create the assets directory");
     std::fs::write(assets.join("gen.py"), "# generator\n").expect("write the generator");
-    session.call("resource.rescan", json!({"path": "res://assets/gen.py"}));
+    session.call("resource.rescan", json!({"paths": ["res://assets/gen.py"]}));
 
     for name in names {
         std::fs::write(assets.join(format!("{name}.png")), ATLAS).expect("write the atlas");
@@ -1987,7 +1990,7 @@ fn the_addon_imports_every_asset_of_a_batch_rescan() {
                     .call(
                         CallRequest::new(
                             "resource.rescan",
-                            json!({"path": format!("res://assets/{name}.png")}),
+                            json!({"paths": [format!("res://assets/{name}.png")]}),
                         )
                         .within(Some(60_000)),
                     )
@@ -2005,7 +2008,7 @@ fn the_addon_imports_every_asset_of_a_batch_rescan() {
     }
     let batched = session.call(
         "resource.rescan",
-        json!({"path": listed.iter().map(|name| format!("res://assets/{name}.png"))
+        json!({"paths": listed.iter().map(|name| format!("res://assets/{name}.png"))
             .collect::<Vec<String>>()}),
     );
     assert_eq!(batched["scanned"], true, "{batched}");
@@ -2028,7 +2031,7 @@ fn assert_cuttable(session: &Session, names: &[String], sent: &str) {
                     json!({
                         "path": format!("res://assets/{name}.tres"),
                         "texture": format!("res://assets/{name}.png"),
-                        "tileSize": 16
+                        "tileWidth": 16, "tileHeight": 16
                     }),
                     None,
                 )
@@ -2073,7 +2076,7 @@ fn a_rescan_that_lands_during_an_import_still_imports_its_file() {
             rpc.call(
                 CallRequest::new(
                     "resource.rescan".to_owned(),
-                    json!({"path": "res://first.png"}),
+                    json!({"paths": ["res://first.png"]}),
                 )
                 .within(Some(60_000)),
             )
@@ -2084,7 +2087,7 @@ fn a_rescan_that_lands_during_an_import_still_imports_its_file() {
             rpc.call(
                 CallRequest::new(
                     "resource.rescan".to_owned(),
-                    json!({"path": "res://second.png"}),
+                    json!({"paths": ["res://second.png"]}),
                 )
                 .within(Some(60_000)),
             )
@@ -2094,7 +2097,7 @@ fn a_rescan_that_lands_during_an_import_still_imports_its_file() {
 
     let cut = session.try_call(
         "resource.create_tileset",
-        json!({"path": "res://second.tres", "texture": "res://second.png", "tileSize": 16}),
+        json!({"path": "res://second.tres", "texture": "res://second.png", "tileWidth": 16, "tileHeight": 16}),
         None,
     );
     assert!(
@@ -2141,7 +2144,7 @@ fn a_parked_project_walk_waits_for_its_own_scan() {
             rpc.call(
                 CallRequest::new(
                     "resource.rescan".to_owned(),
-                    json!({"path": "res://beside.png"}),
+                    json!({"paths": ["res://beside.png"]}),
                 )
                 .within(Some(60_000)),
             )
@@ -2157,7 +2160,7 @@ fn a_parked_project_walk_waits_for_its_own_scan() {
                     json!({
                         "path": format!("res://art/tile_{index}.tres"),
                         "texture": format!("res://art/tile_{index}.png"),
-                        "tileSize": 16
+                        "tileWidth": 16, "tileHeight": 16
                     }),
                     None,
                 )

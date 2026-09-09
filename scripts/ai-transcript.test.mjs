@@ -105,7 +105,14 @@ const fullCall = id => ({
             type: 'toolCall',
             id,
             name: 'godot',
-            arguments: {ops: [{op: 'node.set_property', node: 'Player', name: 'speed', value: 3}]}
+            arguments: {
+                ops: [
+                    {
+                        op: 'node.set_properties',
+                        properties: [{node: 'Player', name: 'speed', value: 3}]
+                    }
+                ]
+            }
         }
     ]
 })
@@ -113,7 +120,7 @@ const failed = id => ({
     role: 'toolResult',
     toolCallId: id,
     isError: true,
-    content: [{type: 'text', text: 'missing_param: node.set_property requires `node`.'}]
+    content: [{type: 'text', text: 'missing_param: node.set_properties requires `properties`.'}]
 })
 const succeeded = id => ({role: 'toolResult', toolCallId: id, isError: false, content: []})
 const refusedForAnotherReason = id => ({

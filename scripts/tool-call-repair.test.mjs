@@ -36,11 +36,22 @@ const catalog = [
     }
 ]
 
-test('a call the router repairs reaches it as the model wrote it', async () => {
+/**
+ * The raw form of every recorded repair is one the committed schema refuses, and the worker leaves
+ * it exactly as the model wrote it.
+ *
+ * All nine wrote a tagged value wrapped in a second copy of its own tag. A repairing table in Rust
+ * used to unwrap them behind the schema; the schema's `taggedValue` branches close the payload, so
+ * the refusal now happens before any of it runs and there is nothing left to leave it alone for.
+ * The far end — that the `repaired` form is a call the router accepts — is asserted in
+ * `src-tauri/src/tool_check.rs`.
+ */
+test('the raw form of a recorded repair is refused by the schema, not rewritten', async () => {
     const recorded = JSON.parse(
         await readFile(new URL('../fixtures/recorded-tool-calls.json', import.meta.url), 'utf8')
     )
     const domains = await declaredDomains()
+    const [godot] = createGodotTools(domains, {call: async () => ({})})
     assert.ok(recorded.repairs.length > 5, 'the fixture lost its repairs')
     for (const repair of recorded.repairs) {
         const domain = domains.find(candidate => candidate.name === repair.tool)
@@ -49,6 +60,17 @@ test('a call the router repairs reaches it as the model wrote it', async () => {
             sortedKeys(normalizeToolCalls(domain.operations, {ops: repair.ops}).ops),
             sortedKeys(repair.ops),
             `${repair.tool} ${JSON.stringify(repair.ops).slice(0, 120)}`
+        )
+        const dottedOps = repair.ops.map(one => ({...one, op: dotted(repair.tool, one.op)}))
+        assert.ok(
+            !schemaAccepts(godot, {ops: dottedOps}),
+            `${repair.tool}: the schema admits this again, so nothing refuses it`
+        )
+        assert.ok(
+            schemaAccepts(godot, {
+                ops: repair.repaired.map(one => ({...one, op: dotted(repair.tool, one.op)}))
+            }),
+            `${repair.tool}: the corrected call is one the schema refuses`
         )
     }
 })
@@ -74,8 +96,6 @@ function somethingOf(kind, param) {
             return {type: 'int', value: 1}
         case 'choice':
             return param.of?.[0] ?? 'a'
-        case 'either':
-            return somethingOf(param.of?.[0]?.kind ?? 'text', param.of?.[0] ?? {})
         default:
             return 'a'
     }
@@ -100,13 +120,9 @@ function theLeastEntry(operation) {
  * The line between the two engines is the schema's, and this computes it rather than reading it.
  *
  * The agent loop validates a call against the generated schema between `prepareArguments` and the
- * router, with this very function. A shape the schema refuses never reaches `tool_repair.rs`, so
- * only the worker can answer it. A shape it accepts is the router's, and a second copy of that
- * repair here is drift waiting to happen — which is exactly how a fix for the double-wrapped tag
- * came to exist only in JavaScript while both suites stayed green.
- *
- * Four rows were `both` when this was written. Every one of them was a pass in this file
- * reimplementing a repair the router already owned, and deleting it is what made them `router`.
+ * router, with this very function. Nothing behind that schema repairs anything any more, so every
+ * row is one the schema refuses, and which engine owns it is decided by one question: whether the
+ * worker's pass turns it into a call the schema accepts.
  */
 test("the line between the two engines is the schema's, not a column in the fixture", async () => {
     const fixture = JSON.parse(
@@ -116,31 +132,16 @@ test("the line between the two engines is the schema's, not a column in the fixt
     const [godot] = createGodotTools(domains, {call: async () => ({})})
     assert.ok(fixture.repairs.length > 10, 'the corpus lost its repairs')
     for (const row of fixture.repairs) {
-        const accepted = schemaAccepts(godot, asOneCall(row))
-        if (accepted) {
-            assert.notEqual(
-                row.repairedBy,
-                'worker',
-                `${row.why}: the schema lets this reach the router, so the router has to own it`
-            )
-            assert.notEqual(
-                row.repairedBy,
-                'both',
-                `${row.why}: the router already repairs this, so the worker's copy is drift`
-            )
-            continue
-        }
-        assert.notEqual(
-            row.repairedBy,
-            'router',
-            `${row.why}: the schema refuses this, so the router never sees it to repair it`
-        )
-        continue
-    }
-    for (const row of fixture.repairs.filter(one => one.repairedBy === 'schema')) {
         assert.ok(
             !schemaAccepts(godot, asOneCall(row)),
-            `${row.why}: the schema admits this again, so the router has to own it once more`
+            `${row.why}: the schema admits this, and nothing behind the schema repairs anything`
+        )
+        const repaired = godot.prepareArguments(asOneCall(row))
+        const answered = schemaAccepts(godot, repaired)
+        assert.equal(
+            row.repairedBy,
+            answered ? 'worker' : 'schema',
+            `${row.why}: the worker ${answered ? 'answers' : 'leaves'} this`
         )
     }
 })
@@ -250,10 +251,10 @@ test('a parameter belonging to a sibling operation is refused by name', async ()
     assert.throws(
         () =>
             normalizeToolCalls(node.operations, {
-                ops: [{op: 'create', parent: '/Main', type: 'Node2D', nodes: ['Player']}]
+                ops: [{op: 'rename', node: '/Main/Old', name: 'New', nodes: ['Player']}]
             }),
         error => {
-            assert.match(error.message, /create has no `nodes` parameter/u)
+            assert.match(error.message, /rename has no `nodes` parameter/u)
             assert.match(error.message, /is a parameter of create_nodes/u)
             return true
         }
@@ -422,14 +423,18 @@ test('the same repair reaches a tagged value that is not inside a list', async (
     const repaired = normalizeToolCalls(node.operations, {
         ops: [
             {
-                op: 'set_property',
-                node: '/Main/Player',
-                property: 'script',
-                value: {type: 'Resource', path: 'res://scripts/player.gd'}
+                op: 'set_properties',
+                properties: [
+                    {
+                        node: '/Main/Player',
+                        property: 'script',
+                        value: {type: 'Resource', path: 'res://scripts/player.gd'}
+                    }
+                ]
             }
         ]
     })
-    assert.deepEqual(repaired.ops[0].value, {
+    assert.deepEqual(repaired.ops[0].properties[0].value, {
         type: 'Resource',
         value: {path: 'res://scripts/player.gd'}
     })
@@ -440,9 +445,14 @@ test('a resource tag carrying more than a path is left for the router to refuse'
     const node = domains.find(domain => domain.name === 'godot_node')
     const written = {type: 'Resource', path: 'res://a.tres', subresource: 'Shape'}
     const repaired = normalizeToolCalls(node.operations, {
-        ops: [{op: 'set_property', node: '/A', property: 'shape', value: written}]
+        ops: [
+            {
+                op: 'set_properties',
+                properties: [{node: '/A', property: 'shape', value: written}]
+            }
+        ]
     })
-    assert.deepEqual(repaired.ops[0].value, written)
+    assert.deepEqual(repaired.ops[0].properties[0].value, written)
 })
 
 test('the wrapper a model got wrong is repaired rather than refused', () => {
@@ -683,20 +693,31 @@ test('a tagged value whose keys wear quotation marks is read without them', asyn
         normalizeToolCalls(node, {
             ops: [
                 {
-                    op: 'set_property',
-                    node: '/HUD',
-                    property: 'script',
-                    value: {'"type"': 'Resource', value: {'"path"': 'res://scripts/hud.gd'}}
+                    op: 'set_properties',
+                    properties: [
+                        {
+                            node: '/HUD',
+                            property: 'script',
+                            value: {
+                                '"type"': 'Resource',
+                                value: {'"path"': 'res://scripts/hud.gd'}
+                            }
+                        }
+                    ]
                 }
             ]
         }),
         {
             ops: [
                 {
-                    op: 'set_property',
-                    node: '/HUD',
-                    property: 'script',
-                    value: {type: 'Resource', value: {path: 'res://scripts/hud.gd'}}
+                    op: 'set_properties',
+                    properties: [
+                        {
+                            node: '/HUD',
+                            property: 'script',
+                            value: {type: 'Resource', value: {path: 'res://scripts/hud.gd'}}
+                        }
+                    ]
                 }
             ]
         }
@@ -730,21 +751,31 @@ test('a tagged value whose keys wear quotation marks is read without them', asyn
     )
 
     const dictionary = {
-        op: 'set_property',
-        node: '/A',
-        property: 'metadata',
-        value: {
-            type: 'Dictionary',
-            value: [{key: {type: 'String', value: '"quoted"'}, value: {type: 'int', value: 1}}]
-        }
+        op: 'set_properties',
+        properties: [
+            {
+                node: '/A',
+                property: 'metadata',
+                value: {
+                    type: 'Dictionary',
+                    value: [
+                        {key: {type: 'String', value: '"quoted"'}, value: {type: 'int', value: 1}}
+                    ]
+                }
+            }
+        ]
     }
     assert.deepEqual(normalizeToolCalls(node, {ops: [dictionary]}), {ops: [dictionary]})
 
     const both = {
-        op: 'set_property',
-        node: '/A',
-        property: 'script',
-        value: {'"type"': 'Resource', type: 'texture', value: {path: 'res://a.png'}}
+        op: 'set_properties',
+        properties: [
+            {
+                node: '/A',
+                property: 'script',
+                value: {'"type"': 'Resource', type: 'texture', value: {path: 'res://a.png'}}
+            }
+        ]
     }
     assert.deepEqual(normalizeToolCalls(node, {ops: [both]}), {ops: [both]})
 })
@@ -819,12 +850,11 @@ test('a parameter named with whitespace around it is named without it', async ()
         type: 'Dictionary',
         value: [{key: {type: 'String', value: 'node '}, value: {type: 'int', value: 1}}]
     }
-    assert.deepEqual(
-        normalizeToolCalls(node, {
-            ops: [{op: 'set_property', node: '/P', property: 'meta', value: padded}]
-        }),
-        {ops: [{op: 'set_property', node: '/P', property: 'meta', value: padded}]}
-    )
+    const meta = {
+        op: 'set_properties',
+        properties: [{node: '/P', property: 'meta', value: padded}]
+    }
+    assert.deepEqual(normalizeToolCalls(node, {ops: [meta]}), {ops: [meta]})
 })
 
 test('a call is a list, and a bare operation is a list of one', async () => {
@@ -949,13 +979,26 @@ test('an entry written as an operation name, and one written as its own list ent
 })
 
 /**
- * A torn key that swallowed its own value is the router's, and the corpus proves it is left alone.
+ * A list written as the JSON text of itself, at either level: the `ops` array, or one parameter
+ * inside an entry.
  *
- * This file used to split it too. The schema accepts a key no operation declares, so the call
- * reaches `tool_repair.rs` with the tear intact and the router repairs it there; a second
- * implementation here was a repair that could only drift. The four corpus rows it answered say
- * `router` now, and `the line between the two engines is the schema's` refuses a fifth.
+ * `ops` as a string is the shape `scripts/bench/repeats.mjs` names first — a provider that
+ * stringifies a nested array leaves the whole call unreadable, and no entry schema can answer it
+ * because nothing has parsed an entry yet.
  */
+test('an ops list written as the text of itself is read as the list', async () => {
+    const domains = await declaredDomains()
+    const [godot] = createGodotTools(domains, {call: async () => ({})})
+    // The parsed list is still the input to every pass below it, not a shortcut past them.
+    assert.deepEqual(godot.prepareArguments({ops: '[{"operation": "session.status"}]'}), {
+        ops: [{op: 'session.status'}]
+    })
+    // Text that parses into anything but a list is not read as one.
+    assert.notDeepEqual(godot.prepareArguments({ops: '{"op": "session.status"}'}), {
+        ops: [{op: 'session.status'}]
+    })
+})
+
 test('a list written as the text of itself is read as the list', () => {
     const resource = [
         {
@@ -1027,13 +1070,13 @@ test('a list written as text inside a declared entry is read there too', () => {
     )
 })
 
-test('a list written as text is read under listOf and under either', () => {
+test('a list written as text is read under list and under listOf', () => {
     const wider = [
         {
-            op: 'create_texture',
+            op: 'create_shape',
             params: [
                 {name: 'path', kind: 'text'},
-                {name: 'size', kind: 'either', of: [{kind: 'number'}, {kind: 'list'}]}
+                {name: 'size', kind: 'list'}
             ]
         },
         {
@@ -1045,8 +1088,8 @@ test('a list written as text is read under listOf and under either', () => {
         }
     ]
     assert.deepEqual(
-        normalizeToolCalls(wider, {ops: [{op: 'create_texture', path: 'a.png', size: '[16, 24]'}]}),
-        {ops: [{op: 'create_texture', path: 'a.png', size: [16, 24]}]}
+        normalizeToolCalls(wider, {ops: [{op: 'create_shape', path: 'a.tres', size: '[16, 24]'}]}),
+        {ops: [{op: 'create_shape', path: 'a.tres', size: [16, 24]}]}
     )
     assert.deepEqual(
         normalizeToolCalls(wider, {
@@ -1055,8 +1098,8 @@ test('a list written as text is read under listOf and under either', () => {
         {ops: [{op: 'inspect', node: '/Main', properties: ['text', 'position']}]}
     )
     assert.deepEqual(
-        normalizeToolCalls(wider, {ops: [{op: 'create_texture', path: 'a.png', size: 16}]}),
-        {ops: [{op: 'create_texture', path: 'a.png', size: 16}]}
+        normalizeToolCalls(wider, {ops: [{op: 'create_shape', path: 'a.tres', size: 16}]}),
+        {ops: [{op: 'create_shape', path: 'a.tres', size: 16}]}
     )
 })
 
@@ -1066,26 +1109,34 @@ test('an operation written as the key of its own parameters is read as the opera
     assert.deepEqual(
         normalizeToolCalls(node, {
             ops: [
-                {create: {name: 'HUD', parent: '/Main', type: 'CanvasLayer'}},
-                {create: {name: 'ScoreLabel', parent: '/Main/HUD', type: 'Label'}},
+                {create_nodes: {nodes: [{name: 'HUD', parent: '/Main', type: 'CanvasLayer'}]}},
+                {rename: {node: '/Main/HUD/Old', name: 'ScoreLabel'}},
                 {
-                    set_property: {
-                        node: '/Main/HUD',
-                        property: 'script',
-                        value: {type: 'Resource', value: {path: 'res://scripts/hud.gd'}}
+                    set_properties: {
+                        properties: [
+                            {
+                                node: '/Main/HUD',
+                                property: 'script',
+                                value: {type: 'Resource', value: {path: 'res://scripts/hud.gd'}}
+                            }
+                        ]
                     }
                 }
             ]
         }),
         {
             ops: [
-                {op: 'create', name: 'HUD', parent: '/Main', type: 'CanvasLayer'},
-                {op: 'create', name: 'ScoreLabel', parent: '/Main/HUD', type: 'Label'},
+                {op: 'create_nodes', nodes: [{name: 'HUD', parent: '/Main', type: 'CanvasLayer'}]},
+                {op: 'rename', node: '/Main/HUD/Old', name: 'ScoreLabel'},
                 {
-                    op: 'set_property',
-                    node: '/Main/HUD',
-                    property: 'script',
-                    value: {type: 'Resource', value: {path: 'res://scripts/hud.gd'}}
+                    op: 'set_properties',
+                    properties: [
+                        {
+                            node: '/Main/HUD',
+                            property: 'script',
+                            value: {type: 'Resource', value: {path: 'res://scripts/hud.gd'}}
+                        }
+                    ]
                 }
             ]
         }
@@ -1202,16 +1253,17 @@ test('the operation the key names survives whatever the object it wraps holds', 
     const domains = await declaredDomains()
     const node = domains.find(domain => domain.name === 'godot_node').operations
 
-    assert.deepEqual(normalizeToolCalls(node, {ops: [{create: {op: 7, parent: '/Main'}}]}), {
-        ops: [{op: 'create', parent: '/Main'}]
+    assert.deepEqual(normalizeToolCalls(node, {ops: [{create_nodes: {op: 7, nodes: []}}]}), {
+        ops: [{op: 'create_nodes', nodes: []}]
     })
     assert.throws(
-        () => normalizeToolCalls(node, {ops: [{create: {op: 'rename', parent: '/Main'}}]}),
-        /`create` is an operation of this tool/su
+        () => normalizeToolCalls(node, {ops: [{create_nodes: {op: 'rename', nodes: []}}]}),
+        /`create_nodes` is an operation of this tool/su
     )
-    assert.deepEqual(normalizeToolCalls(node, {ops: [{create: {op: 'create', parent: '/Main'}}]}), {
-        ops: [{op: 'create', parent: '/Main'}]
-    })
+    assert.deepEqual(
+        normalizeToolCalls(node, {ops: [{create_nodes: {op: 'create_nodes', nodes: []}}]}),
+        {ops: [{op: 'create_nodes', nodes: []}]}
+    )
 })
 
 test('every repair in the shared corpus is made by the engine that owns it', async () => {
@@ -1229,14 +1281,14 @@ test('every repair in the shared corpus is made by the engine that owns it', asy
             `${row.tool} has no ${row.op} operation`
         )
         assert.ok(
-            ['both', 'router', 'schema', 'worker'].includes(row.repairedBy),
+            ['schema', 'worker'].includes(row.repairedBy),
             `${row.why}: ${row.repairedBy} is not an engine`
         )
         const {op, ...ran} = normalizeToolCalls(operations, {
             ops: [{op: row.op, ...row.wrote}]
         }).ops[0]
         assert.equal(op, row.op, row.why)
-        const wanted = ['router', 'schema'].includes(row.repairedBy) ? row.wrote : row.becomes
+        const wanted = row.repairedBy === 'schema' ? row.wrote : row.becomes
         assert.deepEqual(ran, wanted, `${row.tool} ${row.op}: ${row.why}`)
     }
 })

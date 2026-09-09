@@ -1,10 +1,18 @@
+import {tagPayloads} from './godot-vocabulary.mjs'
+
 export function signatureOf(operation) {
     return operation.signature ? ` ${operation.signature}` : ''
 }
 
-const TAGGED_PAYLOAD =
-    'The payload is the bare value itself: a string, a number, an array of numbers, or {path} for'
-    + ' a resource. Never a second {type, value} pair around it.'
+/**
+ * Where the 36 tag branches live, once, for every tagged parameter to point at.
+ *
+ * llama.cpp constrains a `$ref` into the tool's own `$defs` — `scripts/bench/ref-probe.mjs` asked
+ * for a Vector2 payload written as a string under one and the sampler could not write it — and so
+ * do pi-ai's TypeBox validator and ajv. So the branches are named once rather than copied into
+ * every tagged parameter, which is what closing them by inlining would have cost.
+ */
+export const TAGGED_VALUE_REF = '#/$defs/taggedValue'
 
 /** The words a parameter accepts, when it names a vocabulary and its kind is one a word fits. */
 function wordsOf(kind) {
@@ -33,19 +41,8 @@ export function jsonSchemaOfKind(kind) {
             return {type: 'string', pattern: '^[0-9a-f]{64}$'}
         case 'choice':
             return {type: 'string', enum: kind.of ?? []}
-        case 'tagged': {
-            const words = wordsOf(kind)
-            return {
-                type: 'object',
-                properties: {
-                    type: words ? {type: 'string', enum: words} : {type: 'string'},
-                    value: {description: TAGGED_PAYLOAD}
-                },
-                required: ['type', 'value']
-            }
-        }
-        case 'either':
-            return {anyOf: (kind.of ?? []).map(jsonSchemaOfKind)}
+        case 'tagged':
+            return {$ref: TAGGED_VALUE_REF}
         case 'listOf':
             return {type: 'array', items: jsonSchemaOfKind(kind.of ?? {kind: 'text'})}
         default:
@@ -60,6 +57,8 @@ export function jsonSchemaOfParam(param) {
     const inside = Array.isArray(param.entry) && param.entry.length > 0
     if (inside && param.kind === 'list') schema.items = jsonSchemaOfParams(param.entry)
     if (inside && param.kind === 'object') Object.assign(schema, jsonSchemaOfParams(param.entry))
+    if ('minItems' in param) schema.minItems = param.minItems
+    if ('default' in param) schema.default = param.default
     return param.note ? {...schema, description: param.note} : schema
 }
 
@@ -107,8 +106,6 @@ function short(kind) {
         // "choice" would name the declaration rather than what goes in the call.
         case 'choice':
             return 'text'
-        case 'either':
-            return 'either'
         default:
             return kind.kind
     }
@@ -127,17 +124,58 @@ export function signatureFrom(params) {
     if (visible.length === 0) return ''
     const names = visible.map(param => {
         const mark = param.required ? '' : '?'
+        // A choice out of a vocabulary prints as text: the words are the engine's, the schema
+        // carries all of them, and a signature reciting one list of twenty-two is what the
+        // measured arm that names no member beat.
         if (param.kind === 'choice')
-            return `${param.name}${mark}: ${(param.of ?? []).map(word => `"${word}"`).join('|')}`
+            return wordsOf(param) ?
+                    `${param.name}${mark}: text`
+                :   `${param.name}${mark}: ${(param.of ?? []).map(word => `"${word}"`).join('|')}`
         if (Array.isArray(param.entry) && param.entry.length > 0)
             return param.kind === 'object' ?
                     `${param.name}${mark}: ${signatureFrom(param.entry)}`
                 :   `${param.name}${mark}: ${short(param)} of ${signatureFrom(param.entry)}`
-        if (param.kind === 'either')
-            return `${param.name}${mark}: ${(param.of ?? []).map(short).join('|')}`
         if (param.kind === 'listOf')
             return `${param.name}${mark}: list of ${short(param.of ?? {kind: 'text'})}`
         return `${param.name}${mark}: ${short(param)}`
     })
     return `{${names.join(', ')}}`
+}
+
+/** Every tagged parameter of every operation, however deep its entry list goes. */
+function taggedParams(params) {
+    return (params ?? []).flatMap(param =>
+        param.kind === 'tagged' ? [param] : taggedParams(param.entry)
+    )
+}
+
+/**
+ * The `$defs` block the tagged parameters point at, or nothing when no operation takes one.
+ *
+ * One branch per tag, each pinning its own payload, so a payload the tag cannot carry is refused
+ * by the grammar the sampler is constrained by rather than by a sentence three layers later.
+ */
+export function taggedValueDefs(operations) {
+    const spoken = operations.flatMap(operation => taggedParams(operation.params))
+    if (spoken.length === 0) return undefined
+    const words = spoken.map(param => (wordsOf(param) ?? []).join(','))
+    if (new Set(words).size > 1)
+        throw new Error(
+            'the tagged parameters speak more than one vocabulary, so they cannot share one $defs'
+        )
+    const payloads = tagPayloads(TAGGED_VALUE_REF)
+    return {
+        taggedValue: {
+            oneOf: (wordsOf(spoken[0]) ?? []).map(tag => {
+                const payload = payloads[tag]
+                if (!payload) throw new Error(`the tag ${tag} has no payload shape`)
+                return {
+                    type: 'object',
+                    properties: {type: {const: tag}, value: payload},
+                    required: ['type', 'value'],
+                    additionalProperties: false
+                }
+            })
+        }
+    }
 }

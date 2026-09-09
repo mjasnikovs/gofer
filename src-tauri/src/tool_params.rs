@@ -54,8 +54,6 @@ pub enum Kind {
     Hash,
     /// A string from a fixed set.
     Choice(&'static [&'static str]),
-    /// Any one of several kinds. `tileSize` is one number or two, `solid` a list or the word "all".
-    Either(&'static [Kind]),
     /// A list whose entries are one scalar kind, where [`Param::entry`] can only say what an
     /// *object* entry holds.
     ///
@@ -65,6 +63,18 @@ pub enum Kind {
     /// `everyMergedNameDeclaresItsShape` refuses outright. So a list of strings had no way to be
     /// declared beside a list of objects at all.
     ListOf(&'static Kind),
+}
+
+/// What a parameter means when the call leaves it out, where the router rather than the handler
+/// decides.
+///
+/// Emitted into the schema as JSON-schema `default` from this same row, so the value the model is
+/// shown and the value the router applies cannot be two different words.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum Fallback {
+    Text(&'static str),
+    Int(i64),
 }
 
 /// One parameter of one operation.
@@ -100,6 +110,9 @@ pub struct Param {
     ///
     /// Empty means the inside is not written down, never that it is free-form.
     pub entry: &'static [Param],
+    /// What this parameter is worth when the call names none. See [`Fallback`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<Fallback>,
 }
 
 pub const fn need(name: &'static str, kind: Kind) -> Param {
@@ -111,6 +124,7 @@ pub const fn need(name: &'static str, kind: Kind) -> Param {
         note: "",
         vocabulary: &[],
         entry: &[],
+        default: None,
     }
 }
 
@@ -123,6 +137,7 @@ pub const fn opt(name: &'static str, kind: Kind) -> Param {
         note: "",
         vocabulary: &[],
         entry: &[],
+        default: None,
     }
 }
 
@@ -136,6 +151,7 @@ pub const fn hidden(name: &'static str, kind: Kind) -> Param {
         note: "",
         vocabulary: &[],
         entry: &[],
+        default: None,
     }
 }
 
@@ -153,6 +169,14 @@ pub const fn shaped(param: Param, entry: &'static [Param]) -> Param {
 pub const fn speaking(param: Param, vocabulary: &'static [&'static str]) -> Param {
     Param {
         vocabulary,
+        ..param
+    }
+}
+
+/// The same parameter, carrying what it is worth when a call names none. See [`Fallback`].
+pub const fn defaulting(param: Param, default: Fallback) -> Param {
+    Param {
+        default: Some(default),
         ..param
     }
 }
@@ -300,38 +324,6 @@ impl Operation {
         self.writes
     }
 
-    /// The values a model wrote in a shape the protocol does not take, rewritten into the one it
-    /// does.
-    ///
-    /// Repair rather than refusal, because the refusal was tried. `{"type": "Vector2", "value":
-    /// {"x": 32, "y": 48}}` is what one live turn wrote thirteen times in a single run; the refusal
-    /// was then taught to print the exact value to send instead, and the next run wrote it four
-    /// more times in a row, each answered with `Send {"type": "Vector2", "value": [32, 48]}` and
-    /// each ignored. A correction a model will not read is one that cannot help it, and the numbers
-    /// were never in doubt.
-    ///
-    /// Only where the order is not a guess — the same table the correction is printed from — and
-    /// only for a parameter the operation declares as a tagged value, so this can never reach a key
-    /// that means something else. Everything it does not recognise is left exactly as it arrived,
-    /// for [`Operation::check`] to refuse by name.
-    ///
-    /// What is left to the worker's `prepareArguments`, a layer above this, is only what this one
-    /// can no longer reach. The agent loop validates a call against the generated schema *between*
-    /// that hook and this function, so the worker owns exactly the shapes the schema refuses
-    /// outright: the `ops` bracket, the `op` naming an entry, the wrapper the parameters were
-    /// parked under, and the whitespace round a parameter's *name* — a nested entry's schema is
-    /// closed and requires its own names, so `{"properties": [{" node": …}]}` is answered by the
-    /// loop before the router is ever called. The whitespace round a parameter's *value* is here,
-    /// in [`trim_a_name`], and so is every other repair of what a value or a key means.
-    ///
-    /// That split is what makes those repairs reach a caller the worker never sees. The acceptance
-    /// suites call `dispatch` directly, the desktop client calls it with no model in front of it,
-    /// and a fix that lives only in the worker reaches neither — which is what a tagged value
-    /// wrapped in a second copy of its own tag did, unwrapped in JavaScript and refused here.
-    pub fn repair(&self, params: &mut Value) {
-        crate::tool_repair::repair_call(self.tool, self.op, self.params, params);
-    }
-
     /// Refuses a call whose parameters cannot possibly be right, before it leaves this process.
     ///
     /// Everything here is arithmetic on JSON: a name that is not accepted, a missing required
@@ -341,8 +333,8 @@ impl Operation {
         let Some(object) = params.as_object() else {
             return Ok(());
         };
-        let call = crate::tool_repair::dotted(self.tool, self.op);
-        crate::tool_repair::check_set(&call, self.op, "", self.params, object)
+        let call = crate::tool_check::dotted(self.tool, self.op);
+        crate::tool_check::check_set(&call, self.op, "", self.params, object)
     }
 }
 
@@ -421,7 +413,7 @@ pub fn answers(domain: &str, op: &str) -> Option<Answers> {
 /// They were twenty-five key names written by hand into `params.json`, of the hundred and ninety
 /// the engine has, and the only thing holding even those to it was a test that fed each one to a
 /// real editor.
-// GENERATED-BEGIN vocabularies sha256:60cfe3c2403194ae
+// GENERATED-BEGIN vocabularies sha256:b1dff5748ca32659
 /// Godot's own name for a key, not the browser's.
 pub const GODOT_KEY_NAME: &[&str] = &[
     "0",
@@ -719,7 +711,136 @@ pub const GODOT_VALUE_TAG: &[&str] = &[
     "PackedVector4Array",
     "Resource",
 ];
+
+/// A `MouseButton` constant, as the engine spells it.
+pub const GODOT_MOUSE_BUTTON: &[&str] = &[
+    "MOUSE_BUTTON_LEFT",
+    "MOUSE_BUTTON_RIGHT",
+    "MOUSE_BUTTON_MIDDLE",
+    "MOUSE_BUTTON_WHEEL_UP",
+    "MOUSE_BUTTON_WHEEL_DOWN",
+    "MOUSE_BUTTON_WHEEL_LEFT",
+    "MOUSE_BUTTON_WHEEL_RIGHT",
+    "MOUSE_BUTTON_XBUTTON1",
+    "MOUSE_BUTTON_XBUTTON2",
+];
+
+/// A `JoyButton` constant, as the engine spells it.
+pub const GODOT_JOY_BUTTON: &[&str] = &[
+    "JOY_BUTTON_A",
+    "JOY_BUTTON_B",
+    "JOY_BUTTON_X",
+    "JOY_BUTTON_Y",
+    "JOY_BUTTON_BACK",
+    "JOY_BUTTON_GUIDE",
+    "JOY_BUTTON_START",
+    "JOY_BUTTON_LEFT_STICK",
+    "JOY_BUTTON_RIGHT_STICK",
+    "JOY_BUTTON_LEFT_SHOULDER",
+    "JOY_BUTTON_RIGHT_SHOULDER",
+    "JOY_BUTTON_DPAD_UP",
+    "JOY_BUTTON_DPAD_DOWN",
+    "JOY_BUTTON_DPAD_LEFT",
+    "JOY_BUTTON_DPAD_RIGHT",
+    "JOY_BUTTON_MISC1",
+    "JOY_BUTTON_PADDLE1",
+    "JOY_BUTTON_PADDLE2",
+    "JOY_BUTTON_PADDLE3",
+    "JOY_BUTTON_PADDLE4",
+    "JOY_BUTTON_TOUCHPAD",
+    "JOY_BUTTON_MISC2",
+    "JOY_BUTTON_MISC3",
+    "JOY_BUTTON_MISC4",
+    "JOY_BUTTON_MISC5",
+    "JOY_BUTTON_MISC6",
+];
+
+/// A `JoyAxis` constant, as the engine spells it.
+pub const GODOT_JOY_AXIS: &[&str] = &[
+    "JOY_AXIS_LEFT_X",
+    "JOY_AXIS_LEFT_Y",
+    "JOY_AXIS_RIGHT_X",
+    "JOY_AXIS_RIGHT_Y",
+    "JOY_AXIS_TRIGGER_LEFT",
+    "JOY_AXIS_TRIGGER_RIGHT",
+];
 // GENERATED-END vocabularies
+
+/// What one tag's payload has to be, coarsely enough that only the engine can say more.
+///
+/// The variant a tag stands for is not chosen here: `scripts/godot-vocabulary.mjs` holds one
+/// JSON-schema payload per tag, the generated schema refuses everything else before a sampler can
+/// write it, and [`GODOT_TAG_PAYLOAD`] is that same table printed as the arity this side counts.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Payload {
+    Null,
+    /// Four numbers, or a name or hex string the engine reads as one. `Color.from_string` takes
+    /// "skyblue" and "#8b5a2b" alike, `resource.create_texture` takes them, and a `color` value
+    /// that refused them was the one place in the tool where a colour had to be spelled another
+    /// way — one live turn wrote "red" here and was told a colour is four numbers.
+    Colour,
+    Boolean,
+    Numeric,
+    Str,
+    Numbers(usize),
+    Items,
+    Pairs,
+    /// A packed array's elements, written as the payload each element's own type carries and
+    /// nothing more: the array's tag has already said which type that is.
+    PackedIntegers,
+    PackedNumbers,
+    PackedStrings,
+    PackedComponents(usize),
+    ResourcePath,
+}
+
+/// Every tag the protocol carries, and the payload it requires.
+///
+/// The same table `Protocol.decode` walks in the addon, and it stays the addon's job too: that one
+/// is the wire's own backstop and cannot be removed. What it cannot be is the *first* place a
+/// shape is examined, because by then the call has crossed a socket and the answer has been
+/// flattened to `code: message`.
+// GENERATED-BEGIN tag-payloads sha256:f7c3a3e297533b15
+pub const GODOT_TAG_PAYLOAD: &[(&str, Payload)] = &[
+    ("Nil", Payload::Null),
+    ("bool", Payload::Boolean),
+    ("int", Payload::Numeric),
+    ("float", Payload::Numeric),
+    ("String", Payload::Str),
+    ("Vector2", Payload::Numbers(2)),
+    ("Vector2i", Payload::Numbers(2)),
+    ("Rect2", Payload::Numbers(4)),
+    ("Rect2i", Payload::Numbers(4)),
+    ("Vector3", Payload::Numbers(3)),
+    ("Vector3i", Payload::Numbers(3)),
+    ("Transform2D", Payload::Numbers(6)),
+    ("Vector4", Payload::Numbers(4)),
+    ("Vector4i", Payload::Numbers(4)),
+    ("Plane", Payload::Numbers(4)),
+    ("Quaternion", Payload::Numbers(4)),
+    ("AABB", Payload::Numbers(6)),
+    ("Basis", Payload::Numbers(9)),
+    ("Transform3D", Payload::Numbers(12)),
+    ("Projection", Payload::Numbers(16)),
+    ("Color", Payload::Colour),
+    ("StringName", Payload::Str),
+    ("NodePath", Payload::Str),
+    ("Dictionary", Payload::Pairs),
+    ("Array", Payload::Items),
+    ("PackedByteArray", Payload::PackedIntegers),
+    ("PackedInt32Array", Payload::PackedIntegers),
+    ("PackedInt64Array", Payload::PackedIntegers),
+    ("PackedFloat32Array", Payload::PackedNumbers),
+    ("PackedFloat64Array", Payload::PackedNumbers),
+    ("PackedStringArray", Payload::PackedStrings),
+    ("PackedVector2Array", Payload::PackedComponents(2)),
+    ("PackedVector3Array", Payload::PackedComponents(3)),
+    ("PackedColorArray", Payload::PackedComponents(4)),
+    ("PackedVector4Array", Payload::PackedComponents(4)),
+    ("Resource", Payload::ResourcePath),
+];
+// GENERATED-END tag-payloads
+
 use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 
 /// Every operation of every domain tool, one [`Operation`] per row of the source.
@@ -732,7 +853,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:832fa9424b1fd8a1
+// GENERATED-BEGIN operations sha256:d7c861bcfe66941a
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -944,25 +1065,8 @@ pub const GODOT_NODE_OPERATIONS: &[Operation] = &[
     ),
     op(
         "godot_node",
-        "create",
-        "Creates a node. `parent` is the parent's path — the root's own path, like /Level1, for a direct child.",
-        Answers::Addon("node.create"),
-        &[
-            need("parent", Text),
-            need("type", Text),
-            need("name", Text),
-            opt("index", Int),
-            noted(
-                hidden("expectedRevision", Int),
-                "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
-            ),
-            hidden("scene", Text),
-        ],
-    ),
-    op(
-        "godot_node",
         "create_nodes",
-        "Creates several nodes in one call, as one revision and one undo step. Prefer this over calling create in a row: create answers with the revision the next create needs, so forty nodes one at a time is forty round trips. Each `nodes` entry is exactly what create takes. Entries are applied in order, so a later entry may name a node an earlier entry creates as its parent, and a whole subtree goes in at once. Nothing is attached unless every entry is accepted.",
+        "Creates nodes, as one revision and one undo step. Each `nodes` entry is one node: `parent` is the parent's path — the root's own path, like /Level1, for a direct child. Entries are applied in order, so a later entry may name a node an earlier entry creates as its parent, and a whole subtree goes in at once. Nothing is attached unless every entry is accepted.",
         Answers::Addon("node.create_nodes"),
         &[
             noted(
@@ -1078,27 +1182,8 @@ pub const GODOT_NODE_OPERATIONS: &[Operation] = &[
     ),
     op(
         "godot_node",
-        "set_property",
-        "Sets a property. `value` is tagged with its type — a `type` beside a `value`: {\"type\": \"Vector2\", \"value\": [12, 34]}, {\"type\": \"float\", \"value\": 1.5}, {\"type\": \"String\", \"value\": \"hi\"}. A property that holds a resource — a CollisionShape2D's `shape`, a Sprite2D's `texture` — takes {\"type\": \"Resource\", \"value\": {\"path\": \"res://…\"}}, never a string: a path written as a string is refused. A property that holds another node — an @export node reference — takes {\"type\": \"NodePath\", \"value\": \"Box/Slider\"}, a path read from the node the property is on. A color takes four numbers, or a name like \"skyblue\", or a hex string like \"#8b5a2b\". The other tags are the ones the schema's `type` lists.",
-        Answers::Addon("node.set_property"),
-        &[
-            need("node", Text),
-            need("property", Text),
-            noted(
-                speaking(need("value", Tagged), GODOT_VALUE_TAG),
-                "A script is attached here like any other resource: property \"script\", value {\"type\": \"Resource\", \"value\": {\"path\": \"res://scripts/player.gd\"}}.",
-            ),
-            noted(
-                hidden("expectedRevision", Int),
-                "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
-            ),
-            hidden("scene", Text),
-        ],
-    ),
-    op(
-        "godot_node",
         "set_properties",
-        "Sets several properties in one call, as one revision and one undo step. Prefer this over calling set_property in a row, for the same reason create_nodes exists: each single write answers with the revision the next one needs. Each `properties` entry is exactly what set_property takes, with `value` tagged the same way, and entries may name different nodes. Nothing is written unless every entry is accepted.",
+        "Sets properties, as one revision and one undo step. Each `properties` entry names a node, a property and a value, and entries may name different nodes. `value` is tagged with its type — a `type` beside a `value`: {\"type\": \"Vector2\", \"value\": [12, 34]}, {\"type\": \"float\", \"value\": 1.5}, {\"type\": \"String\", \"value\": \"hi\"}. A property that holds a resource — a CollisionShape2D's `shape`, a Sprite2D's `texture` — takes {\"type\": \"Resource\", \"value\": {\"path\": \"res://…\"}}, never a string: a path written as a string is refused. A property that holds another node — an @export node reference — takes {\"type\": \"NodePath\", \"value\": \"Box/Slider\"}, a path read from the node the property is on. A color takes four numbers, or a name like \"skyblue\", or a hex string like \"#8b5a2b\". The other tags, and the payload each one takes, are the branches the schema lists. Nothing is written unless every entry is accepted.",
         Answers::Addon("node.set_properties"),
         &[
             noted(
@@ -1309,7 +1394,7 @@ pub const GODOT_PROJECT_OPERATIONS: &[Operation] = &[
     op(
         "godot_project",
         "set_input_action",
-        "Writes an input action. `name` is the action's own name, like move_left, never a settings path. Each event names its kind and its key, as {\"kind\": \"key\", \"key\": \"A\"} — the same shape list_input_actions answers with. The other kinds are mouse_button and joypad_button, each taking a `button` index.",
+        "Writes an input action. `name` is the action's own name, like move_left, never a settings path. Each event names its kind and its key, as {\"kind\": \"key\", \"key\": \"A\"} — the same shape list_input_actions answers with. A mouse_button event names its `button` instead, and a joypad_button event its `joypadButton`.",
         Answers::Addon("project.set_input_action"),
         &[
             noted(
@@ -1332,8 +1417,18 @@ pub const GODOT_PROJECT_OPERATIONS: &[Operation] = &[
                             "The accepted names are the ones the schema's `key` lists.",
                         ),
                         noted(
-                            opt("button", Int),
-                            "A mouse button is an index of 1 or higher; a joypad button an index.",
+                            speaking(
+                                opt("button", Kind::Choice(GODOT_MOUSE_BUTTON)),
+                                GODOT_MOUSE_BUTTON,
+                            ),
+                            "Which mouse button, for a mouse_button event.",
+                        ),
+                        noted(
+                            speaking(
+                                opt("joypadButton", Kind::Choice(GODOT_JOY_BUTTON)),
+                                GODOT_JOY_BUTTON,
+                            ),
+                            "Which joypad button, for a joypad_button event.",
                         ),
                     ],
                 ),
@@ -1426,43 +1521,43 @@ pub const GODOT_RESOURCE_OPERATIONS: &[Operation] = &[
     op(
         "godot_resource",
         "rescan",
-        "Tells the editor filesystem about files that changed. `path` is one file or a list of them — name everything you just wrote in one call, because a batch is imported in one pass and a call per file is not. Omit it to walk the whole project.",
+        "Tells the editor filesystem about files that changed. `paths` names every file you just wrote, because a batch is imported in one pass and a call per file is not. Omit it to walk the whole project. Answers with `files`, one entry per path, and no entries at all for a whole-project walk.",
         Answers::Addon("resource.rescan"),
         &[noted(
-            opt("path", Kind::Either(&[Text, List])),
-            "The file that changed, or a list of them — name every file you just wrote in one call rather than one call each. Omitted, the whole project is walked, which is what a directory made after the editor started needs.",
+            opt("paths", Kind::ListOf(&Text)),
+            "The files that changed, named in one call rather than one call each. Omitted, the whole project is walked, which is what a directory made after the editor started needs.",
         )],
     ),
     op(
         "godot_resource",
         "create_tileset",
-        "Cuts a texture into a TileSet and saves it. `path` is the .tres to write, `texture` an image the project already holds, and `tileSize` one number or two — 16 or [16, 16] — defaulting to 16. `tiles` is the [column, row] list to define and defaults to every tile the texture holds; `solid` is the subset that gets collision, either a list or \"all\", and a tile with no collision is scenery the player falls through. Answers with the atlas grid it found. Build a tileset with this rather than writing one as text: a TileSet carries a record per tile and a polygon per solid one, and a hand-written one opens as a resource with no tiles in it.",
+        "Cuts a texture into a TileSet and saves it. `path` is the .tres to write, `texture` an image the project already holds, and `tileWidth` and `tileHeight` the size of one tile, 16 each unless you say otherwise. `tiles` is the [column, row] list to define and defaults to every tile the texture holds; `solid` is the subset that gets collision and `allSolid` gives it to every tile, and a tile with no collision is scenery the player falls through. Answers with the atlas grid it found. Build a tileset with this rather than writing one as text: a TileSet carries a record per tile and a polygon per solid one, and a hand-written one opens as a resource with no tiles in it.",
         Answers::Addon("resource.create_tileset"),
         &[
             need("path", Text),
             need("texture", Text),
-            noted(
-                opt("tileSize", Kind::Either(&[Number, List])),
-                "One number or two: 16 or [16, 16].",
-            ),
+            defaulting(opt("tileWidth", Int), Fallback::Int(16)),
+            defaulting(opt("tileHeight", Int), Fallback::Int(16)),
             opt("tiles", List),
             noted(
-                opt("solid", Kind::Either(&[List, Kind::Choice(&["all"])])),
-                "A list of [column, row] pairs, or the word \"all\".",
+                opt("solid", List),
+                "The [column, row] pairs that get collision.",
+            ),
+            noted(
+                opt("allSolid", Flag),
+                "Gives every tile collision. Refused beside `solid`, which names its own.",
             ),
         ],
     ),
     op(
         "godot_resource",
         "create_texture",
-        "Draws a PNG and imports it, which is how a project with no art gets some. `path` is the .png to write and `size` is one number or two — 16 or [16, 24]. `rects` are filled rectangles painted over `background` in the order they are named, and without a `background` the image starts transparent, which is what a sprite wants. A colour is a name or a hex string — \"skyblue\", \"#8b5a2b\". An atlas is one texture with a rectangle per tile, laid out on the grid create_tileset then cuts: two 16x16 tiles side by side is a 32x16 image. The texture is imported by the time this answers, so it needs no rescan and create_tileset can name it straight away. Draw art with this rather than through bash: an image library is not something every machine has.",
+        "Draws a PNG and imports it, which is how a project with no art gets some. `path` is the .png to write and `width` and `height` are its pixel size. `rects` are filled rectangles painted over `background` in the order they are named, and without a `background` the image starts transparent, which is what a sprite wants. A colour is a name or a hex string — \"skyblue\", \"#8b5a2b\". An atlas is one texture with a rectangle per tile, laid out on the grid create_tileset then cuts: two 16x16 tiles side by side is a 32x16 image. The texture is imported by the time this answers, so it needs no rescan and create_tileset can name it straight away. Draw art with this rather than through bash: an image library is not something every machine has.",
         Answers::Addon("resource.create_texture"),
         &[
             need("path", Text),
-            noted(
-                need("size", Kind::Either(&[Number, List])),
-                "One number or two: 16 or [16, 24].",
-            ),
+            need("width", Int),
+            need("height", Int),
             noted(
                 opt("background", Text),
                 "A colour name or a hex string, like \"skyblue\" or \"#8b5a2b\". Transparent without one.",
@@ -1557,11 +1652,11 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
     op(
         "godot_script",
         "open",
-        "Opens a script as a language-server document. `path` is one script or a list of them — open everything you are about to query in one call, not one call each. A list answers with `files`, one entry per path.",
+        "Opens a script as a language-server document. `paths` names everything you are about to query, in one call rather than one call each. Answers with `files`, one entry per path, in the order you named them.",
         Answers::Rust,
         &[noted(
-            need("path", Kind::Either(&[Text, List])),
-            "One script, or a list of them — open every script you are about to query in one call rather than one call each. A list is answered with {\"files\": […]}, one entry per path, in the order you named them.",
+            need("paths", Kind::ListOf(&Text)),
+            "Every script you are about to query, named in one call rather than one call each.",
         )],
     ),
     op(
@@ -1613,11 +1708,11 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
     op(
         "godot_script",
         "close",
-        "Closes the document. `path` is one script or a list of them, and a list answers with `files`, one entry per path.",
+        "Closes the documents. Answers with `files`, one entry per path, in the order you named them.",
         Answers::Rust,
         &[noted(
-            need("path", Kind::Either(&[Text, List])),
-            "One script, or a list of them — close every script you are done with in one call rather than one call each. A list is answered with {\"files\": […]}, one entry per path, in the order you named them.",
+            need("paths", Kind::ListOf(&Text)),
+            "Every script you are done with, named in one call rather than one call each.",
         )],
     ),
     op(
@@ -1743,12 +1838,12 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
     op(
         "godot_script",
         "diagnostics",
-        "Diagnostics the server published for a file. `path` is one script or a list of them — ask about every script you just wrote in one call, not one call each, because a list shares one wait for the whole batch and a call per file waits that long per file. A list answers with `files`, one entry per path. Answers `published: false` when the server has not said anything about that file yet, which is not the same as the file being clean — ask again rather than take an empty list for an answer. An empty list with `published: true` is a file that parses.",
+        "Diagnostics the server published. `paths` names every script you just wrote, in one call rather than one call each, because one call shares one wait for the whole batch and a call per file waits that long per file. Answers with `files`, one entry per path. An entry says `published: false` when the server has not spoken about that file yet, which is not the same as the file being clean — ask again rather than take an empty list for an answer. An empty list with `published: true` is a file that parses.",
         Answers::Rust,
         &[
             noted(
-                need("path", Kind::Either(&[Text, List])),
-                "One script, or a list of them — ask about every script you just wrote in one call rather than one call each. A list is answered with {\"files\": […]}, one entry per path, and shares one wait for the whole batch instead of waiting that long per file.",
+                need("paths", Kind::ListOf(&Text)),
+                "Every script you just wrote, named in one call rather than one call each: one call shares one wait for the whole batch.",
             ),
             opt("timeoutMs", Int),
         ],
@@ -2113,7 +2208,7 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
     op(
         "godot_runtime",
         "input",
-        "Injects input and captures the result. Each event names its kind and the parameters that kind uses, as {\"kind\": \"key\", \"key\": \"A\", \"pressed\": true} — send the release as a second event, or the key stays down. An event that leaves `pressed` out alternates on its own: the first is the press and the second the release, so a click is the same event written twice. A Button answers the release, not the press. A mouse button is named left, right, middle, wheel_up or wheel_down, or given as an index. A position is [x, y]. This drives the Input Map, so it is how you check that a level you built can actually be played. Its answer carries a frame, unless a later entry of the same call carries one too: a picture another picture replaces is not worth sending, and a moment in the middle of a key sequence is what capture is for.",
+        "Injects input and captures the result. Each event names its kind and the parameters that kind uses, as {\"kind\": \"key\", \"key\": \"A\", \"pressed\": true} — send the release as a second event, or the key stays down. An event that leaves `pressed` out alternates on its own: the first is the press and the second the release, so a click is the same event written twice. A Button answers the release, not the press. A mouse_button event names its `button`, a joypad_button event its `joypadButton`, and a joypad_motion event its `axis`. A position is [x, y]. This drives the Input Map, so it is how you check that a level you built can actually be played. Its answer carries a frame, unless a later entry of the same call carries one too: a picture another picture replaces is not worth sending, and a moment in the middle of a key sequence is what capture is for.",
         Answers::Addon("runtime.input"),
         &[noted(
             shaped(
@@ -2141,13 +2236,29 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
                         "Held down unless this says otherwise, so the release is a second event carrying false.",
                     ),
                     noted(
-                        opt("button", Kind::Either(&[Text, Int])),
-                        "A mouse button by name - left, right, middle, wheel_up, wheel_down - or an index; a joypad button is an index.",
+                        speaking(
+                            opt("button", Kind::Choice(GODOT_MOUSE_BUTTON)),
+                            GODOT_MOUSE_BUTTON,
+                        ),
+                        "Which mouse button, for a mouse_button event.",
+                    ),
+                    noted(
+                        speaking(
+                            opt("joypadButton", Kind::Choice(GODOT_JOY_BUTTON)),
+                            GODOT_JOY_BUTTON,
+                        ),
+                        "Which joypad button, for a joypad_button event.",
                     ),
                     opt("position", List),
                     opt("relative", List),
-                    opt("axis", Int),
-                    opt("value", Number),
+                    noted(
+                        speaking(opt("axis", Kind::Choice(GODOT_JOY_AXIS)), GODOT_JOY_AXIS),
+                        "Which joypad axis, for a joypad_motion event.",
+                    ),
+                    noted(
+                        opt("value", Number),
+                        "How far the axis is pushed, between -1 and 1.",
+                    ),
                     opt("device", Int),
                 ],
             ),
@@ -2218,7 +2329,10 @@ pub const GODOT_LOGS_OPERATIONS: &[Operation] = &[op(
     Answers::Rust,
     &[
         opt("after", Int),
-        opt("minSeverity", Kind::Choice(&["info", "warning", "error"])),
+        defaulting(
+            opt("minSeverity", Kind::Choice(&["info", "warning", "error"])),
+            Fallback::Text("warning"),
+        ),
         opt("source", Kind::Choice(&["editor", "editorError"])),
         opt("contains", Text),
         noted(
@@ -2283,6 +2397,11 @@ pub fn signature(params: &[Param]) -> String {
         .map(|param| {
             let mark = if param.required { "" } else { "?" };
             match param.kind {
+                // A choice out of a vocabulary prints as text: the words are the engine's, the
+                // schema carries all of them, and the measured arm that names no member won.
+                Kind::Choice(_) if !param.vocabulary.is_empty() => {
+                    format!("{}{mark}: text", param.name)
+                }
                 Kind::Choice(allowed) => {
                     let quoted: Vec<String> =
                         allowed.iter().map(|word| format!("\"{word}\"")).collect();
@@ -2306,10 +2425,6 @@ pub fn signature(params: &[Param]) -> String {
                 Kind::Hash => format!("{}{mark}: hash", param.name),
                 Kind::Tagged => format!("{}{mark}: tagged", param.name),
                 Kind::ListOf(inner) => format!("{}{mark}: list of {}", param.name, short(*inner)),
-                Kind::Either(kinds) => {
-                    let names: Vec<&str> = kinds.iter().map(|one| short(*one)).collect();
-                    format!("{}{mark}: {}", param.name, names.join("|"))
-                }
             }
         })
         .collect();
@@ -2330,7 +2445,6 @@ fn short(kind: Kind) -> &'static str {
         // Text from a fixed set, and the schema carries which words. Spelling it "choice" would
         // name the declaration rather than what goes in the call.
         Kind::Choice(_) => "text",
-        Kind::Either(_) => "either",
         Kind::ListOf(_) => "list",
     }
 }

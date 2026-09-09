@@ -62,6 +62,18 @@
         "godotValueTag": {
             "engine": "valueTags",
             "note": "The `type_string` spelling of every Variant type a JSON payload can be built into, plus `Resource` for the {path} payload."
+        },
+        "godotMouseButton": {
+            "engine": "mouseButtons",
+            "note": "A `MouseButton` constant, as the engine spells it."
+        },
+        "godotJoyButton": {
+            "engine": "joyButtons",
+            "note": "A `JoyButton` constant, as the engine spells it."
+        },
+        "godotJoyAxis": {
+            "engine": "joyAxes",
+            "note": "A `JoyAxis` constant, as the engine spells it."
         }
     },
     "operations": [
@@ -334,44 +346,8 @@
         },
         {
             "tool": "godot_node",
-            "op": "create",
-            "summary": "Creates a node. `parent` is the parent's path — the root's own path, like /Level1, for a direct child.",
-            "params": [
-                {
-                    "name": "parent",
-                    "kind": "text",
-                    "required": true
-                },
-                {
-                    "name": "type",
-                    "kind": "text",
-                    "required": true
-                },
-                {
-                    "name": "name",
-                    "kind": "text",
-                    "required": true
-                },
-                {
-                    "name": "index",
-                    "kind": "int",
-                    "required": false
-                },
-                {
-                    "name": "expectedRevision",
-                    "kind": "int",
-                    "required": false,
-                    "note": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
-                    "hidden": true
-                }
-            ],
-            "command": "node.create",
-            "accepts": ["scene"]
-        },
-        {
-            "tool": "godot_node",
             "op": "create_nodes",
-            "summary": "Creates several nodes in one call, as one revision and one undo step. Prefer this over calling create in a row: create answers with the revision the next create needs, so forty nodes one at a time is forty round trips. Each `nodes` entry is exactly what create takes. Entries are applied in order, so a later entry may name a node an earlier entry creates as its parent, and a whole subtree goes in at once. Nothing is attached unless every entry is accepted.",
+            "summary": "Creates nodes, as one revision and one undo step. Each `nodes` entry is one node: `parent` is the parent's path — the root's own path, like /Level1, for a direct child. Entries are applied in order, so a later entry may name a node an earlier entry creates as its parent, and a whole subtree goes in at once. Nothing is attached unless every entry is accepted.",
             "params": [
                 {
                     "name": "nodes",
@@ -580,41 +556,8 @@
         },
         {
             "tool": "godot_node",
-            "op": "set_property",
-            "summary": "Sets a property. `value` is tagged with its type — a `type` beside a `value`: {\"type\": \"Vector2\", \"value\": [12, 34]}, {\"type\": \"float\", \"value\": 1.5}, {\"type\": \"String\", \"value\": \"hi\"}. A property that holds a resource — a CollisionShape2D's `shape`, a Sprite2D's `texture` — takes {\"type\": \"Resource\", \"value\": {\"path\": \"res://…\"}}, never a string: a path written as a string is refused. A property that holds another node — an @export node reference — takes {\"type\": \"NodePath\", \"value\": \"Box/Slider\"}, a path read from the node the property is on. A color takes four numbers, or a name like \"skyblue\", or a hex string like \"#8b5a2b\". The other tags are the ones the schema's `type` lists.",
-            "params": [
-                {
-                    "name": "node",
-                    "kind": "text",
-                    "required": true
-                },
-                {
-                    "name": "property",
-                    "kind": "text",
-                    "required": true
-                },
-                {
-                    "name": "value",
-                    "kind": "tagged",
-                    "required": true,
-                    "note": "A script is attached here like any other resource: property \"script\", value {\"type\": \"Resource\", \"value\": {\"path\": \"res://scripts/player.gd\"}}.",
-                    "vocabulary": "godotValueTag"
-                },
-                {
-                    "name": "expectedRevision",
-                    "kind": "int",
-                    "required": false,
-                    "note": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
-                    "hidden": true
-                }
-            ],
-            "command": "node.set_property",
-            "accepts": ["scene"]
-        },
-        {
-            "tool": "godot_node",
             "op": "set_properties",
-            "summary": "Sets several properties in one call, as one revision and one undo step. Prefer this over calling set_property in a row, for the same reason create_nodes exists: each single write answers with the revision the next one needs. Each `properties` entry is exactly what set_property takes, with `value` tagged the same way, and entries may name different nodes. Nothing is written unless every entry is accepted.",
+            "summary": "Sets properties, as one revision and one undo step. Each `properties` entry names a node, a property and a value, and entries may name different nodes. `value` is tagged with its type — a `type` beside a `value`: {\"type\": \"Vector2\", \"value\": [12, 34]}, {\"type\": \"float\", \"value\": 1.5}, {\"type\": \"String\", \"value\": \"hi\"}. A property that holds a resource — a CollisionShape2D's `shape`, a Sprite2D's `texture` — takes {\"type\": \"Resource\", \"value\": {\"path\": \"res://…\"}}, never a string: a path written as a string is refused. A property that holds another node — an @export node reference — takes {\"type\": \"NodePath\", \"value\": \"Box/Slider\"}, a path read from the node the property is on. A color takes four numbers, or a name like \"skyblue\", or a hex string like \"#8b5a2b\". The other tags, and the payload each one takes, are the branches the schema lists. Nothing is written unless every entry is accepted.",
             "params": [
                 {
                     "name": "properties",
@@ -1004,7 +947,7 @@
         {
             "tool": "godot_project",
             "op": "set_input_action",
-            "summary": "Writes an input action. `name` is the action's own name, like move_left, never a settings path. Each event names its kind and its key, as {\"kind\": \"key\", \"key\": \"A\"} — the same shape list_input_actions answers with. The other kinds are mouse_button and joypad_button, each taking a `button` index.",
+            "summary": "Writes an input action. `name` is the action's own name, like move_left, never a settings path. Each event names its kind and its key, as {\"kind\": \"key\", \"key\": \"A\"} — the same shape list_input_actions answers with. A mouse_button event names its `button` instead, and a joypad_button event its `joypadButton`.",
             "params": [
                 {
                     "name": "name",
@@ -1035,9 +978,17 @@
                         },
                         {
                             "name": "button",
-                            "kind": "int",
+                            "kind": "choice",
+                            "vocabulary": "godotMouseButton",
                             "required": false,
-                            "note": "A mouse button is an index of 1 or higher; a joypad button an index."
+                            "note": "Which mouse button, for a mouse_button event."
+                        },
+                        {
+                            "name": "joypadButton",
+                            "kind": "choice",
+                            "vocabulary": "godotJoyButton",
+                            "required": false,
+                            "note": "Which joypad button, for a joypad_button event."
                         }
                     ]
                 },
@@ -1174,21 +1125,14 @@
         {
             "tool": "godot_resource",
             "op": "rescan",
-            "summary": "Tells the editor filesystem about files that changed. `path` is one file or a list of them — name everything you just wrote in one call, because a batch is imported in one pass and a call per file is not. Omit it to walk the whole project.",
+            "summary": "Tells the editor filesystem about files that changed. `paths` names every file you just wrote, because a batch is imported in one pass and a call per file is not. Omit it to walk the whole project. Answers with `files`, one entry per path, and no entries at all for a whole-project walk.",
             "params": [
                 {
-                    "name": "path",
-                    "kind": "either",
-                    "of": [
-                        {
-                            "kind": "text"
-                        },
-                        {
-                            "kind": "list"
-                        }
-                    ],
+                    "name": "paths",
+                    "kind": "listOf",
+                    "of": {"kind": "text"},
                     "required": false,
-                    "note": "The file that changed, or a list of them — name every file you just wrote in one call rather than one call each. Omitted, the whole project is walked, which is what a directory made after the editor started needs."
+                    "note": "The files that changed, named in one call rather than one call each. Omitted, the whole project is walked, which is what a directory made after the editor started needs."
                 }
             ],
             "command": "resource.rescan"
@@ -1196,7 +1140,7 @@
         {
             "tool": "godot_resource",
             "op": "create_tileset",
-            "summary": "Cuts a texture into a TileSet and saves it. `path` is the .tres to write, `texture` an image the project already holds, and `tileSize` one number or two — 16 or [16, 16] — defaulting to 16. `tiles` is the [column, row] list to define and defaults to every tile the texture holds; `solid` is the subset that gets collision, either a list or \"all\", and a tile with no collision is scenery the player falls through. Answers with the atlas grid it found. Build a tileset with this rather than writing one as text: a TileSet carries a record per tile and a polygon per solid one, and a hand-written one opens as a resource with no tiles in it.",
+            "summary": "Cuts a texture into a TileSet and saves it. `path` is the .tres to write, `texture` an image the project already holds, and `tileWidth` and `tileHeight` the size of one tile, 16 each unless you say otherwise. `tiles` is the [column, row] list to define and defaults to every tile the texture holds; `solid` is the subset that gets collision and `allSolid` gives it to every tile, and a tile with no collision is scenery the player falls through. Answers with the atlas grid it found. Build a tileset with this rather than writing one as text: a TileSet carries a record per tile and a polygon per solid one, and a hand-written one opens as a resource with no tiles in it.",
             "params": [
                 {
                     "name": "path",
@@ -1209,18 +1153,16 @@
                     "required": true
                 },
                 {
-                    "name": "tileSize",
-                    "kind": "either",
-                    "of": [
-                        {
-                            "kind": "number"
-                        },
-                        {
-                            "kind": "list"
-                        }
-                    ],
+                    "name": "tileWidth",
+                    "kind": "int",
                     "required": false,
-                    "note": "One number or two: 16 or [16, 16]."
+                    "default": 16
+                },
+                {
+                    "name": "tileHeight",
+                    "kind": "int",
+                    "required": false,
+                    "default": 16
                 },
                 {
                     "name": "tiles",
@@ -1229,18 +1171,15 @@
                 },
                 {
                     "name": "solid",
-                    "kind": "either",
-                    "of": [
-                        {
-                            "kind": "list"
-                        },
-                        {
-                            "kind": "choice",
-                            "of": ["all"]
-                        }
-                    ],
+                    "kind": "list",
                     "required": false,
-                    "note": "A list of [column, row] pairs, or the word \"all\"."
+                    "note": "The [column, row] pairs that get collision."
+                },
+                {
+                    "name": "allSolid",
+                    "kind": "flag",
+                    "required": false,
+                    "note": "Gives every tile collision. Refused beside `solid`, which names its own."
                 }
             ],
             "command": "resource.create_tileset"
@@ -1248,7 +1187,7 @@
         {
             "tool": "godot_resource",
             "op": "create_texture",
-            "summary": "Draws a PNG and imports it, which is how a project with no art gets some. `path` is the .png to write and `size` is one number or two — 16 or [16, 24]. `rects` are filled rectangles painted over `background` in the order they are named, and without a `background` the image starts transparent, which is what a sprite wants. A colour is a name or a hex string — \"skyblue\", \"#8b5a2b\". An atlas is one texture with a rectangle per tile, laid out on the grid create_tileset then cuts: two 16x16 tiles side by side is a 32x16 image. The texture is imported by the time this answers, so it needs no rescan and create_tileset can name it straight away. Draw art with this rather than through bash: an image library is not something every machine has.",
+            "summary": "Draws a PNG and imports it, which is how a project with no art gets some. `path` is the .png to write and `width` and `height` are its pixel size. `rects` are filled rectangles painted over `background` in the order they are named, and without a `background` the image starts transparent, which is what a sprite wants. A colour is a name or a hex string — \"skyblue\", \"#8b5a2b\". An atlas is one texture with a rectangle per tile, laid out on the grid create_tileset then cuts: two 16x16 tiles side by side is a 32x16 image. The texture is imported by the time this answers, so it needs no rescan and create_tileset can name it straight away. Draw art with this rather than through bash: an image library is not something every machine has.",
             "params": [
                 {
                     "name": "path",
@@ -1256,18 +1195,14 @@
                     "required": true
                 },
                 {
-                    "name": "size",
-                    "kind": "either",
-                    "of": [
-                        {
-                            "kind": "number"
-                        },
-                        {
-                            "kind": "list"
-                        }
-                    ],
-                    "required": true,
-                    "note": "One number or two: 16 or [16, 24]."
+                    "name": "width",
+                    "kind": "int",
+                    "required": true
+                },
+                {
+                    "name": "height",
+                    "kind": "int",
+                    "required": true
                 },
                 {
                     "name": "background",
@@ -1427,21 +1362,15 @@
         {
             "tool": "godot_script",
             "op": "open",
-            "summary": "Opens a script as a language-server document. `path` is one script or a list of them — open everything you are about to query in one call, not one call each. A list answers with `files`, one entry per path.",
+            "summary": "Opens a script as a language-server document. `paths` names everything you are about to query, in one call rather than one call each. Answers with `files`, one entry per path, in the order you named them.",
             "params": [
                 {
-                    "name": "path",
-                    "kind": "either",
-                    "of": [
-                        {
-                            "kind": "text"
-                        },
-                        {
-                            "kind": "list"
-                        }
-                    ],
+                    "name": "paths",
+                    "kind": "listOf",
+                    "of": {"kind": "text"},
                     "required": true,
-                    "note": "One script, or a list of them — open every script you are about to query in one call rather than one call each. A list is answered with {\"files\": […]}, one entry per path, in the order you named them."
+                    "minItems": 1,
+                    "note": "Every script you are about to query, named in one call rather than one call each."
                 }
             ],
             "answeredBy": "rust"
@@ -1532,21 +1461,15 @@
         {
             "tool": "godot_script",
             "op": "close",
-            "summary": "Closes the document. `path` is one script or a list of them, and a list answers with `files`, one entry per path.",
+            "summary": "Closes the documents. Answers with `files`, one entry per path, in the order you named them.",
             "params": [
                 {
-                    "name": "path",
-                    "kind": "either",
-                    "of": [
-                        {
-                            "kind": "text"
-                        },
-                        {
-                            "kind": "list"
-                        }
-                    ],
+                    "name": "paths",
+                    "kind": "listOf",
+                    "of": {"kind": "text"},
                     "required": true,
-                    "note": "One script, or a list of them — close every script you are done with in one call rather than one call each. A list is answered with {\"files\": […]}, one entry per path, in the order you named them."
+                    "minItems": 1,
+                    "note": "Every script you are done with, named in one call rather than one call each."
                 }
             ],
             "answeredBy": "rust"
@@ -1789,21 +1712,15 @@
         {
             "tool": "godot_script",
             "op": "diagnostics",
-            "summary": "Diagnostics the server published for a file. `path` is one script or a list of them — ask about every script you just wrote in one call, not one call each, because a list shares one wait for the whole batch and a call per file waits that long per file. A list answers with `files`, one entry per path. Answers `published: false` when the server has not said anything about that file yet, which is not the same as the file being clean — ask again rather than take an empty list for an answer. An empty list with `published: true` is a file that parses.",
+            "summary": "Diagnostics the server published. `paths` names every script you just wrote, in one call rather than one call each, because one call shares one wait for the whole batch and a call per file waits that long per file. Answers with `files`, one entry per path. An entry says `published: false` when the server has not spoken about that file yet, which is not the same as the file being clean — ask again rather than take an empty list for an answer. An empty list with `published: true` is a file that parses.",
             "params": [
                 {
-                    "name": "path",
-                    "kind": "either",
-                    "of": [
-                        {
-                            "kind": "text"
-                        },
-                        {
-                            "kind": "list"
-                        }
-                    ],
+                    "name": "paths",
+                    "kind": "listOf",
+                    "of": {"kind": "text"},
                     "required": true,
-                    "note": "One script, or a list of them — ask about every script you just wrote in one call rather than one call each. A list is answered with {\"files\": […]}, one entry per path, and shares one wait for the whole batch instead of waiting that long per file."
+                    "minItems": 1,
+                    "note": "Every script you just wrote, named in one call rather than one call each: one call shares one wait for the whole batch."
                 },
                 {
                     "name": "timeoutMs",
@@ -2356,7 +2273,7 @@
         {
             "tool": "godot_runtime",
             "op": "input",
-            "summary": "Injects input and captures the result. Each event names its kind and the parameters that kind uses, as {\"kind\": \"key\", \"key\": \"A\", \"pressed\": true} — send the release as a second event, or the key stays down. An event that leaves `pressed` out alternates on its own: the first is the press and the second the release, so a click is the same event written twice. A Button answers the release, not the press. A mouse button is named left, right, middle, wheel_up or wheel_down, or given as an index. A position is [x, y]. This drives the Input Map, so it is how you check that a level you built can actually be played. Its answer carries a frame, unless a later entry of the same call carries one too: a picture another picture replaces is not worth sending, and a moment in the middle of a key sequence is what capture is for.",
+            "summary": "Injects input and captures the result. Each event names its kind and the parameters that kind uses, as {\"kind\": \"key\", \"key\": \"A\", \"pressed\": true} — send the release as a second event, or the key stays down. An event that leaves `pressed` out alternates on its own: the first is the press and the second the release, so a click is the same event written twice. A Button answers the release, not the press. A mouse_button event names its `button`, a joypad_button event its `joypadButton`, and a joypad_motion event its `axis`. A position is [x, y]. This drives the Input Map, so it is how you check that a level you built can actually be played. Its answer carries a frame, unless a later entry of the same call carries one too: a picture another picture replaces is not worth sending, and a moment in the middle of a key sequence is what capture is for.",
             "params": [
                 {
                     "name": "events",
@@ -2393,17 +2310,17 @@
                         },
                         {
                             "name": "button",
-                            "kind": "either",
-                            "of": [
-                                {
-                                    "kind": "text"
-                                },
-                                {
-                                    "kind": "int"
-                                }
-                            ],
+                            "kind": "choice",
+                            "vocabulary": "godotMouseButton",
                             "required": false,
-                            "note": "A mouse button by name - left, right, middle, wheel_up, wheel_down - or an index; a joypad button is an index."
+                            "note": "Which mouse button, for a mouse_button event."
+                        },
+                        {
+                            "name": "joypadButton",
+                            "kind": "choice",
+                            "vocabulary": "godotJoyButton",
+                            "required": false,
+                            "note": "Which joypad button, for a joypad_button event."
                         },
                         {
                             "name": "position",
@@ -2417,13 +2334,16 @@
                         },
                         {
                             "name": "axis",
-                            "kind": "int",
-                            "required": false
+                            "kind": "choice",
+                            "vocabulary": "godotJoyAxis",
+                            "required": false,
+                            "note": "Which joypad axis, for a joypad_motion event."
                         },
                         {
                             "name": "value",
                             "kind": "number",
-                            "required": false
+                            "required": false,
+                            "note": "How far the axis is pushed, between -1 and 1."
                         },
                         {
                             "name": "device",
@@ -2519,7 +2439,8 @@
                     "name": "minSeverity",
                     "kind": "choice",
                     "of": ["info", "warning", "error"],
-                    "required": false
+                    "required": false,
+                    "default": "warning"
                 },
                 {
                     "name": "source",

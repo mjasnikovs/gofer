@@ -115,8 +115,8 @@ impl ToolDomain {
     ///
     /// The router resolves it once, at the start of the call, and asks the row everything after
     /// that. Before, the same `(tool, op)` pair was matched against a separate table five times in
-    /// one dispatch — for the repair, the check, the rule, the gate and the narrowing — and a
-    /// sixth and seventh time to route it and to thread its revision.
+    /// one dispatch — for the check, the rule, the gate and the narrowing — and again to route it
+    /// and to thread its revision.
     pub fn operation(&self, op: &str) -> Option<&'static Operation> {
         self.operations.iter().find(|offered| offered.op == op)
     }
@@ -326,7 +326,6 @@ fn route<R: Runtime>(
     let mut entries = requested_operations(&request.tool, within, &request.params)?;
 
     for entry in &mut entries {
-        entry.operation.repair(&mut entry.params);
         as_the_worktree_names_them(entry.operation, &mut entry.params);
     }
 
@@ -435,7 +434,7 @@ fn told_the_editor_about<R: Runtime>(app: &AppHandle<R>, paths: Vec<String>) {
         app,
         CallGodotRequest {
             command: "resource.rescan".to_owned(),
-            params: json!({"path": paths}),
+            params: json!({"paths": paths}),
             expected_revision: None,
             expected_scene: None,
             timeout_ms: None,
@@ -503,8 +502,8 @@ pub(crate) const GODOT_TOOL: &str = "godot";
 /// One entry of the `ops` list: the operation, and the parameters written beside it.
 ///
 /// The operation is the catalogue's own row, resolved once as the entry is read. Everything that
-/// follows — the repair, the check, the rule, the gate, the narrowing, the route — is a question
-/// asked of that row rather than a seventh lookup by the same two strings.
+/// follows — the check, the rule, the gate, the narrowing, the route — is a question asked of that
+/// row rather than another lookup by the same two strings.
 #[derive(Clone, Debug)]
 struct Requested {
     domain: &'static ToolDomain,
@@ -588,8 +587,8 @@ fn requested_operations(
 
 /// Resolves one entry, inside the domain a domain call named or across the catalogue.
 ///
-/// The two spellings are the same call: `godot_node` with `{"op": "create"}` and `godot` with
-/// `{"op": "node.create"}` reach the same row, and everything after this point asks the row rather
+/// The two spellings are the same call: `godot_node` with `{"op": "inspect"}` and `godot` with
+/// `{"op": "node.inspect"}` reach the same row, and everything after this point asks the row rather
 /// than the name the call used.
 fn requested_operation(
     tool: &str,
@@ -1190,8 +1189,8 @@ fn reject_outside_paths<R: Runtime>(
 /// exact, so it is done here rather than explained. Confinement is untouched: what is left after
 /// the prefix is still a relative path, so `res://../secrets` is refused exactly as `../secrets` is.
 ///
-/// It runs in `dispatch_under`, beside [`Operation::repair`] and before anything is held to the
-/// parameters, because an arm that has to remember to call it is an arm that can forget to.
+/// It runs in `dispatch_under`, before anything is held to the parameters, because an arm that has
+/// to remember to call it is an arm that can forget to.
 /// `script_domain` and `debug_domain` called it; `resource_domain` never did, and nothing failed —
 /// `files::validate_relative` strips the scheme too, so an unnormalised `delete` reached the right
 /// file while [`crate::read_ledger`], which keys on the string the caller wrote, missed every
@@ -1393,42 +1392,31 @@ fn require_script_path(params: &Value) -> Result<(), ToolFailure> {
     ))
 }
 
-/// The scripts one call names, and whether it named them as a list.
+/// The scripts one call names.
 ///
-/// `open`, `close` and `diagnostics` each take one script or a list of them, because an agent that
-/// could only name one at a time made one call per file: nine `open` calls in a row, then a
-/// `diagnostics` call per file, each one a round-trip and an answer the turn pays context for. A
-/// caller that names a single path still gets the single answer it always got; a caller that names
-/// a list gets `{"files": […]}`, the shape `edit` already answers with, in the order it asked.
-fn named_scripts(params: &Value) -> Result<(Vec<String>, bool), ToolFailure> {
-    let empty = || {
-        ToolFailure::new(
-            "invalid_params",
-            "`path` is empty, so the call names no script to work on.",
-        )
-    };
-    let Some(entries) = params.get("path").and_then(Value::as_array) else {
-        let path = params
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        if path.is_empty() {
-            return Err(empty());
-        }
-        require_script_path(&json!({"path": path}))?;
-        return Ok((vec![path], false));
-    };
-    if entries.is_empty() {
-        return Err(empty());
-    }
+/// `open`, `close` and `diagnostics` each take a list and answer `{"files": […]}`, one entry per
+/// path in the order they were named, because an agent that could only name one at a time made one
+/// call per file: nine `open` calls in a row, then a `diagnostics` call per file, each one a
+/// round-trip and an answer the turn pays context for.
+fn named_scripts(params: &Value) -> Result<Vec<String>, ToolFailure> {
+    let entries = params
+        .get("paths")
+        .and_then(Value::as_array)
+        .filter(|entries| !entries.is_empty())
+        .ok_or_else(|| {
+            ToolFailure::new(
+                "invalid_params",
+                "`paths` names no script to work on. It is a list of script paths: \
+                 [\"scripts/player.gd\", \"scripts/enemy.gd\"].",
+            )
+        })?;
     let mut paths = Vec::with_capacity(entries.len());
     for entry in entries {
         let path = entry.as_str().ok_or_else(|| {
             ToolFailure::new(
                 "invalid_params",
                 format!(
-                    "`path` is a list of script paths, and {entry} is not one. Name them as \
+                    "`paths` is a list of script paths, and {entry} is not one. Name them as \
                      strings: [\"scripts/player.gd\", \"scripts/enemy.gd\"]."
                 ),
             )
@@ -1436,10 +1424,9 @@ fn named_scripts(params: &Value) -> Result<(Vec<String>, bool), ToolFailure> {
         require_script_path(&json!({"path": path}))?;
         paths.push(path.to_owned());
     }
-    Ok((paths, true))
+    Ok(paths)
 }
 
-/// One answer for a single path, `{"files": […]}` for a list.
 /// How much script text one `open` call answers with before it starts withholding.
 ///
 /// The worker holds a tool result at 24,000 characters and slices it there, mid-file. Ten of
@@ -1457,13 +1444,6 @@ const OPEN_TEXT_BUDGET: usize = 16_000;
 /// failure of the two, but it is only worse when the model has somewhere else to go.
 fn withholds_the_text(spent: usize, text_bytes: usize, first: bool) -> bool {
     !first && spent + text_bytes > OPEN_TEXT_BUDGET
-}
-
-fn one_or_many(mut answers: Vec<Value>, batched: bool) -> Value {
-    if batched {
-        return json!({"files": answers});
-    }
-    answers.pop().unwrap_or(Value::Null)
 }
 
 /// Names the operation that needs no anchors, when an edit call arrives in a shape it cannot use.
@@ -1520,7 +1500,7 @@ fn script_domain<R: Runtime>(
             Ok(json!({"files": files}))
         }
         "open" => {
-            let (paths, batched) = named_scripts(&params)?;
+            let paths = named_scripts(&params)?;
             let mut answers = Vec::with_capacity(paths.len());
             let mut spent = 0usize;
             for path in paths {
@@ -1556,7 +1536,7 @@ fn script_domain<R: Runtime>(
                 };
                 answers.push(answered);
             }
-            Ok(one_or_many(answers, batched))
+            Ok(json!({"files": answers}))
         }
         "update" => {
             require_script_path(&params)?;
@@ -1573,16 +1553,13 @@ fn script_domain<R: Runtime>(
             Ok(saved)
         }
         "close" => {
-            let (paths, batched) = named_scripts(&params)?;
+            let paths = named_scripts(&params)?;
             let mut answers = Vec::with_capacity(paths.len());
             for path in paths {
                 script::close_document(from_params(json!({"path": path.clone()}))?)?;
                 answers.push(json!({"path": path, "closed": true}));
             }
-            if batched {
-                return Ok(one_or_many(answers, true));
-            }
-            Ok(json!({"closed": true}))
+            Ok(json!({"files": answers}))
         }
         "format" => {
             let request: gdformat::FormatRequest = from_params(params)?;
@@ -1613,8 +1590,8 @@ fn script_domain<R: Runtime>(
             told_the_editor_about(app, written);
             Ok(renamed)
         }
-        "diagnostics" if params.get("path").map(Value::is_array) == Some(true) => {
-            let (paths, _) = named_scripts(&params)?;
+        "diagnostics" => {
+            let paths = named_scripts(&params)?;
             let timeout_ms = params.get("timeoutMs").and_then(Value::as_u64);
             let files: Vec<Value> = script::diagnostics_for(paths, timeout_ms)?
                 .into_iter()
@@ -1667,7 +1644,11 @@ fn debug_domain(op: &str, params: Value) -> Result<Value, ToolFailure> {
 /// The cursor answered is the one that continues from the last line actually handed over, never
 /// from a line read past it: `after` takes a sequence, and every entry carries its own.
 fn logs_domain(params: Value) -> Result<Value, ToolFailure> {
-    let mut query: LogQuery = from_params(params)?;
+    let mut query: LogQuery = from_params(with_declared_defaults(
+        tool_params::GODOT_LOGS_OPERATIONS,
+        "read",
+        params,
+    ))?;
     let wanted = query
         .limit
         .unwrap_or(godot_session::DEFAULT_LOG_PAGE)
@@ -1703,6 +1684,34 @@ fn logs_domain(params: Value) -> Result<Value, ToolFailure> {
         "dropped": dropped,
         "terminalLinesOmitted": omitted,
     }))
+}
+
+/// The call with every parameter the catalogue defaults filled in, where the call named none.
+///
+/// The default is read off the generated row rather than written here, so the value the model is
+/// shown in the schema and the value this router applies cannot become two different words. Every
+/// non-flat failure of the surface measurement was `logs read` sent with no `minSeverity`.
+fn with_declared_defaults(
+    operations: &'static [tool_params::Operation],
+    op: &str,
+    params: Value,
+) -> Value {
+    let Some(operation) = operations.iter().find(|operation| operation.op == op) else {
+        return params;
+    };
+    let mut params = params;
+    let Some(object) = params.as_object_mut() else {
+        return params;
+    };
+    for param in operation.params {
+        let Some(default) = param.default else {
+            continue;
+        };
+        if !object.contains_key(param.name) {
+            object.insert(param.name.to_owned(), to_value(default));
+        }
+    }
+    params
 }
 
 /// One line with the terminal's own control codes taken out of it.
@@ -2325,10 +2334,25 @@ mod tests {
                 };
                 for param in operation.params {
                     if names_a_path(param.name)
-                        && matches!(
-                            param.kind,
-                            crate::tool_params::Kind::Text | crate::tool_params::Kind::Either(_)
-                        )
+                        && matches!(param.kind, crate::tool_params::Kind::ListOf(_))
+                    {
+                        let answered = normalised(
+                            domain.name,
+                            operation.op,
+                            json!({param.name: ["res://levels/level.tscn"]}),
+                        );
+                        assert_eq!(
+                            answered[param.name][0],
+                            json!(expected("level.tscn")),
+                            "{} {} `{}[]`",
+                            domain.name,
+                            operation.op,
+                            param.name
+                        );
+                        checked += 1;
+                    }
+                    if names_a_path(param.name)
+                        && matches!(param.kind, crate::tool_params::Kind::Text)
                     {
                         let answered = normalised(
                             domain.name,
@@ -2386,10 +2410,10 @@ mod tests {
         let batched = normalised(
             "godot_script",
             "open",
-            json!({"path": ["res://scripts/a.gd", "scripts/b.gd"]}),
+            json!({"paths": ["res://scripts/a.gd", "scripts/b.gd"]}),
         );
-        assert_eq!(batched["path"][0], "scripts/a.gd");
-        assert_eq!(batched["path"][1], "scripts/b.gd");
+        assert_eq!(batched["paths"][0], "scripts/a.gd");
+        assert_eq!(batched["paths"][1], "scripts/b.gd");
 
         let renamed = normalised(
             "godot_script",
@@ -2408,8 +2432,8 @@ mod tests {
             normalised(
                 "godot_script",
                 "open",
-                json!({"path": "res://../secrets.gd"})
-            )["path"],
+                json!({"paths": ["res://../secrets.gd"]})
+            )["paths"][0],
             "../secrets.gd"
         );
         for climbing in [
@@ -2462,23 +2486,25 @@ mod tests {
                 .find(|domain| domain.name == "godot_script")
                 .and_then(|domain| domain.operation(op))
                 .unwrap_or_else(|| panic!("godot_script {op} declares its parameters"));
-            let path = params
+            assert!(
+                params.params.iter().all(|param| param.name != "path"),
+                "godot_script {op} still offers a single path beside the list"
+            );
+            let paths = params
                 .params
                 .iter()
-                .find(|param| param.name == "path")
-                .unwrap_or_else(|| panic!("godot_script {op} names a path"));
+                .find(|param| param.name == "paths")
+                .unwrap_or_else(|| panic!("godot_script {op} names its paths"));
             assert_eq!(
-                path.kind,
-                crate::tool_params::Kind::Either(&[
-                    crate::tool_params::Kind::Text,
-                    crate::tool_params::Kind::List
-                ]),
-                "godot_script {op} must take one script or a list of them"
+                paths.kind,
+                crate::tool_params::Kind::ListOf(&crate::tool_params::Kind::Text),
+                "godot_script {op} must take a list of script paths"
             );
-            crate::tool_repair::check(
+            assert!(paths.required, "godot_script {op} needs a path to work on");
+            crate::tool_check::check(
                 "godot_script",
                 op,
-                &json!({"path": ["scripts/a.gd", "scripts/b.gd"]}),
+                &json!({"paths": ["scripts/a.gd", "scripts/b.gd"]}),
             )
             .unwrap_or_else(|failure| {
                 panic!("a list of paths must pass {op}: {}", failure.message)
@@ -2489,7 +2515,7 @@ mod tests {
     /// A batch is refused for the same file a single call is refused for, and says which.
     #[test]
     fn a_batch_of_scripts_refuses_the_entry_that_is_not_a_script() {
-        let failure = named_scripts(&json!({"path": ["scripts/a.gd", "scenes/level_1.tscn"]}))
+        let failure = named_scripts(&json!({"paths": ["scripts/a.gd", "scenes/level_1.tscn"]}))
             .expect_err("a scene inside a batch must be refused");
         assert_eq!(failure.code, "unsupported_file");
         assert!(
@@ -2497,27 +2523,17 @@ mod tests {
             "the refusal must name the entry that is wrong: {}",
             failure.message
         );
+        for empty in [json!({"paths": []}), json!({})] {
+            assert_eq!(
+                named_scripts(&empty)
+                    .expect_err("a call naming no script must be refused")
+                    .code,
+                "invalid_params"
+            );
+        }
         assert_eq!(
-            named_scripts(&json!({"path": []}))
-                .expect_err("an empty list must be refused")
-                .code,
-            "invalid_params"
-        );
-        assert_eq!(
-            named_scripts(&json!({"path": "scripts/a.gd"})).expect("one script"),
-            (vec!["scripts/a.gd".to_owned()], false)
-        );
-        assert_eq!(
-            named_scripts(&json!({"path": ["scripts/a.gd"]})).expect("a list of one"),
-            (vec!["scripts/a.gd".to_owned()], true)
-        );
-        assert_eq!(
-            one_or_many(vec![json!({"closed": true})], false),
-            json!({"closed": true})
-        );
-        assert_eq!(
-            one_or_many(vec![json!({"closed": true})], true),
-            json!({"files": [{"closed": true}]})
+            named_scripts(&json!({"paths": ["scripts/a.gd"]})).expect("a list of one"),
+            vec!["scripts/a.gd".to_owned()]
         );
     }
 
@@ -2690,17 +2706,20 @@ mod tests {
                 GODOT_TOOL,
                 &[
                     (
-                        "node.create",
-                        json!({"parent": "/L", "type": "Node2D", "name": "A"}),
+                        "node.create_nodes",
+                        json!({"nodes": [{"parent": "/L", "type": "Node2D", "name": "A"}]}),
                     ),
-                    ("node.create", json!({"parent": "/L", "name": "B"})),
+                    (
+                        "node.create_nodes",
+                        json!({"nodes": [{"parent": "/L", "name": "B"}]}),
+                    ),
                 ],
             ),
         )
         .expect_err("an entry with no type cannot be run");
         assert_eq!(failure.code, "missing_param");
         assert!(
-            failure.message.starts_with("`ops[1]` (node.create):"),
+            failure.message.starts_with("`ops[1]` (node.create_nodes):"),
             "{}",
             failure.message
         );
@@ -3031,7 +3050,15 @@ mod tests {
             );
         }
 
-        let answered = logs_domain(json!({"limit": 12})).expect("the logs read");
+        assert!(
+            logs_domain(json!({"limit": 12})).expect("the logs read")["entries"]
+                .as_array()
+                .is_some_and(Vec::is_empty),
+            "a call naming no severity reads at the catalogue's default, which these lines are below"
+        );
+
+        let answered =
+            logs_domain(json!({"limit": 12, "minSeverity": "info"})).expect("the logs read");
         let entries = answered["entries"].as_array().expect("entries");
         assert_eq!(entries.len(), 12, "{answered}");
         assert_eq!(entries[0]["message"], "[player] line 0", "{answered}");
@@ -3041,8 +3068,10 @@ mod tests {
             "{answered}"
         );
 
-        let next = logs_domain(json!({"limit": 3, "after": answered["cursor"].clone()}))
-            .expect("the next page");
+        let next = logs_domain(
+            json!({"limit": 3, "minSeverity": "info", "after": answered["cursor"].clone()}),
+        )
+        .expect("the next page");
         assert_eq!(next["entries"][0]["message"], "[player] line 12", "{next}");
         godot_session::clear_logs();
     }
@@ -3050,8 +3079,8 @@ mod tests {
     /// A parameter mistake in the fourth entry has to name the fourth entry.
     ///
     /// The checker's own sentence is about the operation, and it is the same sentence whichever
-    /// entry wrote it. `godot_node create requires `type`` is not actionable when the model sent
-    /// eleven creates; the entry it came from is the whole of what makes it one.
+    /// entry wrote it. `godot_node rename requires `name`` is not actionable when the model sent
+    /// eleven renames; the entry it came from is the whole of what makes it one.
     #[test]
     fn a_bad_entry_is_blamed_by_its_position_and_nothing_in_the_list_runs() {
         let app = unattended_app();
@@ -3060,22 +3089,16 @@ mod tests {
             calls(
                 "godot_node",
                 &[
-                    (
-                        "create",
-                        json!({"parent": "/L", "type": "Node2D", "name": "A"}),
-                    ),
-                    (
-                        "create",
-                        json!({"parent": "/L", "type": "Node2D", "name": "B"}),
-                    ),
-                    ("create", json!({"parent": "/L", "name": "C"})),
+                    ("rename", json!({"node": "/L/A", "name": "A2"})),
+                    ("rename", json!({"node": "/L/B", "name": "B2"})),
+                    ("rename", json!({"node": "/L/C"})),
                 ],
             ),
         )
-        .expect_err("an entry with no type cannot be run");
+        .expect_err("an entry with no name cannot be run");
         assert_eq!(failure.code, "missing_param");
         assert!(
-            failure.message.starts_with("`ops[2]` (create):"),
+            failure.message.starts_with("`ops[2]` (rename):"),
             "{}",
             failure.message
         );
@@ -3381,10 +3404,10 @@ mod tests {
     /// rather than a repeat. The fixture is the evidence, so the fixture is the test: what a model
     /// actually sends is what the gate has to let through.
     ///
-    /// The nine shapes under `repairs` are deliberately not here. Those are calls the repair pass
-    /// rewrites before the router sees them, so the raw form is expected to be refused;
-    /// `every_shape_the_fixture_records_as_repaired_is_the_shape_the_router_accepts` in
-    /// `tool_params.rs` holds them to the shape they must be rewritten into.
+    /// The nine shapes under `repairs` are deliberately not here. Those are calls the generated
+    /// schema refuses outright, so the raw form never reaches the gate;
+    /// `the_repaired_form_of_every_recorded_call_passes_the_check` in `tool_check.rs` holds each
+    /// one to the corrected form instead.
     #[test]
     fn no_shape_a_model_recorded_is_refused_by_the_gate() {
         let recorded: Value = serde_json::from_slice(
@@ -3419,8 +3442,7 @@ mod tests {
                     object.remove("op");
                 }
                 let op = entry["op"].as_str().expect("an op name");
-                crate::tool_repair::repair(tool, op, &mut params);
-                crate::tool_repair::check(tool, op, &params).unwrap_or_else(|failure| {
+                crate::tool_check::check(tool, op, &params).unwrap_or_else(|failure| {
                     panic!("{tool} {op} was refused: {}", failure.message)
                 });
             }
@@ -4059,11 +4081,11 @@ mod tests {
                 "input",
                 json!({"events": [
                     {"kind": "key", "key": "A", "pressed": false, "device": 16},
-                    {"kind": "mouse_button", "button": "left", "position": [4, 5]},
-                    {"kind": "mouse_button", "button": 3},
+                    {"kind": "mouse_button", "button": "MOUSE_BUTTON_LEFT", "position": [4, 5]},
+                    {"kind": "mouse_button", "button": "MOUSE_BUTTON_MIDDLE"},
                     {"kind": "mouse_motion", "position": [1, 2], "relative": [3, 4]},
-                    {"kind": "joypad_button", "button": 2, "pressed": true},
-                    {"kind": "joypad_motion", "axis": 1, "value": -0.5},
+                    {"kind": "joypad_button", "joypadButton": "JOY_BUTTON_X", "pressed": true},
+                    {"kind": "joypad_motion", "axis": "JOY_AXIS_LEFT_Y", "value": -0.5},
                 ]}),
             ),
             &crate::settings::GodotSettings::default(),

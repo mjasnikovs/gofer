@@ -1,7 +1,7 @@
 // The S2 surface — one `godot` tool, an ops array, one oneOf branch per dotted op — built from
 // whatever catalogue it is handed, so an arm is a catalogue transform and nothing else.
 import {readFile} from 'node:fs/promises'
-import {jsonSchemaOfParams, signatureOf} from '../tool-schema.mjs'
+import {jsonSchemaOfParams, signatureOf} from './tool-schema-2026-09-09.mjs'
 
 const S = process.env.SCRATCH ?? import.meta.dirname
 const shipped = JSON.parse(await readFile(`${S}/shapes-tools-C.json`, 'utf8'))

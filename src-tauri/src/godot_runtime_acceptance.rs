@@ -323,8 +323,8 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
     let click = session.call(
         "runtime.input",
         json!({"events": [
-            {"kind": "mouse_button", "button": "left", "pressed": true, "position": [10, 10], "device": INJECTED_DEVICE},
-            {"kind": "mouse_button", "button": "left", "pressed": false, "position": [10, 10], "device": INJECTED_DEVICE},
+            {"kind": "mouse_button", "button": "MOUSE_BUTTON_LEFT", "pressed": true, "position": [10, 10], "device": INJECTED_DEVICE},
+            {"kind": "mouse_button", "button": "MOUSE_BUTTON_LEFT", "pressed": false, "position": [10, 10], "device": INJECTED_DEVICE},
         ]}),
     );
     assert_eq!(click["applied"], 2, "press and release are both applied");
@@ -333,8 +333,8 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
     let unspelled = session.call(
         "runtime.input",
         json!({"events": [
-            {"kind": "mouse_button", "button": "left", "position": [10, 10], "device": INJECTED_DEVICE},
-            {"kind": "mouse_button", "button": "left", "position": [10, 10], "device": INJECTED_DEVICE},
+            {"kind": "mouse_button", "button": "MOUSE_BUTTON_LEFT", "position": [10, 10], "device": INJECTED_DEVICE},
+            {"kind": "mouse_button", "button": "MOUSE_BUTTON_LEFT", "position": [10, 10], "device": INJECTED_DEVICE},
         ]}),
     );
     assert_eq!(unspelled["applied"], 2, "both events are still injected");
@@ -347,8 +347,8 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
     let pad = session.call(
         "runtime.input",
         json!({"events": [
-            {"kind": "joypad_button", "button": 0, "pressed": true, "device": INJECTED_DEVICE},
-            {"kind": "joypad_button", "button": 0, "pressed": false, "device": INJECTED_DEVICE},
+            {"kind": "joypad_button", "joypadButton": "JOY_BUTTON_A", "pressed": true, "device": INJECTED_DEVICE},
+            {"kind": "joypad_button", "joypadButton": "JOY_BUTTON_A", "pressed": false, "device": INJECTED_DEVICE},
         ]}),
     );
     assert_eq!(pad["applied"], 2, "press and release are both applied");
@@ -376,12 +376,12 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
 
     let unnamed = session.error(
         "runtime.input",
-        json!({"events": [{"kind": "mouse_button", "button": "1", "position": [4, 4]}]}),
+        json!({"events": [{"kind": "mouse_button", "button": 1, "position": [4, 4]}]}),
         None,
     );
     assert!(
-        unnamed.contains("left") && unnamed.contains("wheel_up") && unnamed.contains("as a number"),
-        "the refusal has to name the buttons there are: {unnamed}"
+        unnamed.contains("not a mouse button") && unnamed.contains("the schema lists"),
+        "an index is not a name, and the refusal points at the names there are: {unnamed}"
     );
     for (sent, expected) in [
         (

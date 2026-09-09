@@ -244,9 +244,18 @@ pub enum ScriptRequest {
 #[cfg(test)]
 pub const LIST_SCRIPTS_FIELDS: &[(&str, bool)] = &[("under", true)];
 
-/// The fields [`OpenScriptRequest`] deserializes. See [`LIST_SCRIPTS_FIELDS`].
+/// What `open` and `close` read out of one call.
+///
+/// Not a request type of their own: the router reads `paths` and builds one [`OpenScriptRequest`]
+/// per entry, so the field the model writes and the field the language-server call takes are two
+/// different names on purpose. See [`LIST_SCRIPTS_FIELDS`].
 #[cfg(test)]
-pub const OPEN_SCRIPT_FIELDS: &[(&str, bool)] = &[("path", false)];
+pub const NAMED_SCRIPTS_FIELDS: &[(&str, bool)] = &[("paths", false)];
+
+/// What `diagnostics` reads out of one call, which is [`NAMED_SCRIPTS_FIELDS`] and the wait it
+/// shares across the whole batch. See [`diagnostics_for`].
+#[cfg(test)]
+pub const DIAGNOSE_SCRIPTS_FIELDS: &[(&str, bool)] = &[("paths", false), ("timeoutMs", true)];
 
 /// The fields [`UpdateScriptRequest`] deserializes. See [`LIST_SCRIPTS_FIELDS`].
 #[cfg(test)]
@@ -1204,7 +1213,10 @@ fn request_rescan(path: &str) {
     let Some(rpc) = godot_session::rpc_session() else {
         return;
     };
-    let _ = rpc.call(CallRequest::new("resource.rescan", json!({"path": path})));
+    let _ = rpc.call(CallRequest::new(
+        "resource.rescan",
+        json!({"paths": [path]}),
+    ));
 }
 
 /// A rename plan, or the refusal an empty one has to be.

@@ -436,7 +436,7 @@ fn cells_and_resources_answer_from_what_they_wrote() {
         json!({
             "path": "res://world.tres",
             "texture": "res://tiles.png",
-            "tileSize": 16,
+            "tileWidth": 16, "tileHeight": 16,
             "solid": [[0, 0]]
         }),
     );
@@ -562,7 +562,7 @@ fn a_texture_this_tool_draws_is_one_create_tileset_can_cut() {
         "resource.create_texture",
         json!({
             "path": "res://art/atlas.png",
-            "size": [32, 16],
+            "width": 32, "height": 16,
             "background": "#3b2a1a",
             "rects": [
                 {"x": 0, "y": 0, "width": 16, "height": 4, "color": "forestgreen"},
@@ -580,7 +580,7 @@ fn a_texture_this_tool_draws_is_one_create_tileset_can_cut() {
         json!({
             "path": "res://art/atlas.tres",
             "texture": "res://art/atlas.png",
-            "tileSize": 16,
+            "tileWidth": 16, "tileHeight": 16,
             "solid": [[1, 0]]
         }),
     );
@@ -588,14 +588,14 @@ fn a_texture_this_tool_draws_is_one_create_tileset_can_cut() {
 
     let again = session.call(
         "resource.create_texture",
-        json!({"path": "res://art/atlas.png", "size": [32, 16], "background": "black"}),
+        json!({"path": "res://art/atlas.png", "width": 32, "height": 16, "background": "black"}),
     );
     assert_eq!(again["replaced"], true, "{again}");
 
     let refused = session
         .try_call(
             "resource.create_texture",
-            json!({"path": "res://art/bad.png", "size": 8, "background": "notacolour"}),
+            json!({"path": "res://art/bad.png", "width": 8, "height": 8, "background": "notacolour"}),
             None,
         )
         .expect_err("an unreadable colour must be refused");
@@ -623,7 +623,7 @@ fn a_floor_wider_than_the_window_is_drawn_and_a_runaway_is_still_refused() {
         "resource.create_texture",
         json!({
             "path": "res://art/floor.png",
-            "size": [1152, 64],
+            "width": 1152, "height": 64,
             "background": "#8b5a2b",
             "rects": [{"x": 0, "y": 0, "width": 1152, "height": 8, "color": "forestgreen"}]
         }),
@@ -635,7 +635,7 @@ fn a_floor_wider_than_the_window_is_drawn_and_a_runaway_is_still_refused() {
     let refused = session
         .try_call(
             "resource.create_texture",
-            json!({"path": "res://art/huge.png", "size": [2048, 2048], "background": "red"}),
+            json!({"path": "res://art/huge.png", "width": 2048, "height": 2048, "background": "red"}),
             None,
         )
         .expect_err("four million pixels must be refused");
@@ -645,7 +645,7 @@ fn a_floor_wider_than_the_window_is_drawn_and_a_runaway_is_still_refused() {
     let refused = session
         .try_call(
             "resource.create_texture",
-            json!({"path": "res://art/thin.png", "size": [8192, 2], "background": "red"}),
+            json!({"path": "res://art/thin.png", "width": 8192, "height": 2, "background": "red"}),
             None,
         )
         .expect_err("a side past the edge must be refused");
@@ -677,7 +677,7 @@ fn a_path_that_climbs_out_of_the_project_is_refused_by_the_addon() {
     for (command, params) in [
         (
             "resource.create_texture",
-            json!({"path": "res://../escaped.png", "size": 8, "background": "red"}),
+            json!({"path": "res://../escaped.png", "width": 8, "height": 8, "background": "red"}),
         ),
         (
             "resource.create_shape",
@@ -689,7 +689,7 @@ fn a_path_that_climbs_out_of_the_project_is_refused_by_the_addon() {
         ),
         (
             "resource.create_texture",
-            json!({"path": "assets/../../escaped.png", "size": 8, "background": "red"}),
+            json!({"path": "assets/../../escaped.png", "width": 8, "height": 8, "background": "red"}),
         ),
     ] {
         let refused = session
@@ -707,7 +707,7 @@ fn a_path_that_climbs_out_of_the_project_is_refused_by_the_addon() {
 
     let drawn = session.call(
         "resource.create_texture",
-        json!({"path": "res://art/dots..png.png", "size": 4, "background": "red"}),
+        json!({"path": "res://art/dots..png.png", "width": 4, "height": 4, "background": "red"}),
     );
     assert_eq!(drawn["width"], 4, "{drawn}");
 
@@ -757,7 +757,10 @@ fn a_rescan_imports_an_asset_in_a_directory_made_after_the_editor_started() {
     std::fs::create_dir_all(worktree.join("assets")).expect("make the assets directory");
     std::fs::write(worktree.join("assets/late.png"), ATLAS).expect("write the atlas");
 
-    let scanned = session.call("resource.rescan", json!({"path": "res://assets/late.png"}));
+    let scanned = session.call(
+        "resource.rescan",
+        json!({"paths": ["res://assets/late.png"]}),
+    );
     assert_eq!(scanned["scanned"], true, "{scanned}");
     assert!(
         worktree.join("assets/late.png.import").exists(),
@@ -769,7 +772,7 @@ fn a_rescan_imports_an_asset_in_a_directory_made_after_the_editor_started() {
         json!({
             "path": "res://assets/late.tres",
             "texture": "res://assets/late.png",
-            "tileSize": 16
+            "tileWidth": 16, "tileHeight": 16
         }),
     );
     assert_eq!(built["grid"], json!([8, 2]), "{built}");
@@ -802,7 +805,7 @@ fn a_rescan_imports_an_asset_again_after_its_first_import_failed() {
 
     let refused = session.try_call(
         "resource.rescan",
-        json!({"path": "res://assets/fixed.png"}),
+        json!({"paths": ["res://assets/fixed.png"]}),
         None,
     );
     assert!(
@@ -811,7 +814,10 @@ fn a_rescan_imports_an_asset_again_after_its_first_import_failed() {
     );
 
     std::fs::write(worktree.join("assets/fixed.png"), ATLAS).expect("write the real atlas");
-    let scanned = session.call("resource.rescan", json!({"path": "res://assets/fixed.png"}));
+    let scanned = session.call(
+        "resource.rescan",
+        json!({"paths": ["res://assets/fixed.png"]}),
+    );
     assert_eq!(scanned["scanned"], true, "{scanned}");
 
     let built = session.call(
@@ -819,7 +825,7 @@ fn a_rescan_imports_an_asset_again_after_its_first_import_failed() {
         json!({
             "path": "res://assets/fixed.tres",
             "texture": "res://assets/fixed.png",
-            "tileSize": 16
+            "tileWidth": 16, "tileHeight": 16
         }),
     );
     assert_eq!(built["grid"], json!([8, 2]), "{built}");
@@ -849,14 +855,17 @@ fn a_hand_written_import_sidecar_is_not_an_imported_texture() {
          dest_files=[\"res://.godot/imported/hand.png-abc123.ctex\"]\n",
     )
     .expect("write the hand-rolled sidecar");
-    session.call("resource.rescan", json!({"path": "res://assets/hand.png"}));
+    session.call(
+        "resource.rescan",
+        json!({"paths": ["res://assets/hand.png"]}),
+    );
 
     let built = session.call(
         "resource.create_tileset",
         json!({
             "path": "res://assets/hand.tres",
             "texture": "res://assets/hand.png",
-            "tileSize": 16
+            "tileWidth": 16, "tileHeight": 16
         }),
     );
     assert_eq!(
@@ -1147,14 +1156,14 @@ fn a_resource_this_tool_wrote_carries_a_uid_the_project_can_resolve() {
 
     session.call(
         "resource.create_texture",
-        json!({"path": "res://art/atlas.png", "size": [16, 16], "background": "#3b2a1a"}),
+        json!({"path": "res://art/atlas.png", "width": 16, "height": 16, "background": "#3b2a1a"}),
     );
     session.call(
         "resource.create_tileset",
         json!({
             "path": "res://art/world.tres",
             "texture": "res://art/atlas.png",
-            "tileSize": [16, 16]
+            "tileWidth": 16, "tileHeight": 16
         }),
     );
     registered(&worktree, "res://art/world.tres", "the tileset");

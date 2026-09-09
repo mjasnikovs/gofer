@@ -127,10 +127,14 @@ tool operation, its parameters, the prose the model reads and the ten domain des
 `npm run generate` runs the pinned engine first, into `protocol/godot-vocabulary.json`, and then the
 surface generator — which reads that file for every vocabulary a parameter names. Without the pinned
 engine on this machine it says so in one line and generates from the committed vocabulary, so
-nothing else needs it. `protocol/schemas/v2/godot-tool.json` is a whole generated file rather than a
-region: it is the `godot` tool the model reads, and a test asserts the worker builds the same bytes.
-A new Godot command means a new catalogue entry and a new addon method. A new desktop command means
-registering it in `lib.rs` and adding its types to `src/services/desktop.ts` by hand.
+nothing else needs it. Two whole files are generated rather than regions, because JSON carries no
+comment to hold a marker in: `protocol/schemas/v2/godot-tool.json`, the `godot` tool the model
+reads, which a test asserts the worker builds byte for byte; and
+`protocol/schemas/v2/value.schema.json`, whose request half is printed from `tagPayloads` in
+`scripts/godot-vocabulary.mjs` — the one table that also prints the tool's `$defs.taggedValue`
+branches and the router's tag arity. A new Godot command means a new catalogue entry and a new addon
+method. A new desktop command means registering it in `lib.rs` and adding its types to
+`src/services/desktop.ts` by hand.
 
 The renderer spells a Godot command with `GodotCommandName`, emitted into
 `src/models/godot-commands.ts`. Give a command a real params or result type by adding one entry to

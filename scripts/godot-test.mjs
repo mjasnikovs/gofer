@@ -13,7 +13,8 @@ const SUITES = [
     'res://tests/parse_test.gd',
     'res://tests/project_config_test.gd',
     'res://tests/runtime_queue_test.gd',
-    'res://tests/monitors_test.gd'
+    'res://tests/monitors_test.gd',
+    'res://tests/tagged_value_test.gd'
 ]
 
 const STAGED = resolve(project, 'addons/gofer')

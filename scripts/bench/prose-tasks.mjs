@@ -59,7 +59,7 @@ const RULES = {
         'edit answers with each file’s diagnostics, so a diagnostics call about a file you just wrote'
         + ' asks again for a verdict you already have.',
     resourceTag:
-        'A property that holds a resource takes {"type": "resource", "value": {"path": "res://…"}}, never'
+        'A property that holds a resource takes {"type": "Resource", "value": {"path": "res://…"}}, never'
         + ' a string: a path written as a string is refused.'
 }
 const PLAIN = {
@@ -117,8 +117,8 @@ export const TASKS = [
             {
                 id: 'call-open',
                 op: 'script.open',
-                params: {path: 'scripts/enemy.gd'},
-                result: {path: 'scripts/enemy.gd', text: ENEMY}
+                params: {paths: ['scripts/enemy.gd']},
+                result: {files: [{path: 'scripts/enemy.gd', text: ENEMY}]}
             }
         ],
         wants: ops =>
@@ -145,7 +145,7 @@ export const TASKS = [
                 writesOf(e).some(
                     w =>
                         w?.property === 'shape'
-                        && w?.value?.type === 'resource'
+                        && w?.value?.type === 'Resource'
                         && w?.value?.value?.path === 'res://shapes/box.tres'
                 )
             )
@@ -156,7 +156,8 @@ export function answerOf({op, dotted, entry, revision, hint, task}) {
     if (dotted.startsWith('docs_search.'))
         return {answer: 'No documentation matched this question.', results: []}
     if (op === 'get_tree') return TREE
-    if (op === 'open') return {path: entry?.path ?? 'scripts/enemy.gd', text: ENEMY}
+    if (op === 'open')
+        return {files: (entry?.paths ?? ['scripts/enemy.gd']).map(path => ({path, text: ENEMY}))}
     const id = task.id
     if (id === 'clickButton' && op === 'input') {
         if (released(entry)) return {ok: true, fired: true, frame: 'png:…'}
@@ -183,7 +184,7 @@ export function answerOf({op, dotted, entry, revision, hint, task}) {
             const value = write?.value
             const bad =
                 typeof value === 'string'
-                || (value?.type && value.type !== 'resource' && write?.property === 'shape')
+                || (value?.type && value.type !== 'Resource' && write?.property === 'shape')
             if (bad) return {error: 'invalid_value', message: note(id, hint), trap: 1}
         }
     }

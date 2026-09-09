@@ -36,7 +36,7 @@
         "test:godot:addon": "node scripts/godot-acceptance.mjs",
         "test:godot:api": "node scripts/godot-api-drift.mjs",
         "test:coverage:rust": "node scripts/run-rust-coverage.mjs",
-        "generate": "node scripts/godot-vocabulary.mjs && node scripts/generate-command-surface.mjs",
+        "generate": "node scripts/godot-vocabulary-build.mjs && node scripts/generate-command-surface.mjs",
         "build:gdformat": "node scripts/build-gdformat.mjs",
         "build:node-runtime": "node scripts/build-node-runtime.mjs",
         "build:desktop:test": "tauri build --no-bundle --config src-tauri/tauri.wdio.conf.json --features webdriver",

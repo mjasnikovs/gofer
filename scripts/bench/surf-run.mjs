@@ -32,9 +32,11 @@ const own = Object.fromEntries(
     ])
 )
 // ...and every arm also judged by the one rule: the shipped per-op branch for (domain, op).
-const S1 = JSON.parse(await readFile(`${S}/surf-tools-S1.json`, 'utf8'))
+// The shipped ten-tool list, verbatim: its per-op branches are the one rule every arm is judged
+// by, whichever arm S1 happens to be in this run.
+const shippedTen = JSON.parse(await readFile(`${S}/shapes-tools-C.json`, 'utf8'))
 const canon = {}
-for (const tool of S1.filter(t => t.name.startsWith('godot_')))
+for (const tool of shippedTen.filter(t => t.name.startsWith('godot_')))
     for (const b of tool.parameters.properties.ops.items.oneOf ?? [])
         canon[`${tool.name}::${b.properties.op.const}`] = ajv.compile(b)
 

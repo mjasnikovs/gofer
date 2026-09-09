@@ -87,6 +87,9 @@ export const TASKS = [
                 e =>
                     Number(e.limit) === 50
                     && (e.minSeverity === 'error'
+                        // minSeverity defaults to warning now, so a call that leaves it out
+                        // reads the errors too; only a narrower or a stray value is wrong.
+                        || e.minSeverity === undefined
                         || e.source === 'editorError'
                         || /error/iu.test(String(e.contains ?? '')))
             )
@@ -116,22 +119,18 @@ export const TASKS = [
         priming: [
             {id: 'call-tree', domain: 'godot_scene', op: 'get_tree', params: {}, result: TREE}
         ],
-        wants: ops =>
-            has(
-                ops,
-                'godot_node',
-                'create',
-                e => e.parent === '/Main' && e.type === 'Sprite2D' && e.name === 'Coin'
+        // The single op and the batch of one both count: the batch is the shape that ships.
+        wants: ops => {
+            const made = createdBy(ops).get('Coin')
+            const at = placedBy(ops)
+            const placed = [...at.entries()].find(([node]) => String(node).endsWith('Coin'))?.[1]
+            return (
+                made?.parent === '/Main'
+                && made?.type === 'Sprite2D'
+                && placed?.[0] === 64
+                && placed?.[1] === 0
             )
-            && has(ops, 'godot_node', 'set_property', e => {
-                const at = positionOf(e.value)
-                return (
-                    String(e.node ?? '').endsWith('Coin')
-                    && e.property === 'position'
-                    && at?.[0] === 64
-                    && at?.[1] === 0
-                )
-            })
+        }
     },
     {
         id: 'shape',
@@ -156,8 +155,8 @@ export const TASKS = [
                 id: 'call-open',
                 domain: 'godot_script',
                 op: 'open',
-                params: {path: 'scripts/enemy.gd'},
-                result: {path: 'scripts/enemy.gd', text: ENEMY}
+                params: {paths: ['scripts/enemy.gd']},
+                result: {files: [{path: 'scripts/enemy.gd', text: ENEMY}]}
             }
         ],
         wants: ops =>
@@ -196,7 +195,8 @@ const MATCHES = [
 /** What the router would answer one operation, enough for the model to take the next step. */
 export function resultOf(op, entry, revision) {
     if (op === 'get_tree') return TREE
-    if (op === 'open') return {path: entry?.path ?? 'scripts/enemy.gd', text: ENEMY}
+    if (op === 'open')
+        return {files: (entry?.paths ?? ['scripts/enemy.gd']).map(path => ({path, text: ENEMY}))}
     if (op === 'read')
         return {entries: [{severity: 'error', text: 'Invalid call to function'}], total: 1}
     if (op === 'search_settings') return {matches: MATCHES, totalMatches: 3, truncated: false}

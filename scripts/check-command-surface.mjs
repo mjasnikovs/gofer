@@ -743,6 +743,30 @@ async function everyMergedNameDeclaresItsShape() {
 }
 await everyMergedNameDeclaresItsShape()
 
+/**
+ * One JSON shape per parameter, for ever.
+ *
+ * `either` was the kind that let one name mean two shapes, and a constrained sampler got those
+ * wrong oftener than anything else on the surface — `create_shape.size` was 73% invalid, and the
+ * router rescued none of them. The kind is gone from the generator, so this is not what refuses a
+ * new one; it is what says why, rather than "unknown kind".
+ */
+async function noParameterHasTwoShapes() {
+    const {operations} = JSON.parse(await read('protocol/schemas/v2/params.json'))
+    const walk = (row, params, at) => {
+        for (const param of params ?? []) {
+            if (param.kind === 'either')
+                fail(
+                    `${row.tool} ${row.op} ${at}${param.name} is an \`either\`. One parameter, one `
+                        + 'JSON shape: split it into two parameters or make it one list.'
+                )
+            walk(row, param.entry, `${at}${param.name}.`)
+        }
+    }
+    for (const row of operations) walk(row, row.params, '')
+}
+await noParameterHasTwoShapes()
+
 await noneOfItRanAgreement()
 
 const drivers = [

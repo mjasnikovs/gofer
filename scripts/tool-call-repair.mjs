@@ -1,14 +1,15 @@
 /**
- * The repairs the router will never get the chance to make.
+ * The only repairs left, and the only ones the schema cannot make.
  *
- * A call is validated against the generated schema between `prepareArguments` and the router, so a
- * shape the schema refuses never reaches `tool_repair.rs` and has to be repaired here. Everything
- * the schema accepts is the router's, and a second copy of one of those repairs is drift waiting to
- * happen — a fix for the double-wrapped tag once existed only here while both suites stayed green.
+ * A call is validated against the generated schema between `prepareArguments` and this, so every
+ * shape here is one that schema refuses — the `ops` bracket, the wrapper the parameters were
+ * parked under, the whitespace round a parameter's name, a list written as the text of itself.
+ * There used to be a second engine behind the schema, a repairing table in Rust; closing every
+ * entry and every tagged payload left it changing nothing, and it is gone.
  *
  * The line is not a preference and is no longer a comment: `tool-call-repair.test.mjs` runs every
- * row of `fixtures/tool-call-repairs.json` through pi-ai's own `validateToolArguments` and refuses
- * a row this file repairs that the schema would have let through.
+ * row of `fixtures/tool-call-repairs.json` through pi-ai's own `validateToolArguments` — the
+ * function the loop calls — and decides from that which engine each row belongs to.
  */
 const PARAM_KEYS = ['params', 'parameters', 'arguments', 'args', 'input']
 
@@ -226,8 +227,6 @@ export function readAValueWrittenAsAString(params, entry) {
 function shapeOfAValue(param) {
     if (param.kind === 'list' || param.kind === 'listOf') return 'list'
     if (param.kind === 'object') return 'object'
-    if (param.kind === 'either' && Array.isArray(param.of))
-        return param.of.some(one => one?.kind === 'list') ? 'list' : undefined
     return undefined
 }
 
@@ -354,8 +353,19 @@ function sayingNoneOfItRan(listed, refusal) {
     )
 }
 
+/**
+ * The `ops` list written as the JSON text of itself, which a provider that stringifies a nested
+ * array leaves behind. Anything that does not parse into a list stays as it arrived, for the
+ * refusal below to name.
+ */
+function readAnOpsListWrittenAsAString(raw) {
+    if (typeof raw.ops !== 'string') return raw
+    const parsed = parsedOrNothing(raw.ops)
+    return Array.isArray(parsed) ? {...raw, ops: parsed} : raw
+}
+
 export function normalizeToolCalls(operations, args, elsewhere) {
-    const raw = isObject(args) ? args : {}
+    const raw = readAnOpsListWrittenAsAString(isObject(args) ? args : {})
     const listed = Array.isArray(raw.ops) ? raw.ops : [raw]
     const entries = foldStrayEntries(
         operations,

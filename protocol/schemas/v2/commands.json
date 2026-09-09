@@ -164,7 +164,11 @@
         },
         {
             "command": "node.create",
-            "handler": "_node_create"
+            "handler": "_node_create",
+            "params": {
+                "required": ["parent", "type", "name"],
+                "optional": ["index", "scene"]
+            }
         },
         {
             "command": "node.create_nodes",
@@ -196,7 +200,11 @@
         },
         {
             "command": "node.set_property",
-            "handler": "_node_set_property"
+            "handler": "_node_set_property",
+            "params": {
+                "required": ["node", "property", "value"],
+                "optional": ["scene"]
+            }
         },
         {
             "command": "node.set_properties",

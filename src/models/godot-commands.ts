@@ -103,6 +103,9 @@ export type GodotRuntimeState = Readonly<{
 
 export type GodotCapture = Readonly<{running?: boolean | undefined; frame?: GodotFrame | undefined}>
 
+/** One file a rescan named, and whether the editor took it in. */
+export type GodotRescannedFile = Readonly<{path: string; scanned: boolean}>
+
 interface KnownGodotCommands {
     'session.get_state': GodotCommandSpec<NoGodotParams, GodotSessionStatus>
     'project.get_settings': GodotCommandSpec<NoGodotParams, GodotProjectSettings>
@@ -116,8 +119,8 @@ interface KnownGodotCommands {
     'scene.get_tree': GodotCommandSpec<GodotTreeBounds, GodotSceneTree>
     'node.inspect': GodotCommandSpec<Readonly<{scene: string; node: string}>, GodotNodeDetails>
     'resource.rescan': GodotCommandSpec<
-        Readonly<{path?: string}>,
-        Readonly<{scanned: boolean; path: string}>
+        Readonly<{paths?: readonly string[]}>,
+        Readonly<{scanned: boolean; files: readonly GodotRescannedFile[]}>
     >
     'runtime.run': GodotCommandSpec<NoGodotParams, GodotCapture>
     'runtime.restart': GodotCommandSpec<NoGodotParams, GodotCapture>

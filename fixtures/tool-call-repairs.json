@@ -1,21 +1,19 @@
 {
     "note": [
-        "One repair, one row, read by both engines that repair a torn tool call.",
+        "One repair, one row, read by both engines that still repair a torn tool call.",
         "`repairedBy` names which one owns it, and both suites assert both halves of that:",
-        "`worker` means scripts/tool-call-repair.mjs turns `wrote` into `becomes` and",
-        "src-tauri/src/tool_repair.rs leaves it alone; `router` is the other way round; `both`",
-        "means each engine makes it.",
+        "`worker` means scripts/tool-call-repair.mjs turns `wrote` into `becomes`; `schema` means",
+        "the generated grammar refuses `wrote` outright, so nothing rewrites it and the model has to",
+        "write `becomes` itself.",
         "The split is not a preference and is no longer a prose comment either. The agent loop",
         "validates a call against the generated schema between `prepareArguments` and the router,",
-        "so a shape the schema refuses never reaches the table and only the worker can answer it,",
-        "and a shape it accepts is the router's. `the line between the two engines is the schema's`",
-        "in tool-call-repair.test.mjs computes that for every row here with pi-ai's own",
-        "`validateToolArguments` \u2014 the function the loop calls \u2014 and refuses a row the worker",
-        "repairs that the schema would have let through. Four rows were `both` until it did:",
-        "one JavaScript pass reimplementing a repair the router already owned.",
-        "Written down and checked by nothing, that line had already drifted once: a fix for the",
-        "double-wrapped tag came to exist only in JavaScript while both suites stayed green.",
-        "A repair that migrates now fails on the side it left."
+        "so a shape the schema refuses never reaches Rust and only the worker can answer it.",
+        "`the line between the two engines is the schema's` in tool-call-repair.test.mjs computes",
+        "that for every row here with pi-ai's own `validateToolArguments` — the function the loop",
+        "calls — and refuses a row the worker repairs that the schema would have let through.",
+        "There was a third engine: a repairing table in Rust behind the schema. It changed 0 of 3,199",
+        "recorded entries once every entry and every tagged payload was closed, and it is deleted.",
+        "The two rows it owned are the schema's now."
     ],
     "repairs": [
         {
@@ -153,50 +151,66 @@
         {
             "why": "a resource written straight into a tagged value, with no payload wrapper",
             "tool": "godot_node",
-            "op": "set_property",
+            "op": "set_properties",
             "wrote": {
-                "node": "/HUD",
-                "property": "script",
-                "value": {
-                    "type": "Resource",
-                    "path": "res://scripts/hud.gd"
-                }
+                "properties": [
+                    {
+                        "node": "/HUD",
+                        "property": "script",
+                        "value": {
+                            "type": "Resource",
+                            "path": "res://scripts/hud.gd"
+                        }
+                    }
+                ]
             },
             "becomes": {
-                "node": "/HUD",
-                "property": "script",
-                "value": {
-                    "type": "Resource",
-                    "value": {
-                        "path": "res://scripts/hud.gd"
+                "properties": [
+                    {
+                        "node": "/HUD",
+                        "property": "script",
+                        "value": {
+                            "type": "Resource",
+                            "value": {
+                                "path": "res://scripts/hud.gd"
+                            }
+                        }
                     }
-                }
+                ]
             },
-            "repairedBy": "both"
+            "repairedBy": "worker"
         },
         {
             "why": "a tagged value whose own key names arrived wearing quotation marks",
             "tool": "godot_node",
-            "op": "set_property",
+            "op": "set_properties",
             "wrote": {
-                "node": "/HUD",
-                "property": "script",
-                "value": {
-                    "\"type\"": "Resource",
-                    "value": {
-                        "\"path\"": "res://scripts/hud.gd"
+                "properties": [
+                    {
+                        "node": "/HUD",
+                        "property": "script",
+                        "value": {
+                            "\"type\"": "Resource",
+                            "value": {
+                                "\"path\"": "res://scripts/hud.gd"
+                            }
+                        }
                     }
-                }
+                ]
             },
             "becomes": {
-                "node": "/HUD",
-                "property": "script",
-                "value": {
-                    "type": "Resource",
-                    "value": {
-                        "path": "res://scripts/hud.gd"
+                "properties": [
+                    {
+                        "node": "/HUD",
+                        "property": "script",
+                        "value": {
+                            "type": "Resource",
+                            "value": {
+                                "path": "res://scripts/hud.gd"
+                            }
+                        }
                     }
-                }
+                ]
             },
             "repairedBy": "worker"
         },
@@ -233,27 +247,35 @@
         {
             "why": "a tagged value wrapped in a second copy of its own tag",
             "tool": "godot_node",
-            "op": "set_property",
+            "op": "set_properties",
             "wrote": {
-                "node": "/HUD",
-                "property": "text",
-                "value": {
-                    "type": "String",
-                    "value": {
-                        "type": "String",
-                        "value": "Score: 0"
+                "properties": [
+                    {
+                        "node": "/HUD",
+                        "property": "text",
+                        "value": {
+                            "type": "String",
+                            "value": {
+                                "type": "String",
+                                "value": "Score: 0"
+                            }
+                        }
                     }
-                }
+                ]
             },
             "becomes": {
-                "node": "/HUD",
-                "property": "text",
-                "value": {
-                    "type": "String",
-                    "value": "Score: 0"
-                }
+                "properties": [
+                    {
+                        "node": "/HUD",
+                        "property": "text",
+                        "value": {
+                            "type": "String",
+                            "value": "Score: 0"
+                        }
+                    }
+                ]
             },
-            "repairedBy": "router"
+            "repairedBy": "schema"
         },
         {
             "why": "a flat entry beside the operation's own parameters, folded into the list it belongs to",

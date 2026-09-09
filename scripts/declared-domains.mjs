@@ -14,9 +14,6 @@ function spoken(param, words) {
         ...(resolved ? {vocabulary: resolved} : {}),
         ...(param.kind === 'choice' && resolved ? {of: resolved} : {}),
         ...(param.of?.kind ? {of: spoken(param.of, words)} : {}),
-        ...(Array.isArray(param.of) && param.kind === 'either' ?
-            {of: param.of.map(one => spoken(one, words))}
-        :   {}),
         ...(param.entry ? {entry: param.entry.map(one => spoken(one, words))} : {})
     }
 }

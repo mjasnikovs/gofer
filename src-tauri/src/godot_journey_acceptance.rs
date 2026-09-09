@@ -403,8 +403,8 @@ impl Journey {
             session_output,
             RETRY_EVERY,
             || {
-                self.try_call("godot_script", Self::one("open", json!({"path": path})))
-                    .map(|answer| answer["ops"][0]["result"].clone())
+                self.try_call("godot_script", Self::one("open", json!({"paths": [path]})))
+                    .map(|answer| answer["ops"][0]["result"]["files"][0].clone())
                     .map_err(|failure| format!("{}: {}", failure.code, failure.message))
             },
         )
@@ -529,12 +529,10 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
 
     let created = journey.call(
         "godot_node",
-        "create",
+        "create_nodes",
         json!({
             "scene": SCENE_PATH,
-            "parent": SCENE_ROOT,
-            "name": MARKER_NAME,
-            "type": "Marker2D",
+            "nodes": [{"parent": SCENE_ROOT, "name": MARKER_NAME, "type": "Marker2D"}],
             "expectedRevision": revision,
         }),
     );
@@ -588,8 +586,9 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
     let reported = journey.call(
         "godot_script",
         "diagnostics",
-        json!({"path": BROKEN_PATH, "timeoutMs": CALL_TIMEOUT_MS}),
-    );
+        json!({"paths": [BROKEN_PATH], "timeoutMs": CALL_TIMEOUT_MS}),
+    )["files"][0]
+        .clone();
     assert_eq!(reported["published"], true);
     assert!(
         reported["diagnostics"]
@@ -610,8 +609,9 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
     let fixed = journey.call(
         "godot_script",
         "diagnostics",
-        json!({"path": BROKEN_PATH, "timeoutMs": CALL_TIMEOUT_MS}),
-    );
+        json!({"paths": [BROKEN_PATH], "timeoutMs": CALL_TIMEOUT_MS}),
+    )["files"][0]
+        .clone();
     assert_eq!(fixed["published"], true);
     assert_eq!(
         fixed["diagnostics"].as_array().map(Vec::len),

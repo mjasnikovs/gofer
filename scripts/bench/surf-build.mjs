@@ -1,7 +1,7 @@
 // Four tool SURFACE shapes over one catalog. Per-op strict parameter schemas everywhere (arm C
 // style: no op.description, the summary lives once in the tool description).
 import {readFile, writeFile} from 'node:fs/promises'
-import {jsonSchemaOfParams, signatureOf} from '../tool-schema.mjs'
+import {jsonSchemaOfParams, signatureOf} from './tool-schema-2026-09-09.mjs'
 
 const S = process.env.SCRATCH ?? import.meta.dirname
 const catalog = JSON.parse(await readFile(`${S}/catalog.json`, 'utf8'))

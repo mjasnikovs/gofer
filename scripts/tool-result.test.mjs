@@ -165,7 +165,7 @@ test('says so when the same call keeps meeting the same refusal', async () => {
     const said = []
     for (let attempt = 0; attempt < 4; attempt += 1)
         await guarded
-            .execute('id', {ops: [{op: 'node.create'}]})
+            .execute('id', {ops: [{op: 'node.create_nodes'}]})
             .catch(error => said.push(error.message))
     assert.equal(said[0], 'missing_param: requires `parent`')
     assert.equal(said[1], 'missing_param: requires `parent`')

@@ -22,3 +22,8 @@ schema. The json_schema replaces tool calling; it does not constrain it.
 => ARM D IS IMPOSSIBLE ON THIS SERVER. There is no way to send a compact tool schema and enforce a
 different, stricter shape through a separate field: `grammar` is refused outright next to tools, and
 `json_schema` turns tool calling off.
+
+D7 (2026-09-10, ref-probe.mjs) a `$ref` to `parameters.$defs` inside a tool's own schema IS
+constrained: asked to write a Vector2 payload as a string under a `$ref`'d tagged-value oneOf, the
+model wrote `[-0.1, 0.3]`; it could not write the string. So the 36 tag branches can live once under
+`$defs` and be referenced from every tagged parameter.

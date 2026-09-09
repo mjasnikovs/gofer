@@ -21,7 +21,7 @@ const Protocol := preload("res://addons/gofer/protocol.gd")
 ## `expectedRevision` and `timeoutMs` are absent on purpose. Both are lifted onto the envelope by
 ## the caller, so a handler that looked for them among its parameters would refuse every call that
 ## was actually well formed.
-# GENERATED-BEGIN command-params sha256:10a9e6fa13a58567
+# GENERATED-BEGIN command-params sha256:b7c3f21ea434bdd1
 const COMMAND_PARAMS: Dictionary = {
     "session.get_state": {"required": [], "optional": []},
     "session.cancel": {"required": [], "optional": ["requestId"]},
@@ -73,9 +73,9 @@ const COMMAND_PARAMS: Dictionary = {
     "node.set_cells": {"required": ["node", "cells"], "optional": []},
     "node.get_cells": {"required": ["node"], "optional": ["limit"]},
     "node.inspect": {"required": ["node"], "optional": ["properties", "scene"]},
-    "resource.rescan": {"required": [], "optional": ["path"]},
-    "resource.create_tileset": {"required": ["path", "texture"], "optional": ["tileSize", "tiles", "solid"]},
-    "resource.create_texture": {"required": ["path", "size"], "optional": ["background", "rects"]},
+    "resource.rescan": {"required": [], "optional": ["paths"]},
+    "resource.create_tileset": {"required": ["path", "texture"], "optional": ["tileWidth", "tileHeight", "tiles", "solid", "allSolid"]},
+    "resource.create_texture": {"required": ["path", "width", "height"], "optional": ["background", "rects"]},
     "resource.create_shape": {"required": ["path", "shapeType"], "optional": ["size", "radius", "height", "points"]},
     "resource.describe_tileset": {"required": ["path"], "optional": []},
     "session.heartbeat": {"required": [], "optional": []},
@@ -110,23 +110,29 @@ static func error(code: String, message: String, details: Dictionary = {}) -> Di
     }
 
 
+## One whole number of pixels a command named, or what it stands for when the command named none.
+static func pixel_count(params: Dictionary, key: String, absent: int) -> Dictionary:
+    var raw: Variant = params.get(key, null)
+    if raw == null:
+        return {"value": absent}
+    if typeof(raw) != TYPE_INT and typeof(raw) != TYPE_FLOAT:
+        return error(
+            "invalid_params", "%s is a whole number of pixels, and %s is not" % [key, str(raw)]
+        )
+    return {"value": int(raw)}
+
 ## The tile size a TileSet command was given, or the sentence saying why it is not one.
 static func tile_size(params: Dictionary) -> Dictionary:
-    var raw: Variant = params.get("tileSize", null)
-    var size := Vector2i(DEFAULT_TILE_SIZE, DEFAULT_TILE_SIZE)
-    if raw != null:
-        if typeof(raw) == TYPE_INT or typeof(raw) == TYPE_FLOAT:
-            size = Vector2i(int(raw), int(raw))
-        elif typeof(raw) == TYPE_ARRAY and (raw as Array).size() == 2:
-            size = Vector2i(int((raw as Array)[0]), int((raw as Array)[1]))
-        else:
-            return error(
-                "invalid_params",
-                "tileSize is one number or two, as 16 or [16, 16]",
-            )
+    var width := pixel_count(params, "tileWidth", DEFAULT_TILE_SIZE)
+    if width.has("_gofer_error"):
+        return width
+    var height := pixel_count(params, "tileHeight", DEFAULT_TILE_SIZE)
+    if height.has("_gofer_error"):
+        return height
+    var size := Vector2i(int(width["value"]), int(height["value"]))
     if size.x < 1 or size.y < 1:
         return error(
-            "invalid_params", "tileSize must be positive, and this one is %s" % str(size)
+            "invalid_params", "A tile is at least one pixel on a side, and %s is not" % str(size)
         )
     return {"value": size}
 
@@ -220,7 +226,84 @@ static func build_shape(shape_type: String, params: Dictionary) -> Dictionary:
     return {"value": WorldBoundaryShape2D.new()}
 
 
-## Input events as the wire carries them, with Godot's own name for each key.
+# GENERATED-BEGIN input-constants sha256:8d4eedbc4a188c88
+## Every mouse button the engine publishes, under the name it publishes it under.
+const MOUSE_BUTTONS := {
+    "MOUSE_BUTTON_LEFT": MOUSE_BUTTON_LEFT,
+    "MOUSE_BUTTON_RIGHT": MOUSE_BUTTON_RIGHT,
+    "MOUSE_BUTTON_MIDDLE": MOUSE_BUTTON_MIDDLE,
+    "MOUSE_BUTTON_WHEEL_UP": MOUSE_BUTTON_WHEEL_UP,
+    "MOUSE_BUTTON_WHEEL_DOWN": MOUSE_BUTTON_WHEEL_DOWN,
+    "MOUSE_BUTTON_WHEEL_LEFT": MOUSE_BUTTON_WHEEL_LEFT,
+    "MOUSE_BUTTON_WHEEL_RIGHT": MOUSE_BUTTON_WHEEL_RIGHT,
+    "MOUSE_BUTTON_XBUTTON1": MOUSE_BUTTON_XBUTTON1,
+    "MOUSE_BUTTON_XBUTTON2": MOUSE_BUTTON_XBUTTON2,
+}
+
+## Every joypad button the engine publishes, under the name it publishes it under.
+const JOY_BUTTONS := {
+    "JOY_BUTTON_A": JOY_BUTTON_A,
+    "JOY_BUTTON_B": JOY_BUTTON_B,
+    "JOY_BUTTON_X": JOY_BUTTON_X,
+    "JOY_BUTTON_Y": JOY_BUTTON_Y,
+    "JOY_BUTTON_BACK": JOY_BUTTON_BACK,
+    "JOY_BUTTON_GUIDE": JOY_BUTTON_GUIDE,
+    "JOY_BUTTON_START": JOY_BUTTON_START,
+    "JOY_BUTTON_LEFT_STICK": JOY_BUTTON_LEFT_STICK,
+    "JOY_BUTTON_RIGHT_STICK": JOY_BUTTON_RIGHT_STICK,
+    "JOY_BUTTON_LEFT_SHOULDER": JOY_BUTTON_LEFT_SHOULDER,
+    "JOY_BUTTON_RIGHT_SHOULDER": JOY_BUTTON_RIGHT_SHOULDER,
+    "JOY_BUTTON_DPAD_UP": JOY_BUTTON_DPAD_UP,
+    "JOY_BUTTON_DPAD_DOWN": JOY_BUTTON_DPAD_DOWN,
+    "JOY_BUTTON_DPAD_LEFT": JOY_BUTTON_DPAD_LEFT,
+    "JOY_BUTTON_DPAD_RIGHT": JOY_BUTTON_DPAD_RIGHT,
+    "JOY_BUTTON_MISC1": JOY_BUTTON_MISC1,
+    "JOY_BUTTON_PADDLE1": JOY_BUTTON_PADDLE1,
+    "JOY_BUTTON_PADDLE2": JOY_BUTTON_PADDLE2,
+    "JOY_BUTTON_PADDLE3": JOY_BUTTON_PADDLE3,
+    "JOY_BUTTON_PADDLE4": JOY_BUTTON_PADDLE4,
+    "JOY_BUTTON_TOUCHPAD": JOY_BUTTON_TOUCHPAD,
+    "JOY_BUTTON_MISC2": JOY_BUTTON_MISC2,
+    "JOY_BUTTON_MISC3": JOY_BUTTON_MISC3,
+    "JOY_BUTTON_MISC4": JOY_BUTTON_MISC4,
+    "JOY_BUTTON_MISC5": JOY_BUTTON_MISC5,
+    "JOY_BUTTON_MISC6": JOY_BUTTON_MISC6,
+}
+
+## Every joypad axis the engine publishes, under the name it publishes it under.
+const JOY_AXES := {
+    "JOY_AXIS_LEFT_X": JOY_AXIS_LEFT_X,
+    "JOY_AXIS_LEFT_Y": JOY_AXIS_LEFT_Y,
+    "JOY_AXIS_RIGHT_X": JOY_AXIS_RIGHT_X,
+    "JOY_AXIS_RIGHT_Y": JOY_AXIS_RIGHT_Y,
+    "JOY_AXIS_TRIGGER_LEFT": JOY_AXIS_TRIGGER_LEFT,
+    "JOY_AXIS_TRIGGER_RIGHT": JOY_AXIS_TRIGGER_RIGHT,
+}
+# GENERATED-END input-constants
+
+## The engine's own value for one of these names, or -1 when the name is not one of them.
+static func named_constant(table: Dictionary, name: String) -> int:
+    return int(table.get(name, -1))
+
+## The name the engine publishes one of these values under, or nothing when none of them is it.
+static func constant_named(table: Dictionary, value: int) -> String:
+    for name: String in table:
+        if int(table[name]) == value:
+            return name
+    return ""
+
+## What a name outside one of these lists is refused with, written once because both halves of the
+## addon refuse one — in two different answer shapes.
+##
+## Never a recitation: the schema carries every word, and a sentence beside it is the half that
+## goes stale.
+static func unknown_constant_said(field: String, name: String) -> String:
+    return (
+        "'%s' is not a %s the engine publishes. The names it takes are the ones the schema lists"
+        % [name, field]
+    )
+
+## Input events as the wire carries them, with Godot's own name for each key and each button.
 static func encode_input_events(events: Array) -> Array:
     var encoded: Array = []
     for event in events:
@@ -230,11 +313,21 @@ static func encode_input_events(events: Array) -> Array:
                 key = OS.get_keycode_string(event.keycode)
             encoded.append({"kind": "key", "key": key})
         elif event is InputEventMouseButton:
-            encoded.append({"kind": "mouse_button", "button": event.button_index})
+            encoded.append({
+                "kind": "mouse_button",
+                "button": constant_named(MOUSE_BUTTONS, event.button_index),
+            })
         elif event is InputEventJoypadButton:
-            encoded.append({"kind": "joypad_button", "button": event.button_index})
+            encoded.append({
+                "kind": "joypad_button",
+                "joypadButton": constant_named(JOY_BUTTONS, event.button_index),
+            })
         elif event is InputEventJoypadMotion:
-            encoded.append({"kind": "joypad_motion", "axis": event.axis, "axisValue": event.axis_value})
+            encoded.append({
+                "kind": "joypad_motion",
+                "axis": constant_named(JOY_AXES, event.axis),
+                "axisValue": event.axis_value,
+            })
         elif event is InputEvent:
             encoded.append({"kind": "other", "description": event.as_text()})
     return encoded
@@ -259,16 +352,22 @@ static func decode_input_events(raw: Variant) -> Dictionary:
                 key_event.physical_keycode = code
                 events.append(key_event)
             "mouse_button":
-                var mouse_button := int(entry.get("button", 0))
-                if mouse_button < 1:
-                    return Protocol.decode_failed("A mouse_button event requires a button index of 1 or higher")
+                var mouse_name := str(entry.get("button", ""))
+                var mouse_button := named_constant(MOUSE_BUTTONS, mouse_name)
+                if mouse_button < 0:
+                    return Protocol.decode_failed(
+                        unknown_constant_said("mouse button", mouse_name)
+                    )
                 var mouse_event := InputEventMouseButton.new()
                 mouse_event.button_index = mouse_button
                 events.append(mouse_event)
             "joypad_button":
-                var pad_button := int(entry.get("button", -1))
+                var pad_name := str(entry.get("joypadButton", ""))
+                var pad_button := named_constant(JOY_BUTTONS, pad_name)
                 if pad_button < 0:
-                    return Protocol.decode_failed("A joypad_button event requires a button index")
+                    return Protocol.decode_failed(
+                        unknown_constant_said("joypad button", pad_name)
+                    )
                 var joypad_event := InputEventJoypadButton.new()
                 joypad_event.button_index = pad_button
                 events.append(joypad_event)
@@ -783,35 +882,30 @@ static func as_resource_path(value: Variant) -> String:
         return path
     return "res://" + path.trim_prefix("./").trim_prefix("/")
 
-## Reads `path` as one file or as a list of them, which is what lets a caller rescan everything it
+## Reads `paths` as the files one rescan names, which is what lets a caller rescan everything it
 ## just wrote in a single command.
 ##
-## One call per file is what produced the batch that broke: the tool takes one path, so eight new
-## sprites are eight requests, and the editor answers them inside one another. A list is both the
+## One call per file is what produced the batch that broke: the tool took one path, so eight new
+## sprites were eight requests, and the editor answered them inside one another. A list is both the
 ## shape `reimport_files` already wanted and the shape that stops an agent from having to send a
 ## storm of them.
 static func rescan_paths_param(params: Dictionary) -> Dictionary:
-    var raw: Variant = params.get("path", null)
+    var raw: Variant = params.get("paths", null)
     var listed: Array = []
     if raw == null:
-        return {"value": listed}
-    if typeof(raw) == TYPE_STRING or typeof(raw) == TYPE_STRING_NAME:
-        var single := str(raw)
-        if not single.is_empty():
-            listed.append(as_resource_path(single))
         return {"value": listed}
     if typeof(raw) != TYPE_ARRAY and typeof(raw) != TYPE_PACKED_STRING_ARRAY:
         return error(
             "invalid_params",
-            "resource.rescan takes a path or a list of paths",
-            {"path": raw}
+            "resource.rescan takes a list of paths",
+            {"paths": raw}
         )
     for entry: Variant in raw:
         if typeof(entry) != TYPE_STRING and typeof(entry) != TYPE_STRING_NAME:
             return error(
                 "invalid_params",
-                "resource.rescan takes a path or a list of paths",
-                {"path": entry}
+                "resource.rescan takes a list of paths",
+                {"paths": entry}
             )
         var named := str(entry)
         if named.is_empty():
@@ -828,21 +922,16 @@ static func rescan_paths_param(params: Dictionary) -> Dictionary:
         )
     return {"value": listed}
 
-## The pixel size of a texture, written as one number or as two.
-static func texture_size(raw: Variant) -> Dictionary:
-    var width := 0
-    var height := 0
-    if typeof(raw) == TYPE_INT or typeof(raw) == TYPE_FLOAT:
-        width = int(raw)
-        height = width
-    elif (typeof(raw) == TYPE_ARRAY and (raw as Array).size() == 2):
-        width = int((raw as Array)[0])
-        height = int((raw as Array)[1])
-    else:
-        return error(
-            "invalid_params",
-            "resource.create_texture takes size as one number or two, and %s is neither" % str(raw)
-        )
+## The pixel size of a texture, as the two numbers the command names.
+static func texture_size(params: Dictionary) -> Dictionary:
+    var measured_width := pixel_count(params, "width", 0)
+    if measured_width.has("_gofer_error"):
+        return measured_width
+    var measured_height := pixel_count(params, "height", 0)
+    if measured_height.has("_gofer_error"):
+        return measured_height
+    var width := int(measured_width["value"])
+    var height := int(measured_height["value"])
     if width < 1 or height < 1 or width > MAX_TEXTURE_EDGE or height > MAX_TEXTURE_EDGE:
         return error(
             "invalid_params",
@@ -1473,14 +1562,14 @@ static func texture_rects(raw: Variant, size: Vector2i) -> Dictionary:
 static func texture_plan(params: Dictionary) -> Dictionary:
     var path := as_resource_path(params.get("path", ""))
     if path.is_empty():
-        return error("invalid_params", "resource.create_texture requires path and size")
+        return error("invalid_params", "resource.create_texture requires path, width and height")
     if not path.ends_with(".png"):
         return error(
             "invalid_params",
             "A texture is saved as a .png, and %s is not one" % path,
             {"path": path}
         )
-    var measured := texture_size(params.get("size", null))
+    var measured := texture_size(params)
     if measured.has("_gofer_error"):
         return measured
     var size: Vector2i = measured["value"]
@@ -1552,8 +1641,15 @@ static func tileset_plan(
                 tiles.append(Vector2i(column, row))
 
     var solid_param: Variant = params.get("solid", null)
+    var all_solid := bool(params.get("allSolid", false))
+    if all_solid and solid_param != null:
+        return error(
+            "invalid_param",
+            "allSolid gives every tile collision and solid names the tiles that get it, so a call asks for one or the other",
+            {"solid": solid_param}
+        )
     var solid: Array = []
-    if typeof(solid_param) == TYPE_STRING and str(solid_param) == "all":
+    if all_solid:
         solid = tiles.duplicate()
     elif solid_param != null:
         var chosen := atlas_coords(params, "solid", grid)

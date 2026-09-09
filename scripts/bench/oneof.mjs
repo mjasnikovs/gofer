@@ -1,5 +1,5 @@
 import {readFile} from 'node:fs/promises'
-import {jsonSchemaOfEntry, jsonSchemaOfParams} from '../tool-schema.mjs'
+import {jsonSchemaOfEntry, jsonSchemaOfParams} from './tool-schema-2026-09-09.mjs'
 const SCRATCH = process.env.SCRATCH ?? import.meta.dirname
 const domains = JSON.parse(await readFile(`${SCRATCH}/catalog.json`, 'utf8'))
 const tok = async content =>

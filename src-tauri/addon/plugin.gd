@@ -1874,7 +1874,6 @@ func _resource_rescan(params: Dictionary) -> Dictionary:
         "scans": _scans_completed,
         "settled": 0,
         "deadline": Time.get_ticks_msec() + RESOURCE_SCAN_TIMEOUT_MS,
-        "path": "" if paths.is_empty() else str(paths[0]),
     }}
 
 
@@ -2088,15 +2087,19 @@ func _paths_not_loadable(paths: Array) -> Array[String]:
             missing.append(path)
     return missing
 
-## What a finished rescan answers with. `path` stays for the callers that named one file, so the
-## single-path answer is the one it always was.
+## What a finished rescan answers with: one entry per path it named, and none at all for the
+## whole-project walk, which claims nothing about any one file.
+##
+## A resource writer parks its own answer here to wait for the same scan, and that answer is what
+## its caller asked for — so it keeps its own shape and only learns that the scan finished.
 func _rescan_result(pending: Dictionary) -> Dictionary:
-    var answer := {
-        "scanned": true,
-        "path": pending.get("path", ""),
-        "paths": pending.get("paths", []),
-    }
-    return answer.merged(pending.get("result", {}), true)
+    var written: Dictionary = pending.get("result", {})
+    if not written.is_empty():
+        return {"scanned": true}.merged(written, true)
+    var files: Array = []
+    for path: String in pending.get("paths", []):
+        files.append({"path": path, "scanned": true})
+    return {"scanned": true, "files": files}
 
 ## The answer a resource writer hands back, held until the project knows the UID it just stamped.
 ##
@@ -2114,7 +2117,6 @@ func _walk_for_a_new_uid(path: String, answer: Dictionary) -> Dictionary:
         "scans": _scans_completed,
         "settled": 0,
         "deadline": Time.get_ticks_msec() + RESOURCE_SCAN_TIMEOUT_MS,
-        "path": path,
         "result": answer,
     }}
 

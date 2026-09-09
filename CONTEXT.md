@@ -146,17 +146,16 @@ remembered value is a `rememberValue`, including the frame's layout. The frame k
 `remembered-layout.ts` because it is a second key beside that one — a cursor per open script, which
 is written on every keystroke and published to nobody — not because it obeys a different rule.
 
-**Repair** — a torn tool call turned into the one the router accepts. Two engines make them, and
-which one owns a repair is not a preference. The agent loop validates a call against the generated
-schema between `prepareArguments` and the router, and the schema for a nested entry and for a tagged
-value is closed — so a shape it refuses never reaches the table, and `scripts/tool-call-repair.mjs`
-is the only layer that can answer it. The entry's own schema is open, so a key no operation declares
-does reach the table, and `src-tauri/src/tool_repair.rs` answers everything a key or a value means.
-`fixtures/tool-call-repairs.json` is one row per repair naming which engine owns it, and both suites
-assert both halves of every row: the owner repairs it, the other leaves it exactly as the model
-wrote it. Before that corpus the line was written down in two prose comments and checked by nothing,
-which is how a fix for the double-wrapped tag came to exist only in JavaScript while both suites
-stayed green.
+**Repair** — a torn tool call turned into the one the router accepts. One engine makes them now. The
+agent loop validates a call against the generated schema between `prepareArguments` and the router;
+every operation's entry is closed, and so is every payload a tagged value may carry, so a shape the
+schema refuses never reaches Rust and `scripts/tool-call-repair.mjs` is the only layer that can
+answer it. There was a second engine behind the schema, `src-tauri/src/tool_repair.rs`, which read
+what a key or a value meant: it changed 0 of 3,199 recorded entries once the tagged value closed,
+and it is deleted. What is left in Rust is `tool_check.rs`, which refuses by name and rewrites
+nothing. `fixtures/tool-call-repairs.json` is one row per repair naming which engine owns it —
+`worker` or `schema` — and the suites compute that rather than read it, by asking pi-ai's own
+validator whether the schema would have let the raw shape through.
 
 **Secret** — a slot in the one keyring, and the thing a driver authenticates with. Which slot that
 is is one row of `protocol/drivers.json`: `driver_secret` in Rust, `AI_CONNECTION_SECRETS` and

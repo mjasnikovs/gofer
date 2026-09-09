@@ -47,14 +47,6 @@ const MAX_WAIT_FRAMES := 600
 ## Every `Performance.Monitor` constant is accepted; these three are what "how is it running" asks.
 const DEFAULT_MONITORS: Array[String] = ["TIME_FPS", "MEMORY_STATIC", "OBJECT_NODE_COUNT"]
 
-const MOUSE_BUTTONS := {
-    "left": MOUSE_BUTTON_LEFT,
-    "right": MOUSE_BUTTON_RIGHT,
-    "middle": MOUSE_BUTTON_MIDDLE,
-    "wheel_up": MOUSE_BUTTON_WHEEL_UP,
-    "wheel_down": MOUSE_BUTTON_WHEEL_DOWN,
-}
-
 var _tree_nodes_seen: int = 0
 var _tree_truncated: bool = false
 ## The bounds of the walk in progress, taken from the call and held at the engine's own caps.
@@ -434,23 +426,10 @@ func _decode_runtime_events(raw: Variant) -> Dictionary:
                 key_event.pressed = _pressed_or_released(entry as Dictionary, held, "key:%d" % code)
                 events.append(key_event)
             "mouse_button":
-                var button_name: Variant = (entry as Dictionary).get("button", "left")
-                var button_index := MOUSE_BUTTON_LEFT
-                if typeof(button_name) == TYPE_STRING:
-                    if not MOUSE_BUTTONS.has(button_name):
-                        var offered: Array = MOUSE_BUTTONS.keys()
-                        offered.sort()
-                        return _decode_failed(
-                            (
-                                "Unknown mouse button '%s'. The named buttons are %s, "
-                                + "or a button index as a number"
-                            ) % [button_name, ", ".join(offered)]
-                        )
-                    button_index = MOUSE_BUTTONS[button_name]
-                else:
-                    button_index = int(button_name)
-                    if button_index < 1:
-                        return _decode_failed("A mouse_button event requires a button index of 1 or higher")
+                var button_name := str((entry as Dictionary).get("button", ""))
+                var button_index := Params.named_constant(Params.MOUSE_BUTTONS, button_name)
+                if button_index < 0:
+                    return _unknown_constant("mouse button", button_name)
                 var mouse_event := InputEventMouseButton.new()
                 mouse_event.button_index = button_index
                 mouse_event.pressed = _pressed_or_released(
@@ -467,9 +446,10 @@ func _decode_runtime_events(raw: Variant) -> Dictionary:
                 motion_event.relative = _point((entry as Dictionary).get("relative", [0, 0]))
                 events.append(motion_event)
             "joypad_button":
-                var pad_button := int((entry as Dictionary).get("button", -1))
+                var pad_name := str((entry as Dictionary).get("joypadButton", ""))
+                var pad_button := Params.named_constant(Params.JOY_BUTTONS, pad_name)
                 if pad_button < 0:
-                    return _decode_failed("A joypad_button event requires a button index")
+                    return _unknown_constant("joypad button", pad_name)
                 var joypad_event := InputEventJoypadButton.new()
                 joypad_event.button_index = pad_button
                 joypad_event.pressed = _pressed_or_released(
@@ -477,9 +457,10 @@ func _decode_runtime_events(raw: Variant) -> Dictionary:
                 )
                 events.append(joypad_event)
             "joypad_motion":
-                var axis := int((entry as Dictionary).get("axis", -1))
+                var axis_name := str((entry as Dictionary).get("axis", ""))
+                var axis := Params.named_constant(Params.JOY_AXES, axis_name)
                 if axis < 0:
-                    return _decode_failed("A joypad_motion event requires an axis index")
+                    return _unknown_constant("joypad axis", axis_name)
                 var axis_event := InputEventJoypadMotion.new()
                 axis_event.axis = axis
                 axis_event.axis_value = clampf(
@@ -510,3 +491,7 @@ func _point(raw: Variant) -> Vector2:
 
 func _decode_failed(message: String) -> Dictionary:
     return {"ok": false, "events": [], "message": message}
+
+## The refusal a name outside one of the engine's input enums gets, in this half's answer shape.
+func _unknown_constant(field: String, name: String) -> Dictionary:
+    return _decode_failed(Params.unknown_constant_said(field, name))
