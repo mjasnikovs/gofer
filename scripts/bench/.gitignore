@@ -1,0 +1,13 @@
+# Built arms and recorded rows. The inputs beside them (catalog.json, prompt.txt,
+# tools.json, shapes-tools-C.json, extension_api.json, probe/) are committed.
+*-tools-*.json
+!shapes-tools-C.json
+*-catalog-*.json
+*-rows*.json
+*-rescored.json
+surf-map.json
+attribution.json
+corpus.json
+inventory.txt
+tools-partial.json
+rustprobe/

@@ -1,0 +1,2604 @@
+[
+    {
+        "name": "read",
+        "description": "Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.",
+        "parameters": {
+            "type": "object",
+            "required": ["path"],
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file to read (relative or absolute)"
+                },
+                "offset": {
+                    "type": "number",
+                    "description": "Line number to start reading from (1-indexed)"
+                },
+                "limit": {
+                    "type": "number",
+                    "description": "Maximum number of lines to read"
+                }
+            }
+        }
+    },
+    {
+        "name": "write",
+        "description": "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
+        "parameters": {
+            "type": "object",
+            "required": ["path", "content"],
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file to write (relative or absolute)"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Content to write to the file"
+                }
+            }
+        }
+    },
+    {
+        "name": "edit",
+        "description": "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.",
+        "parameters": {
+            "type": "object",
+            "required": ["path", "edits"],
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file to edit (relative or absolute)"
+                },
+                "edits": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["oldText", "newText"],
+                        "properties": {
+                            "oldText": {
+                                "type": "string",
+                                "description": "Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call."
+                            },
+                            "newText": {
+                                "type": "string",
+                                "description": "Replacement text for this targeted edit."
+                            }
+                        }
+                    },
+                    "description": "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead."
+                }
+            }
+        }
+    },
+    {
+        "name": "bash",
+        "description": "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds. It runs in the project root and can reach nothing outside it: every path in the command is relative to that root, and an absolute path, or one that climbs out with .. or ~, is refused before the command runs. Scratch output is the exception: a path under the temporary directory the OS gives you is allowed, and nothing there is part of the project.",
+        "parameters": {
+            "type": "object",
+            "required": ["command"],
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "Bash command to execute"
+                },
+                "timeout": {
+                    "type": "number",
+                    "description": "Timeout in seconds (optional, no default timeout)"
+                }
+            }
+        }
+    },
+    {
+        "name": "godot_session",
+        "description": "Owns the managed Godot editor session bound to the active task worktree.\nOperations:\n- status: Reports the session state, ports, engine version, and worktree. (not twice in one call: It takes no parameters, so a second one in the same call is the first one again.)\n- start: Starts the editor session for the active task worktree. (not twice in one call: There is one editor session, so a second one in the same call is the first one again.)\n- stop: Stops the editor session and removes the staged Gofer addon. (not twice in one call: There is one editor session, so a second one in the same call is the first one again.)\n- get_state: Asks the addon for readiness, the open scene, its revision, and the dialog the editor is waiting on. A `dialog` is a question only a person can answer — its text and the buttons it offers — and until someone presses one the editor will not run the game. Nothing else reports it: commands are still answered while one is up, and a screenshot of the editor need not contain it. (not twice in one call: It takes no parameters, so a second one in the same call is the first one again.)\n- answer_dialog {button: text}: Presses a button on the dialog the editor is waiting on, by its label — one of the `buttons` the dialog was reported with. Use it when a dialog is blocking the work; there is no other way past one, and nothing else you can do will clear it. Read what it asks before choosing: the buttons do what they say, and some of them change the project. (not twice in one call: One dialog is up at a time, and pressing a button clears it, so a second press has nothing to press.)\n- undo: Undoes the last editor operation. (not twice in one call: One undo stack, walked in order: what the second call undoes depends on what the first one did.)\n- redo: Redoes the last undone editor operation. (not twice in one call: One undo stack, walked in order: what the second call undoes depends on what the first one did.)",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ops": {
+                    "type": "array",
+                    "minItems": 1,
+                    "description": "The operations to run, in order, each with its parameters beside its `op`. One operation is a list of one; several run in this one call rather than one call each. These may sit beside others and may not appear twice: status, start, stop, get_state, answer_dialog, undo, redo.",
+                    "items": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "status"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "start"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "stop"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "get_state"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "answer_dialog"
+                                    },
+                                    "button": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "button"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "undo"
+                                    },
+                                    "expectedRevision": {
+                                        "type": "integer",
+                                        "description": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own."
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "redo"
+                                    },
+                                    "expectedRevision": {
+                                        "type": "integer",
+                                        "description": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own."
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    }
+                }
+            },
+            "required": ["ops"]
+        }
+    },
+    {
+        "name": "godot_scene",
+        "description": "The edited scene in the editor — never the running game's scene tree. Every mutation here is checked against the scene's revision, and the router supplies that number from the last answer that carried one, so never pass it and never read the tree to fetch it.\nOperations:\n- list: Lists the scene files in the project. (not twice in one call: It takes no parameters, so a second one in the same call is the first one again.)\n- open {path: text}: Opens a scene. (not twice in one call: One scene is open at a time, so a second one would act on whatever the first left open.)\n- create {path: text, rootType: text, rootName?: text}: Creates a scene and opens it. It is checked against the revision of the scene being *replaced*, because creating a scene discards whatever is unsaved in the open one — which is what the check is for. The router holds that number already. A scene here is never inherited from another one: there is no base, and no call in this catalogue makes one scene extend another. To build on an existing scene, instantiate it with node.instantiate and set on the instance whatever differs — measured on 4.7.2, the instance keeps what is set on it and the scene it came from is unchanged.\n- get_tree {root?: text, depth?: int, limit?: int}: Returns the edited scene hierarchy and its revision. Read it to see what the scene holds, not to fetch a revision: every mutation is checked against a number the router already has, and answers with the next one.\n- save: Saves the edited scene. A scene nothing has changed is left exactly as it is and answers `wrote: false`; saving one anyway rewrites it from memory and drops the `uid` of anything the editor cannot resolve right now. (not twice in one call: One scene is open at a time, so a second one would act on whatever the first left open.)\n- save_as {path: text}: Saves the edited scene to a new path. (not twice in one call: One scene is open at a time, so a second one would act on whatever the first left open.)\n- reload: Reloads the edited scene from disk, discarding in-memory edits. (not twice in one call: One scene is open at a time, so a second one would act on whatever the first left open.)",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ops": {
+                    "type": "array",
+                    "minItems": 1,
+                    "description": "The operations to run, in order, each with its parameters beside its `op`. One operation is a list of one; several run in this one call rather than one call each. These may sit beside others and may not appear twice: list, open, save, save_as, reload.",
+                    "items": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "list"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "open"
+                                    },
+                                    "path": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "path"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "create"
+                                    },
+                                    "path": {
+                                        "type": "string"
+                                    },
+                                    "rootType": {
+                                        "type": "string"
+                                    },
+                                    "rootName": {
+                                        "type": "string"
+                                    },
+                                    "expectedRevision": {
+                                        "type": "integer",
+                                        "description": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own."
+                                    }
+                                },
+                                "required": ["op", "path", "rootType"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "get_tree"
+                                    },
+                                    "root": {
+                                        "type": "string",
+                                        "description": "The node to start from, as a path. The whole tree when it is absent."
+                                    },
+                                    "depth": {
+                                        "type": "integer",
+                                        "description": "How many levels below the starting node to walk. Every level when it is absent."
+                                    },
+                                    "limit": {
+                                        "type": "integer",
+                                        "description": "How many nodes to answer with, at most. The answer opens with `truncated`, which says whether it stopped early; a root or a depth is how you read the rest."
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "save"
+                                    },
+                                    "expectedRevision": {
+                                        "type": "integer",
+                                        "description": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own."
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "save_as"
+                                    },
+                                    "path": {
+                                        "type": "string"
+                                    },
+                                    "expectedRevision": {
+                                        "type": "integer",
+                                        "description": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own."
+                                    }
+                                },
+                                "required": ["op", "path"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "reload"
+                                    },
+                                    "expectedRevision": {
+                                        "type": "integer",
+                                        "description": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own."
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    }
+                }
+            },
+            "required": ["ops"]
+        }
+    },
+    {
+        "name": "godot_node",
+        "description": "Node authoring inside the edited scene. Every mutation is undoable and every one of them is checked against the scene's revision — which the router supplies from the last answer that carried one, and every mutation's own answer carries the next. So mutate, then mutate again: there is no revision to pass and no tree to re-read between them. Paths are the scene's own, like /Level1 or /Level1/Ground. Nothing here writes the file: godot_scene save does.\nOperations:\n- inspect {node: text, properties?: list of text}: Inspects a node. Answers with its type, its groups, every signal it can emit, the connections it already has, and every property whose value is not still the one its class ships with. The rest are named, without their values, in `atClassDefault` — a Label has 129 properties and four of them differ, so this is most of the node. `properties` narrows the answer to the names you list and answers every one of them in full, at their default or not, exactly as runtime.inspect_node does for the running game. Read a property here before setting it rather than guessing what it holds; `stored` is false for properties the scene recomputes, like a Control's position and size and every theme_override_*, and those are set the same way as any other.\n- create {parent: text, type: text, name: text, index?: int}: Creates a node. `parent` is the parent's path — the root's own path, like /Level1, for a direct child.\n- create_nodes {nodes: list of {parent: text, type: text, name: text, index?: int}}: Creates several nodes in one call, as one revision and one undo step. Prefer this over calling create in a row: create answers with the revision the next create needs, so forty nodes one at a time is forty round trips. Each `nodes` entry is exactly what create takes. Entries are applied in order, so a later entry may name a node an earlier entry creates as its parent, and a whole subtree goes in at once. Nothing is attached unless every entry is accepted.\n- instantiate {parent: text, path: text, name?: text, index?: int}: Places an instance of a saved scene under a node. This is how a level repeats a thing — build the coin once as its own scene, then instantiate it wherever a coin goes, and one edit reaches every placement. `node.create` cannot do this: it only builds engine classes.\n- duplicate {node: text, name?: text}: Duplicates a node.\n- rename {node: text, name: text}: Renames a node.\n- reparent {node: text, newParent: text, index?: int}: Reparents a node.\n- change_type {node: text, type: text}: Turns a node into one of another class, keeping its name, its place, its children, its groups, its script, and every stored property the new class also has. This is the editor’s own Change Type: a Node2D placed as a player becomes a CharacterBody2D without being rebuilt node by node. A signal connected to or from the node does not travel — the connection names the node, and the new one is a different object — so put those back with connect_signal. The scene’s own root cannot be changed this way.\n- delete {node: text}: Deletes a node.\n- set_property {node: text, property: text, value: tagged}: Sets a property. `value` is tagged with its type — a `type` beside a `value`: {\"type\": \"vector2\", \"value\": [12, 34]}, {\"type\": \"float\", \"value\": 1.5}, {\"type\": \"string\", \"value\": \"hi\"}. A property that holds a resource — a CollisionShape2D's `shape`, a Sprite2D's `texture` — takes {\"type\": \"resource\", \"value\": {\"path\": \"res://…\"}}, never a string: a path written as a string is refused. A property that holds another node — an @export node reference — takes {\"type\": \"node_path\", \"value\": \"Box/Slider\"}, a path read from the node the property is on. A color takes four numbers, or a name like \"skyblue\", or a hex string like \"#8b5a2b\". The other tags are null, bool, int, rect2 and rect2i (four numbers each), vector2i, vector3, vector3i, vector4, vector4i, quaternion, plane, transform2d, basis, transform3d, array (of tagged values) and dictionary (of key and value pairs of them).\n- set_properties {properties: list of {node: text, property: text, value: tagged}}: Sets several properties in one call, as one revision and one undo step. Prefer this over calling set_property in a row, for the same reason create_nodes exists: each single write answers with the revision the next one needs. Each `properties` entry is exactly what set_property takes, with `value` tagged the same way, and entries may name different nodes. Nothing is written unless every entry is accepted.\n- add_to_group {node: text, group: text}: Puts a node in a group the saved scene keeps. Groups are how a running game finds every coin or enemy at once, with get_tree().get_nodes_in_group(\"…\").\n- remove_from_group {node: text, group: text}: Takes a node out of a group.\n- connect_signal {node: text, signal: text, method: text, target?: text, binds?: list, deferred?: flag, oneShot?: flag}: Connects a node's signal to a method, as an editor connection the scene keeps. `target` is the node carrying the method and defaults to the scene root; the method has to exist there already, so write the script first. `binds` are extra tagged values passed after the signal's own arguments. This is how a scene wires itself up without a `connect` call in _ready.\n- disconnect_signal {node: text, signal: text, method: text, target?: text, binds?: list}: Removes a connection. `binds` are tagged values like connect_signal's, and have to match the ones the connection was made with or nothing is found to remove.\n- set_cells {node: text, cells: list of {x: int, y: int, width?: int, height?: int, atlas?: list, source?: int}}: Paints tiles onto a TileMapLayer. This is how a 2D level is built — one TileMapLayer carrying a tileset, rather than a node per block. `x`/`y` are cell coordinates, not pixels, and `width`/`height` default to 1 so a rectangle is one entry — a whole ground row is {\"x\": 0, \"y\": 12, \"width\": 200, \"height\": 2, \"atlas\": [0, 0]}. `atlas` is the [column, row] of the tile in the tileset, which resource.describe_tileset lists. An entry with no `atlas` erases the cells it covers. The node needs its `tile_set` property set first, with node.set_property and a resource value.\n- get_cells {node: text, limit?: int}: Reads back what a TileMapLayer holds. Answers with how many cells are painted, the rectangle they span, and the tile each one draws.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ops": {
+                    "type": "array",
+                    "minItems": 1,
+                    "description": "The operations to run, in order, each with its parameters beside its `op`. One operation is a list of one; several run in this one call rather than one call each.",
+                    "items": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "inspect"
+                                    },
+                                    "node": {
+                                        "type": "string"
+                                    },
+                                    "properties": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "string"
+                                        },
+                                        "description": "The property names to read, like [\"text\", \"position\"]. Without it every property is answered."
+                                    },
+                                    "scene": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "node"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "create"
+                                    },
+                                    "parent": {
+                                        "type": "string"
+                                    },
+                                    "type": {
+                                        "type": "string"
+                                    },
+                                    "name": {
+                                        "type": "string"
+                                    },
+                                    "index": {
+                                        "type": "integer"
+                                    },
+                                    "expectedRevision": {
+                                        "type": "integer",
+                                        "description": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own."
+                                    },
+                                    "scene": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "parent", "type", "name"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "create_nodes"
+                                    },
+                                    "nodes": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "parent": {
+                                                    "type": "string"
+                                                },
+                                                "type": {
+                                                    "type": "string"
+                                                },
+                                                "name": {
+                                                    "type": "string"
+                                                },
+                                                "index": {
+                                                    "type": "integer"
+                                                }
+                                            },
+                                            "required": ["parent", "type", "name"],
+                                            "additionalProperties": false
+                                        },
+                                        "description": "Entries are applied in order, so a later entry may name a node an earlier entry creates as its parent."
+                                    },
+                                    "expectedRevision": {
+                                        "type": "integer",
+                                        "description": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own."
+                                    },
+                                    "scene": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "nodes"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "instantiate"
+                                    },
+                                    "parent": {
+                                        "type": "string"
+                                    },
+                                    "path": {
+                                        "type": "string"
+                                    },
+                                    "name": {
+                                        "type": "string"
+                                    },
+                                    "index": {
+                                        "type": "integer"
+                                    },
+                                    "expectedRevision": {
+                                        "type": "integer",
+                                        "description": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own."
+                                    },
+                                    "scene": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "parent", "path"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "duplicate"
+                                    },
+                                    "node": {
+                                        "type": "string"
+                                    },
+                                    "name": {
+                                        "type": "string"
+                                    },
+                                    "expectedRevision": {
+                                        "type": "integer",
+                                        "description": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own."
+                                    },
+                                    "scene": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "node"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "rename"
+                                    },
+                                    "node": {
+                                        "type": "string"
+                                    },
+                                    "name": {
+                                        "type": "string"
+                                    },
+                                    "expectedRevision": {
+                                        "type": "integer",
+                                        "description": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own."
+                                    },
+                                    "scene": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "node", "name"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "reparent"
+                                    },
+                                    "node": {
+                                        "type": "string"
+                                    },
+                                    "newParent": {
+                                        "type": "string"
+                                    },
+                                    "index": {
+                                        "type": "integer"
+                                    },
+                                    "expectedRevision": {
+                                        "type": "integer",
+                                        "description": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own."
+                                    },
+                                    "scene": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "node", "newParent"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "change_type"
+                                    },
+                                    "node": {
+                                        "type": "string"
+                                    },
+                                    "type": {
+                                        "type": "string"
+                                    },
+                                    "expectedRevision": {
+                                        "type": "integer",
+                                        "description": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own."
+                                    },
+                                    "scene": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "node", "type"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "delete"
+                                    },
+                                    "node": {
+                                        "type": "string"
+                                    },
+                                    "expectedRevision": {
+                                        "type": "integer",
+                                        "description": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own."
+                                    },
+                                    "scene": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "node"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "set_property"
+                                    },
+                                    "node": {
+                                        "type": "string"
+                                    },
+                                    "property": {
+                                        "type": "string"
+                                    },
+                                    "value": {
+                                        "type": "object",
+                                        "properties": {
+                                            "type": {
+                                                "type": "string"
+                                            },
+                                            "value": {
+                                                "description": "The payload is the bare value itself: a string, a number, an array of numbers, or {path} for a resource. Never a second {type, value} pair around it."
+                                            }
+                                        },
+                                        "required": ["type", "value"],
+                                        "description": "A script is attached here like any other resource: property \"script\", value {\"type\": \"resource\", \"value\": {\"path\": \"res://scripts/player.gd\"}}."
+                                    },
+                                    "expectedRevision": {
+                                        "type": "integer",
+                                        "description": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own."
+                                    },
+                                    "scene": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "node", "property", "value"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "set_properties"
+                                    },
+                                    "properties": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "node": {
+                                                    "type": "string"
+                                                },
+                                                "property": {
+                                                    "type": "string"
+                                                },
+                                                "value": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "type": {
+                                                            "type": "string"
+                                                        },
+                                                        "value": {
+                                                            "description": "The payload is the bare value itself: a string, a number, an array of numbers, or {path} for a resource. Never a second {type, value} pair around it."
+                                                        }
+                                                    },
+                                                    "required": ["type", "value"],
+                                                    "description": "A script is attached here like any other resource: property \"script\", value {\"type\": \"resource\", \"value\": {\"path\": \"res://scripts/player.gd\"}}."
+                                                }
+                                            },
+                                            "required": ["node", "property", "value"],
+                                            "additionalProperties": false
+                                        },
+                                        "description": "Entries may name different nodes."
+                                    },
+                                    "expectedRevision": {
+                                        "type": "integer",
+                                        "description": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own."
+                                    },
+                                    "scene": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "properties"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "add_to_group"
+                                    },
+                                    "node": {
+                                        "type": "string"
+                                    },
+                                    "group": {
+                                        "type": "string"
+                                    },
+                                    "expectedRevision": {
+                                        "type": "integer",
+                                        "description": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own."
+                                    }
+                                },
+                                "required": ["op", "node", "group"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "remove_from_group"
+                                    },
+                                    "node": {
+                                        "type": "string"
+                                    },
+                                    "group": {
+                                        "type": "string"
+                                    },
+                                    "expectedRevision": {
+                                        "type": "integer",
+                                        "description": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own."
+                                    }
+                                },
+                                "required": ["op", "node", "group"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "connect_signal"
+                                    },
+                                    "node": {
+                                        "type": "string"
+                                    },
+                                    "signal": {
+                                        "type": "string"
+                                    },
+                                    "method": {
+                                        "type": "string"
+                                    },
+                                    "target": {
+                                        "type": "string"
+                                    },
+                                    "binds": {
+                                        "type": "array"
+                                    },
+                                    "deferred": {
+                                        "type": "boolean"
+                                    },
+                                    "oneShot": {
+                                        "type": "boolean"
+                                    },
+                                    "expectedRevision": {
+                                        "type": "integer",
+                                        "description": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own."
+                                    }
+                                },
+                                "required": ["op", "node", "signal", "method"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "disconnect_signal"
+                                    },
+                                    "node": {
+                                        "type": "string"
+                                    },
+                                    "signal": {
+                                        "type": "string"
+                                    },
+                                    "method": {
+                                        "type": "string"
+                                    },
+                                    "target": {
+                                        "type": "string"
+                                    },
+                                    "binds": {
+                                        "type": "array"
+                                    },
+                                    "expectedRevision": {
+                                        "type": "integer",
+                                        "description": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own."
+                                    }
+                                },
+                                "required": ["op", "node", "signal", "method"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "set_cells"
+                                    },
+                                    "node": {
+                                        "type": "string"
+                                    },
+                                    "cells": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "x": {
+                                                    "type": "integer"
+                                                },
+                                                "y": {
+                                                    "type": "integer"
+                                                },
+                                                "width": {
+                                                    "type": "integer"
+                                                },
+                                                "height": {
+                                                    "type": "integer"
+                                                },
+                                                "atlas": {
+                                                    "type": "array",
+                                                    "description": "A [column, row] pair, naming the tile in the atlas. An entry without one erases the cells it covers."
+                                                },
+                                                "source": {
+                                                    "type": "integer"
+                                                }
+                                            },
+                                            "required": ["x", "y"],
+                                            "additionalProperties": false
+                                        }
+                                    },
+                                    "expectedRevision": {
+                                        "type": "integer",
+                                        "description": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own."
+                                    }
+                                },
+                                "required": ["op", "node", "cells"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "get_cells"
+                                    },
+                                    "node": {
+                                        "type": "string"
+                                    },
+                                    "limit": {
+                                        "type": "integer"
+                                    }
+                                },
+                                "required": ["op", "node"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    }
+                }
+            },
+            "required": ["ops"]
+        }
+    },
+    {
+        "name": "godot_project",
+        "description": "Project settings, autoloads, the Input Map, plugins, and machine-wide editor settings. Project writes persist in the task worktree; editor settings are machine-wide and outside Git.\nOperations:\n- get_settings: Returns the project settings overview. (not twice in one call: It takes no parameters, so a second one in the same call is the first one again.)\n- search_settings {query: text}: Searches project settings by name. Answers with at most 50 matches, plus `totalMatches` and `truncated` — narrow the query rather than ask for more, because there is no limit to raise.\n- get_setting {name: text}: Reads one project setting.\n- set_setting {name: text, value: tagged}: Writes one project setting. `value` is tagged with its type, the same shape node.set_property takes: {\"type\": \"int\", \"value\": 1152}, {\"type\": \"string\", \"value\": \"res://main.tscn\"}, {\"type\": \"vector2\", \"value\": [12, 34]}. A bare number or string is refused.\n- reset_setting {name: text}: Resets a project setting to its default, and answers what that did: `changed`, the `previous` value and the `value` it reads as now. A setting already at its default answers `changed: false` rather than reporting a write. A setting Godot ships a default for goes back to that default; one the project invented leaves the file.\n- list_autoloads: Lists the configured autoloads. (not twice in one call: It takes no parameters, so a second one in the same call is the first one again.)\n- set_autoload {name: text, path: text, enabled?: flag}: Adds or updates an autoload.\n- remove_autoload {name: text}: Removes an autoload.\n- list_input_actions {names?: list of text}: Lists the Input Map actions this project chose — its own, and the built-ins it overrode — with their events. The engine's untouched built-ins are named, without their events, in `atEngineDefault`: Godot registers 72 of them and writing them out is about 2,200 tokens of its own constant table. `names` answers exactly what it lists, chosen or not, which is how the events of an untouched built-in are read.\n- set_input_action {name: text, events: list of {kind: \"key\"|\"mouse_button\"|\"joypad_button\", key?: text like \"Enter\"|\"Kp Enter\"|\"Escape\"|\"Space\"|\"Backspace\"|\"Tab\"|\"Delete\"|\"Left\"|\"Right\"|\"Up\"|\"Down\"|\"PageUp\"|\"PageDown\"|\"Home\"|\"End\"|\"Shift\"|\"Ctrl\"|\"Alt\"|\"Meta\"|\"Comma\"|\"Period\"|\"Slash\"|\"Minus\"|\"Equal\"|\"BracketLeft\", button?: int}, deadzone?: number}: Writes an input action. `name` is the action's own name, like move_left, never a settings path. Each event names its kind and its key, as {\"kind\": \"key\", \"key\": \"A\"} — the same shape list_input_actions answers with. The named keys are in the signature; F1 to F16, A to Z and 0 to 9 are spelled as they read. The other kinds are mouse_button and joypad_button, each taking a `button` index.\n- remove_input_action {name: text}: Removes a project input action.\n- reset_input_action {name: text}: Drops the override of a built-in action.\n- list_plugins: Lists the project's editor plugins. (not twice in one call: It takes no parameters, so a second one in the same call is the first one again.)\n- set_plugin_enabled {plugin: text, enabled: flag}: Enables or disables a plugin.\n- search_editor_settings {query: text}: Searches machine-wide editor settings by name. Capped at 50 matches, like search_settings.\n- get_editor_setting {name: text}: Reads one machine-wide editor setting.\n- set_editor_setting {name: text, value: tagged}: Writes one machine-wide editor setting. `value` is tagged with its type, as {\"type\": \"bool\", \"value\": true} — the same shape set_setting and node.set_property take.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ops": {
+                    "type": "array",
+                    "minItems": 1,
+                    "description": "The operations to run, in order, each with its parameters beside its `op`. One operation is a list of one; several run in this one call rather than one call each. These may sit beside others and may not appear twice: get_settings, list_autoloads, list_plugins.",
+                    "items": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "get_settings"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "search_settings"
+                                    },
+                                    "query": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "query"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "get_setting"
+                                    },
+                                    "name": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "name"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "set_setting"
+                                    },
+                                    "name": {
+                                        "type": "string"
+                                    },
+                                    "value": {
+                                        "type": "object",
+                                        "properties": {
+                                            "type": {
+                                                "type": "string"
+                                            },
+                                            "value": {
+                                                "description": "The payload is the bare value itself: a string, a number, an array of numbers, or {path} for a resource. Never a second {type, value} pair around it."
+                                            }
+                                        },
+                                        "required": ["type", "value"]
+                                    }
+                                },
+                                "required": ["op", "name", "value"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "reset_setting"
+                                    },
+                                    "name": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "name"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "list_autoloads"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "set_autoload"
+                                    },
+                                    "name": {
+                                        "type": "string"
+                                    },
+                                    "path": {
+                                        "type": "string"
+                                    },
+                                    "enabled": {
+                                        "type": "boolean"
+                                    }
+                                },
+                                "required": ["op", "name", "path"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "remove_autoload"
+                                    },
+                                    "name": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "name"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "list_input_actions"
+                                    },
+                                    "names": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "string"
+                                        },
+                                        "description": "The action names to read, like [\"ui_left\", \"jump\"]. Without it the project's own are answered and the rest are named."
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "set_input_action"
+                                    },
+                                    "name": {
+                                        "type": "string",
+                                        "description": "The action's own name, like move_left, never a settings path."
+                                    },
+                                    "events": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "kind": {
+                                                    "type": "string",
+                                                    "enum": [
+                                                        "key",
+                                                        "mouse_button",
+                                                        "joypad_button"
+                                                    ],
+                                                    "description": "Which of the three an event is. Any other kind is refused here rather than in the editor."
+                                                },
+                                                "key": {
+                                                    "type": "string",
+                                                    "description": "Each entry's `key` is one of: Enter, Kp Enter, Escape, Space, Backspace, Tab, Delete, Left, Right, Up, Down, PageUp, PageDown, Home, End, Shift, Ctrl, Alt, Meta, Comma, Period, Slash, Minus, Equal, BracketLeft."
+                                                },
+                                                "button": {
+                                                    "type": "integer",
+                                                    "description": "A mouse button is an index of 1 or higher; a joypad button an index."
+                                                }
+                                            },
+                                            "required": ["kind"],
+                                            "additionalProperties": false
+                                        },
+                                        "description": "The key is Godot's name for it, not the browser's. Each entry's `key` is one of: Enter, Kp Enter, Escape, Space, Backspace, Tab, Delete, Left, Right, Up, Down, PageUp, PageDown, Home, End, Shift, Ctrl, Alt, Meta, Comma, Period, Slash, Minus, Equal, BracketLeft."
+                                    },
+                                    "deadzone": {
+                                        "type": "number"
+                                    }
+                                },
+                                "required": ["op", "name", "events"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "remove_input_action"
+                                    },
+                                    "name": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "name"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "reset_input_action"
+                                    },
+                                    "name": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "name"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "list_plugins"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "set_plugin_enabled"
+                                    },
+                                    "plugin": {
+                                        "type": "string"
+                                    },
+                                    "enabled": {
+                                        "type": "boolean"
+                                    }
+                                },
+                                "required": ["op", "plugin", "enabled"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "search_editor_settings"
+                                    },
+                                    "query": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "query"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "get_editor_setting"
+                                    },
+                                    "name": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "name"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "set_editor_setting"
+                                    },
+                                    "name": {
+                                        "type": "string"
+                                    },
+                                    "value": {
+                                        "type": "object",
+                                        "properties": {
+                                            "type": {
+                                                "type": "string"
+                                            },
+                                            "value": {
+                                                "description": "The payload is the bare value itself: a string, a number, an array of numbers, or {path} for a resource. Never a second {type, value} pair around it."
+                                            }
+                                        },
+                                        "required": ["type", "value"]
+                                    }
+                                },
+                                "required": ["op", "name", "value"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    }
+                }
+            },
+            "required": ["ops"]
+        }
+    },
+    {
+        "name": "godot_resource",
+        "description": "Project files as the editor sees them. Deleting and moving need the user's approval; nothing outside the task worktree can be named at all.\nOperations:\n- list {under?: text, hashes?: flag}: Lists the files in the task worktree with their sizes. `under` narrows it to one directory — `assets`, named the way the project names it — and without it you get the whole worktree, which is a lot to read to see one folder. `hashes: true` reads every file so that a later delete of one is refused if it changed in the meantime. The router holds what it read; you never see it and never pass it. That is a read of the whole project, so ask for it before deleting files you have not opened, not to look around.\n- rescan {path?: text|list}: Tells the editor filesystem about files that changed. `path` is one file or a list of them — name everything you just wrote in one call, because a batch is imported in one pass and a call per file is not. Omit it to walk the whole project.\n- create_tileset {path: text, texture: text, tileSize?: number|list, tiles?: list, solid?: list|choice}: Cuts a texture into a TileSet and saves it. `path` is the .tres to write, `texture` an image the project already holds, and `tileSize` one number or two — 16 or [16, 16] — defaulting to 16. `tiles` is the [column, row] list to define and defaults to every tile the texture holds; `solid` is the subset that gets collision, either a list or \"all\", and a tile with no collision is scenery the player falls through. Answers with the atlas grid it found. Build a tileset with this rather than writing one as text: a TileSet carries a record per tile and a polygon per solid one, and a hand-written one opens as a resource with no tiles in it.\n- create_texture {path: text, size: number|list, background?: text, rects?: list of {x: int, y: int, width: int, height: int, color: text}}: Draws a PNG and imports it, which is how a project with no art gets some. `path` is the .png to write and `size` is one number or two — 16 or [16, 24]. `rects` are filled rectangles painted over `background` in the order they are named, and without a `background` the image starts transparent, which is what a sprite wants. A colour is a name or a hex string — \"skyblue\", \"#8b5a2b\". An atlas is one texture with a rectangle per tile, laid out on the grid create_tileset then cuts: two 16x16 tiles side by side is a 32x16 image. The texture is imported by the time this answers, so it needs no rescan and create_tileset can name it straight away. Draw art with this rather than through bash: an image library is not something every machine has.\n- create_shape {path: text, shapeType: \"RectangleShape2D\"|\"CircleShape2D\"|\"CapsuleShape2D\"|\"SegmentShape2D\"|\"WorldBoundaryShape2D\", size?: list, radius?: number, height?: number, points?: list}: Saves a 2D collision shape as a resource. `path` is the .tres to write. `shapeType` is one of RectangleShape2D (size as [width, height]), CircleShape2D (radius), CapsuleShape2D (radius and height), SegmentShape2D (points as [ax, ay, bx, by]), or WorldBoundaryShape2D (nothing). Set the node's `shape` property to the path afterwards — a CollisionShape2D without one collides with nothing, and a shape can only be assigned from a file that already exists.\n- describe_tileset {path: text}: Reports what a saved TileSet holds. Answers with its tile size, its sources, and every tile they define with whether it is solid — which is where the [column, row] pairs godot_node set_cells takes come from.\n- move {from: text, to: text}: Moves a file or directory inside the worktree. Godot's own record of a file — its `.uid`, an asset's `.import` — travels with it, so a scene that refers to the file by id keeps finding it. Never move one of those on its own.\n- delete {path: text}: Deletes a file or directory, and Godot's own record of it — its `.uid`, an asset's `.import` — with it. Never name one of those on its own. A file you have read is deleted as you last read it: the router holds the hash that read answered with and refuses the delete if the file changed since, so read it first when it matters that nothing moved underneath.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ops": {
+                    "type": "array",
+                    "minItems": 1,
+                    "description": "The operations to run, in order, each with its parameters beside its `op`. One operation is a list of one; several run in this one call rather than one call each.",
+                    "items": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "list"
+                                    },
+                                    "under": {
+                                        "type": "string",
+                                        "description": "A directory to list, named the way the project names it — `assets`, not its full path. Omit it for every file in the worktree."
+                                    },
+                                    "hashes": {
+                                        "type": "boolean"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "rescan"
+                                    },
+                                    "path": {
+                                        "anyOf": [
+                                            {
+                                                "type": "string"
+                                            },
+                                            {
+                                                "type": "array"
+                                            }
+                                        ],
+                                        "description": "The file that changed, or a list of them — name every file you just wrote in one call rather than one call each. Omitted, the whole project is walked, which is what a directory made after the editor started needs."
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "create_tileset"
+                                    },
+                                    "path": {
+                                        "type": "string"
+                                    },
+                                    "texture": {
+                                        "type": "string"
+                                    },
+                                    "tileSize": {
+                                        "anyOf": [
+                                            {
+                                                "type": "number"
+                                            },
+                                            {
+                                                "type": "array"
+                                            }
+                                        ],
+                                        "description": "One number or two: 16 or [16, 16]."
+                                    },
+                                    "tiles": {
+                                        "type": "array"
+                                    },
+                                    "solid": {
+                                        "anyOf": [
+                                            {
+                                                "type": "array"
+                                            },
+                                            {
+                                                "type": "string",
+                                                "enum": ["all"]
+                                            }
+                                        ],
+                                        "description": "A list of [column, row] pairs, or the word \"all\"."
+                                    }
+                                },
+                                "required": ["op", "path", "texture"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "create_texture"
+                                    },
+                                    "path": {
+                                        "type": "string"
+                                    },
+                                    "size": {
+                                        "anyOf": [
+                                            {
+                                                "type": "number"
+                                            },
+                                            {
+                                                "type": "array"
+                                            }
+                                        ],
+                                        "description": "One number or two: 16 or [16, 24]."
+                                    },
+                                    "background": {
+                                        "type": "string",
+                                        "description": "A colour name or a hex string, like \"skyblue\" or \"#8b5a2b\". Transparent without one."
+                                    },
+                                    "rects": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "x": {
+                                                    "type": "integer"
+                                                },
+                                                "y": {
+                                                    "type": "integer"
+                                                },
+                                                "width": {
+                                                    "type": "integer"
+                                                },
+                                                "height": {
+                                                    "type": "integer"
+                                                },
+                                                "color": {
+                                                    "type": "string",
+                                                    "description": "A colour name or a hex string, spelled as `background` is."
+                                                }
+                                            },
+                                            "required": ["x", "y", "width", "height", "color"],
+                                            "additionalProperties": false
+                                        },
+                                        "description": "Filled rectangles, painted over the background in order."
+                                    }
+                                },
+                                "required": ["op", "path", "size"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "create_shape"
+                                    },
+                                    "path": {
+                                        "type": "string"
+                                    },
+                                    "shapeType": {
+                                        "type": "string",
+                                        "enum": [
+                                            "RectangleShape2D",
+                                            "CircleShape2D",
+                                            "CapsuleShape2D",
+                                            "SegmentShape2D",
+                                            "WorldBoundaryShape2D"
+                                        ]
+                                    },
+                                    "size": {
+                                        "type": "array"
+                                    },
+                                    "radius": {
+                                        "type": "number"
+                                    },
+                                    "height": {
+                                        "type": "number"
+                                    },
+                                    "points": {
+                                        "type": "array"
+                                    }
+                                },
+                                "required": ["op", "path", "shapeType"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "describe_tileset"
+                                    },
+                                    "path": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "path"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "move"
+                                    },
+                                    "from": {
+                                        "type": "string"
+                                    },
+                                    "to": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "from", "to"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "delete"
+                                    },
+                                    "path": {
+                                        "type": "string"
+                                    },
+                                    "expectedHash": {
+                                        "type": "string",
+                                        "pattern": "^[0-9a-f]{64}$",
+                                        "description": "Supplied by the router from the read that answered with it, so a call never carries one. It stays accepted for a caller that holds its own."
+                                    }
+                                },
+                                "required": ["op", "path"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    }
+                }
+            },
+            "required": ["ops"]
+        }
+    },
+    {
+        "name": "godot_script",
+        "description": "GDScript editing and intelligence through Godot's language server. Positions are {line, character}, zero-based. Open a script before querying it — and write GDScript here rather than with the file tools, which refuse a .gd, because writing here is what tells the server whether it parses. A script that does not parse stops the scene using it from loading. `edit` changes a script that exists and answers with its diagnostics, so it needs no `diagnostics` call after it; `save` creates one, and `diagnostics` on the same path is what then says whether it parses. Paths may be named either way, `scripts/mario.gd` or res://scripts/mario.gd.\nOperations:\n- list {under?: text}: Lists the GDScript files in the worktree with their size. `under` narrows it to one directory, named the way the project names it — `scripts`, not its full path — and omitting it lists every script. This is the call for finding a script whose name you do not know; a shell `find` is not, and it is refused outside the worktree anyway.\n- open {path: text|list}: Opens a script as a language-server document. `path` is one script or a list of them — open everything you are about to query in one call, not one call each. A list answers with `files`, one entry per path.\n- update {path: text, text: text}: Reports an in-memory buffer change.\n- edit {files: list of {path: text, edits: list of {oldText: text, newText: text}}}: Changes existing scripts by replacing exact text, and answers with each file's diagnostics. Put every change to one file in that file's `edits`, and every file in one call: this is one call, not one per change. `oldText` must appear exactly once in the file, so extend it with a neighbouring line when it would not; it is quoted from the file, so read the file first. Either every file is written or none is. To create a script, use `save`.\n- save {path: text, text: text}: Writes a whole file and answers with the file's diagnostics, the same way `edit` does. Use it to create a script, or to replace one outright; to change part of one, `edit` is the call, and it does not send the file back. A file that already exists is only written over what you have read, so open it first — the router holds the hash that read answered with. A script you are creating needs no read. `update` does not write anything: it reports a buffer change to the language server, and this is the call that puts it on disk. Do not follow this with a `diagnostics` call about the same file: the verdict is already here. `published: false` means the server had not spoken about the text yet, which is not the same as the file being clean.\n- close {path: text|list}: Closes the document. `path` is one script or a list of them, and a list answers with `files`, one entry per path.\n- format {source: text}: Formats source through the pinned gdformat sidecar.\n- hover {path: text, position: {line: int, character: int}}: Hover documentation.\n- completion {path: text, position: {line: int, character: int}}: Completion items.\n- signature_help {path: text, position: {line: int, character: int}}: Signature help.\n- definition {path: text, position: {line: int, character: int}}: Go to definition.\n- declaration {path: text, position: {line: int, character: int}}: Go to declaration.\n- references {path: text, position: {line: int, character: int}, includeDeclaration?: flag}: Find references.\n- highlights {path: text, position: {line: int, character: int}}: Document highlights.\n- diagnostics {path: text|list, timeoutMs?: int}: Diagnostics the server published for a file. `path` is one script or a list of them — ask about every script you just wrote in one call, not one call each, because a list shares one wait for the whole batch and a call per file waits that long per file. A list answers with `files`, one entry per path. Answers `published: false` when the server has not said anything about that file yet, which is not the same as the file being clean — ask again rather than take an empty list for an answer. An empty list with `published: true` is a file that parses.\n- document_symbols {path: text}: Symbols of one document.\n- workspace_symbols {query: text}: Symbols across the worktree.\n- prepare_rename {path: text, position: {line: int, character: int}}: Checks whether a symbol can be renamed. Answers `renameable`: false is the language server declining this position, and rename will decline it too.\n- rename {path: text, position: {line: int, character: int}, newName: text}: Plans a rename without writing, and refuses when the server plans nothing — every real rename touches at least the declaration, so an empty plan is the server declining rather than a rename that reached no files. Pass what it answers to apply_rename unchanged.\n- apply_rename {files: list of {path: text, originalText: text, originalHash: text, updatedText: text}}: Applies a planned rename in one transaction. `files` is the list `rename` answered with, passed back unchanged. Every entry is checked against the file on disk before anything is written, so a list you edited by hand is refused the moment its `originalHash` does not match. It writes whole files: do not use it to write text you wrote yourself, which is what `save` and `edit` are for.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ops": {
+                    "type": "array",
+                    "minItems": 1,
+                    "description": "The operations to run, in order, each with its parameters beside its `op`. One operation is a list of one; several run in this one call rather than one call each.",
+                    "items": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "list"
+                                    },
+                                    "under": {
+                                        "type": "string",
+                                        "description": "A directory to list, named the way the project names it — `scripts`, not its full path. Omit it for every script in the worktree."
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "open"
+                                    },
+                                    "path": {
+                                        "anyOf": [
+                                            {
+                                                "type": "string"
+                                            },
+                                            {
+                                                "type": "array"
+                                            }
+                                        ],
+                                        "description": "One script, or a list of them — open every script you are about to query in one call rather than one call each. A list is answered with {\"files\": […]}, one entry per path, in the order you named them."
+                                    }
+                                },
+                                "required": ["op", "path"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "update"
+                                    },
+                                    "path": {
+                                        "type": "string"
+                                    },
+                                    "text": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "path", "text"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "edit"
+                                    },
+                                    "files": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "path": {
+                                                    "type": "string"
+                                                },
+                                                "edits": {
+                                                    "type": "array",
+                                                    "items": {
+                                                        "type": "object",
+                                                        "properties": {
+                                                            "oldText": {
+                                                                "type": "string"
+                                                            },
+                                                            "newText": {
+                                                                "type": "string"
+                                                            }
+                                                        },
+                                                        "required": ["oldText", "newText"],
+                                                        "additionalProperties": false
+                                                    }
+                                                }
+                                            },
+                                            "required": ["path", "edits"],
+                                            "additionalProperties": false
+                                        },
+                                        "description": "Every `oldText` must match one region of that file exactly and must not overlap another edit of the same file. Entries may name different files, and either every file is written or none is."
+                                    }
+                                },
+                                "required": ["op", "files"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "save"
+                                    },
+                                    "path": {
+                                        "type": "string"
+                                    },
+                                    "text": {
+                                        "type": "string"
+                                    },
+                                    "expectedHash": {
+                                        "type": "string",
+                                        "pattern": "^[0-9a-f]{64}$",
+                                        "description": "Supplied by the router from the read that answered with it, so a call never carries one. It stays accepted for a caller that holds its own."
+                                    }
+                                },
+                                "required": ["op", "path", "text"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "close"
+                                    },
+                                    "path": {
+                                        "anyOf": [
+                                            {
+                                                "type": "string"
+                                            },
+                                            {
+                                                "type": "array"
+                                            }
+                                        ],
+                                        "description": "One script, or a list of them — close every script you are done with in one call rather than one call each. A list is answered with {\"files\": […]}, one entry per path, in the order you named them."
+                                    }
+                                },
+                                "required": ["op", "path"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "format"
+                                    },
+                                    "source": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "source"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "hover"
+                                    },
+                                    "path": {
+                                        "type": "string"
+                                    },
+                                    "position": {
+                                        "type": "object",
+                                        "properties": {
+                                            "line": {
+                                                "type": "integer"
+                                            },
+                                            "character": {
+                                                "type": "integer"
+                                            }
+                                        },
+                                        "required": ["line", "character"],
+                                        "additionalProperties": false,
+                                        "description": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
+                                    }
+                                },
+                                "required": ["op", "path", "position"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "completion"
+                                    },
+                                    "path": {
+                                        "type": "string"
+                                    },
+                                    "position": {
+                                        "type": "object",
+                                        "properties": {
+                                            "line": {
+                                                "type": "integer"
+                                            },
+                                            "character": {
+                                                "type": "integer"
+                                            }
+                                        },
+                                        "required": ["line", "character"],
+                                        "additionalProperties": false,
+                                        "description": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
+                                    }
+                                },
+                                "required": ["op", "path", "position"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "signature_help"
+                                    },
+                                    "path": {
+                                        "type": "string"
+                                    },
+                                    "position": {
+                                        "type": "object",
+                                        "properties": {
+                                            "line": {
+                                                "type": "integer"
+                                            },
+                                            "character": {
+                                                "type": "integer"
+                                            }
+                                        },
+                                        "required": ["line", "character"],
+                                        "additionalProperties": false,
+                                        "description": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
+                                    }
+                                },
+                                "required": ["op", "path", "position"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "definition"
+                                    },
+                                    "path": {
+                                        "type": "string"
+                                    },
+                                    "position": {
+                                        "type": "object",
+                                        "properties": {
+                                            "line": {
+                                                "type": "integer"
+                                            },
+                                            "character": {
+                                                "type": "integer"
+                                            }
+                                        },
+                                        "required": ["line", "character"],
+                                        "additionalProperties": false,
+                                        "description": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
+                                    }
+                                },
+                                "required": ["op", "path", "position"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "declaration"
+                                    },
+                                    "path": {
+                                        "type": "string"
+                                    },
+                                    "position": {
+                                        "type": "object",
+                                        "properties": {
+                                            "line": {
+                                                "type": "integer"
+                                            },
+                                            "character": {
+                                                "type": "integer"
+                                            }
+                                        },
+                                        "required": ["line", "character"],
+                                        "additionalProperties": false,
+                                        "description": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
+                                    }
+                                },
+                                "required": ["op", "path", "position"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "references"
+                                    },
+                                    "path": {
+                                        "type": "string"
+                                    },
+                                    "position": {
+                                        "type": "object",
+                                        "properties": {
+                                            "line": {
+                                                "type": "integer"
+                                            },
+                                            "character": {
+                                                "type": "integer"
+                                            }
+                                        },
+                                        "required": ["line", "character"],
+                                        "additionalProperties": false,
+                                        "description": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
+                                    },
+                                    "includeDeclaration": {
+                                        "type": "boolean"
+                                    }
+                                },
+                                "required": ["op", "path", "position"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "highlights"
+                                    },
+                                    "path": {
+                                        "type": "string"
+                                    },
+                                    "position": {
+                                        "type": "object",
+                                        "properties": {
+                                            "line": {
+                                                "type": "integer"
+                                            },
+                                            "character": {
+                                                "type": "integer"
+                                            }
+                                        },
+                                        "required": ["line", "character"],
+                                        "additionalProperties": false,
+                                        "description": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
+                                    }
+                                },
+                                "required": ["op", "path", "position"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "diagnostics"
+                                    },
+                                    "path": {
+                                        "anyOf": [
+                                            {
+                                                "type": "string"
+                                            },
+                                            {
+                                                "type": "array"
+                                            }
+                                        ],
+                                        "description": "One script, or a list of them — ask about every script you just wrote in one call rather than one call each. A list is answered with {\"files\": […]}, one entry per path, and shares one wait for the whole batch instead of waiting that long per file."
+                                    },
+                                    "timeoutMs": {
+                                        "type": "integer"
+                                    }
+                                },
+                                "required": ["op", "path"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "document_symbols"
+                                    },
+                                    "path": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "path"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "workspace_symbols"
+                                    },
+                                    "query": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "query"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "prepare_rename"
+                                    },
+                                    "path": {
+                                        "type": "string"
+                                    },
+                                    "position": {
+                                        "type": "object",
+                                        "properties": {
+                                            "line": {
+                                                "type": "integer"
+                                            },
+                                            "character": {
+                                                "type": "integer"
+                                            }
+                                        },
+                                        "required": ["line", "character"],
+                                        "additionalProperties": false,
+                                        "description": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
+                                    }
+                                },
+                                "required": ["op", "path", "position"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "rename"
+                                    },
+                                    "path": {
+                                        "type": "string"
+                                    },
+                                    "position": {
+                                        "type": "object",
+                                        "properties": {
+                                            "line": {
+                                                "type": "integer"
+                                            },
+                                            "character": {
+                                                "type": "integer"
+                                            }
+                                        },
+                                        "required": ["line", "character"],
+                                        "additionalProperties": false,
+                                        "description": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
+                                    },
+                                    "newName": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["op", "path", "position", "newName"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "apply_rename"
+                                    },
+                                    "files": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "path": {
+                                                    "type": "string"
+                                                },
+                                                "originalText": {
+                                                    "type": "string"
+                                                },
+                                                "originalHash": {
+                                                    "type": "string"
+                                                },
+                                                "updatedText": {
+                                                    "type": "string"
+                                                }
+                                            },
+                                            "required": [
+                                                "path",
+                                                "originalText",
+                                                "originalHash",
+                                                "updatedText"
+                                            ],
+                                            "additionalProperties": false
+                                        },
+                                        "description": "The list `rename` answered with, passed back unchanged."
+                                    }
+                                },
+                                "required": ["op", "files"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    }
+                }
+            },
+            "required": ["ops"]
+        }
+    },
+    {
+        "name": "godot_debug",
+        "description": "Godot's debug adapter. Install breakpoints with the launch itself, then wait for a stop before inspecting: stopping is an event, not a response.\nOperations:\n- status: Connects to the adapter and reports its capabilities. (not twice in one call: It takes no parameters, so a second one in the same call is the first one again.)\n- set_breakpoints {path: text, lines?: list}: Replaces the breakpoints of one script. The answer echoes what was asked for, so it says success whether or not the game took it: read `armed` for what is actually still set, everywhere. A clear sent while the game is stopped can be lost — clear it, continue, and check it does not stop there again. A launch does not clear what the editor is holding either; an empty breakpoint list at launch is not a clear.\n- breakpoint_locations {path: text, line: int}: Validates candidate lines.\n- launch {playArgs?: list, breakpoints?: list of {path: text, lines: list}}: Runs the project under the debugger. Give `breakpoints` when the game has to stop somewhere before you can look at it; without them it runs to completion and there is nothing to inspect. (only entry of its call: One debuggee, driven in order: each answer decides what the next call means.)\n- attach: Attaches to a game already running under this adapter. (not twice in one call: It takes no parameters, so a second one in the same call is the first one again.)\n- await_stop {threadId?: int, timeoutMs?: int}: Waits for the next stop. Null means it ended. (only entry of its call: One debuggee, driven in order: each answer decides what the next call means.)\n- threads: Lists the debuggable threads. (not twice in one call: It takes no parameters, so a second one in the same call is the first one again.)\n- stack_trace {threadId?: int}: Returns the stopped stack, which is empty unless the game is stopped at a breakpoint or a step — a pause leaves it with no frame at all.\n- scopes {frameId: int}: Returns Locals, Members, and Globals of a frame.\n- variables {variablesReference: int}: Expands a scope or object.\n- evaluate {expression: text, frameId?: int}: Evaluates an expression in a frame.\n- continue {threadId?: int}: Resumes the debuggee. (only entry of its call: One debuggee, driven in order: each answer decides what the next call means.)\n- pause {threadId?: int}: Pauses the debuggee between frames. It is not a break: a paused game has no stack to read and nothing to evaluate in. To look inside a script, set a breakpoint, continue, and wait for it with await_stop. (only entry of its call: One debuggee, driven in order: each answer decides what the next call means.)\n- step_over {threadId?: int}: Steps over one line. (only entry of its call: One debuggee, driven in order: each answer decides what the next call means.)\n- step_in {threadId?: int}: Steps into the call at the current line. (only entry of its call: One debuggee, driven in order: each answer decides what the next call means.)\n- step_out {threadId?: int}: Steps out of the current frame (emulated). (only entry of its call: One debuggee, driven in order: each answer decides what the next call means.)\n- restart: Restarts the debuggee with the last launch arguments. (only entry of its call: One debuggee, driven in order: each answer decides what the next call means.)\n- terminate: Stops the debuggee, keeping the adapter. (only entry of its call: One debuggee, driven in order: each answer decides what the next call means.)\n- disconnect {terminateDebuggee?: flag}: Detaches. (only entry of its call: One debuggee, driven in order: each answer decides what the next call means.)",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ops": {
+                    "type": "array",
+                    "minItems": 1,
+                    "description": "The operations to run, in order, each with its parameters beside its `op`. One operation is a list of one; several run in this one call rather than one call each. These have to be the only entry of their call: launch, await_stop, continue, pause, step_over, step_in, step_out, restart, terminate, disconnect. These may sit beside others and may not appear twice: status, attach, threads.",
+                    "items": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "status"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "set_breakpoints"
+                                    },
+                                    "path": {
+                                        "type": "string"
+                                    },
+                                    "lines": {
+                                        "type": "array"
+                                    }
+                                },
+                                "required": ["op", "path"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "breakpoint_locations"
+                                    },
+                                    "path": {
+                                        "type": "string"
+                                    },
+                                    "line": {
+                                        "type": "integer"
+                                    }
+                                },
+                                "required": ["op", "path", "line"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "launch"
+                                    },
+                                    "playArgs": {
+                                        "type": "array"
+                                    },
+                                    "breakpoints": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "path": {
+                                                    "type": "string"
+                                                },
+                                                "lines": {
+                                                    "type": "array",
+                                                    "description": "The line numbers to break on, counted from one."
+                                                }
+                                            },
+                                            "required": ["path", "lines"],
+                                            "additionalProperties": false
+                                        }
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "attach"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "await_stop"
+                                    },
+                                    "threadId": {
+                                        "type": "integer"
+                                    },
+                                    "timeoutMs": {
+                                        "type": "integer"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "threads"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "stack_trace"
+                                    },
+                                    "threadId": {
+                                        "type": "integer"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "scopes"
+                                    },
+                                    "frameId": {
+                                        "type": "integer"
+                                    }
+                                },
+                                "required": ["op", "frameId"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "variables"
+                                    },
+                                    "variablesReference": {
+                                        "type": "integer"
+                                    }
+                                },
+                                "required": ["op", "variablesReference"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "evaluate"
+                                    },
+                                    "expression": {
+                                        "type": "string"
+                                    },
+                                    "frameId": {
+                                        "type": "integer"
+                                    }
+                                },
+                                "required": ["op", "expression"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "continue"
+                                    },
+                                    "threadId": {
+                                        "type": "integer"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "pause"
+                                    },
+                                    "threadId": {
+                                        "type": "integer"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "step_over"
+                                    },
+                                    "threadId": {
+                                        "type": "integer"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "step_in"
+                                    },
+                                    "threadId": {
+                                        "type": "integer"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "step_out"
+                                    },
+                                    "threadId": {
+                                        "type": "integer"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "restart"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "terminate"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "disconnect"
+                                    },
+                                    "terminateDebuggee": {
+                                        "type": "boolean"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    }
+                }
+            },
+            "required": ["ops"]
+        }
+    },
+    {
+        "name": "godot_runtime",
+        "description": "The running game: its live scene tree, input, performance, and screenshots. Distinct from the edited scene, and named differently: every path here starts at /root, where godot_node's start at the edited scene's own root.\nOperations:\n- run {scene?: text, playArgs?: list of text}: Runs the project and captures the first frame, unless `playArgs` start it with `--headless`, which draws none. `scene` runs that one scene instead of the project's main scene, which is the editor's own F6 — use it to try a scene you just built, rather than writing application/run/main_scene, running, and writing it back. restart restarts whatever run started, with the same scene and the same playArgs. (not twice in one call: There is one running game, so a second one in the same call is the first one again.)\n- stop: Stops the running game. (not twice in one call: There is one running game, so a second one in the same call is the first one again.)\n- restart: Restarts the running game. (not twice in one call: There is one running game, so a second one in the same call is the first one again.)\n- get_state: Reports whether a game is running, its helper is ready, and the debugger has it paused at an error. (not twice in one call: It takes no parameters, so a second one in the same call is the first one again.)\n- get_tree {root?: text, depth?: int, limit?: int}: Returns the running game's scene tree, and `paused`: whether the tree is paused right now. That one belongs to the SceneTree rather than to any node, so `inspect_node` cannot reach it and this is the only call that reports it.\n- inspect_node {path: text, properties?: list}: Inspects a running node. `properties` is the list of property names to read, like [\"position\", \"velocity\"]; without it the answer carries the node's path, name and type and an empty property map, so name what you want to see. A name the node does not have is an error rather than a gap. The groups it is in come back whether or not anything was named, because a group is not a property and a script joining one at run time is how half of them are joined.\n- input {events: list of {kind: \"key\"|\"mouse_button\"|\"mouse_motion\"|\"joypad_button\"|\"joypad_motion\", key?: text like \"Enter\"|\"Kp Enter\"|\"Escape\"|\"Space\"|\"Backspace\"|\"Tab\"|\"Delete\"|\"Left\"|\"Right\"|\"Up\"|\"Down\"|\"PageUp\"|\"PageDown\"|\"Home\"|\"End\"|\"Shift\"|\"Ctrl\"|\"Alt\"|\"Meta\"|\"Comma\"|\"Period\"|\"Slash\"|\"Minus\"|\"Equal\"|\"BracketLeft\", pressed?: flag, button?: text|int, position?: list, relative?: list, axis?: int, value?: number, device?: int}}: Injects input and captures the result. Each event names its kind and the parameters that kind uses, as {\"kind\": \"key\", \"key\": \"A\", \"pressed\": true} — send the release as a second event, or the key stays down. An event that leaves `pressed` out alternates on its own: the first is the press and the second the release, so a click is the same event written twice. A Button answers the release, not the press. The named keys are in the signature; F1 to F16, A to Z and 0 to 9 are spelled as they read. A mouse button is named left, right, middle, wheel_up or wheel_down, or given as an index. A position is [x, y]. This drives the Input Map, so it is how you check that a level you built can actually be played. Its answer carries a frame, unless a later entry of the same call carries one too: a picture another picture replaces is not worth sending, and a moment in the middle of a key sequence is what capture is for.\n- capture {source?: \"game\"|\"editor\"}: Captures a PNG frame.\n- wait {frames?: int, ms?: int}: Lets the game run on for a few frames, then answers with how many passed and how long it took. A game that ends while you are waiting for it — a benchmark reaching the end of its work — answers `exited: true` instead of a frame count, rather than failing: the waiting is over either way, and the calls after this one still run. This is how you wait for something the game does over time — a tween, a timer, a unit walking somewhere — before capturing or inspecting it. Never wait by running `sleep` in bash: that stops this process rather than letting the game advance, and it costs a whole request to do nothing.\n- pause: Freezes the running game where it stands, the way its own pause menu would: `SceneTree.paused`, so a node that opted out of pausing keeps running. Use it before reading a game that moves — a path to a node a spawner made is stale as soon as that node is freed, and a frozen tree is one you can read twice. `resume` lets it go again. Gofer's own helper keeps answering either way. (not twice in one call: It takes no parameters, so a second one in the same call is the first one again.)\n- resume: Lets a paused game run on again. (not twice in one call: It takes no parameters, so a second one in the same call is the first one again.)\n- get_monitors {monitors?: list}: Reads engine performance monitors. Without a list it answers with fps, memory_static and object_node_count. The rest are process_time, physics_time, memory_message_buffer, object_count, object_resource_count, object_orphan_node_count, render_objects_in_frame, render_primitives_in_frame, render_draw_calls_in_frame, render_video_memory, render_texture_memory and render_buffer_memory; any other name is an error.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ops": {
+                    "type": "array",
+                    "minItems": 1,
+                    "description": "The operations to run, in order, each with its parameters beside its `op`. One operation is a list of one; several run in this one call rather than one call each. These may sit beside others and may not appear twice: run, stop, restart, get_state, pause, resume.",
+                    "items": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "run"
+                                    },
+                                    "scene": {
+                                        "type": "string",
+                                        "description": "A res:// path to a .tscn, like res://scenes/level_2.tscn. Without it the project's main scene runs."
+                                    },
+                                    "playArgs": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "string"
+                                        },
+                                        "description": "Command-line arguments for the game, like [\"--\", \"--rate=30\"]. A game reads its own with OS.get_cmdline_user_args(), which sees only what follows a `--`. The editor carries them as one string it splits on spaces, so an argument holding a space is refused rather than delivered in pieces. restart reuses whatever run passed."
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "stop"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "restart"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "get_state"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "get_tree"
+                                    },
+                                    "root": {
+                                        "type": "string",
+                                        "description": "The node to start from, as a path. The whole tree when it is absent."
+                                    },
+                                    "depth": {
+                                        "type": "integer",
+                                        "description": "How many levels below the starting node to walk. Every level when it is absent."
+                                    },
+                                    "limit": {
+                                        "type": "integer",
+                                        "description": "How many nodes to answer with, at most. The answer opens with `truncated`, which says whether it stopped early; a root or a depth is how you read the rest."
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "inspect_node"
+                                    },
+                                    "path": {
+                                        "type": "string",
+                                        "description": "The node to read, by its path in the running tree: every one of those starts at /root. godot_node calls this same thing `node`, and this is the one operation in this catalogue where `path` names a node rather than a file."
+                                    },
+                                    "properties": {
+                                        "type": "array"
+                                    }
+                                },
+                                "required": ["op", "path"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "input"
+                                    },
+                                    "events": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "kind": {
+                                                    "type": "string",
+                                                    "enum": [
+                                                        "key",
+                                                        "mouse_button",
+                                                        "mouse_motion",
+                                                        "joypad_button",
+                                                        "joypad_motion"
+                                                    ],
+                                                    "description": "Which of the five an event is. Checked here rather than in the game: an event with no kind used to cross the socket and come back as `Input event kind '' is not supported`, which names nothing to send instead. One live turn wrote it 22 times."
+                                                },
+                                                "key": {
+                                                    "type": "string",
+                                                    "description": "Each entry's `key` is one of: Enter, Kp Enter, Escape, Space, Backspace, Tab, Delete, Left, Right, Up, Down, PageUp, PageDown, Home, End, Shift, Ctrl, Alt, Meta, Comma, Period, Slash, Minus, Equal, BracketLeft."
+                                                },
+                                                "pressed": {
+                                                    "type": "boolean",
+                                                    "description": "Held down unless this says otherwise, so the release is a second event carrying false."
+                                                },
+                                                "button": {
+                                                    "anyOf": [
+                                                        {
+                                                            "type": "string"
+                                                        },
+                                                        {
+                                                            "type": "integer"
+                                                        }
+                                                    ],
+                                                    "description": "A mouse button by name - left, right, middle, wheel_up, wheel_down - or an index; a joypad button is an index."
+                                                },
+                                                "position": {
+                                                    "type": "array"
+                                                },
+                                                "relative": {
+                                                    "type": "array"
+                                                },
+                                                "axis": {
+                                                    "type": "integer"
+                                                },
+                                                "value": {
+                                                    "type": "number"
+                                                },
+                                                "device": {
+                                                    "type": "integer"
+                                                }
+                                            },
+                                            "required": ["kind"],
+                                            "additionalProperties": false
+                                        },
+                                        "description": "Each event is {\"kind\": \"key\", \"key\": \"A\", \"pressed\": true}, and the release is a second event. Each entry's `key` is one of: Enter, Kp Enter, Escape, Space, Backspace, Tab, Delete, Left, Right, Up, Down, PageUp, PageDown, Home, End, Shift, Ctrl, Alt, Meta, Comma, Period, Slash, Minus, Equal, BracketLeft."
+                                    }
+                                },
+                                "required": ["op", "events"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "capture"
+                                    },
+                                    "source": {
+                                        "type": "string",
+                                        "enum": ["game", "editor"]
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "wait"
+                                    },
+                                    "frames": {
+                                        "type": "integer",
+                                        "description": "How many rendered frames to let pass. One when neither this nor `ms` is named."
+                                    },
+                                    "ms": {
+                                        "type": "integer",
+                                        "description": "How long to let pass instead, in milliseconds. Held under ten seconds, which is what one request has."
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "pause"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "resume"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "get_monitors"
+                                    },
+                                    "monitors": {
+                                        "type": "array"
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    }
+                }
+            },
+            "required": ["ops"]
+        }
+    },
+    {
+        "name": "godot_logs",
+        "description": "The session's captured output — editor, importer, plugin, and the game the editor launched — with a cursor and severity filtering.\nOperations:\n- read {after?: int, minSeverity?: \"info\"|\"warning\"|\"error\", source?: \"editor\"|\"editorError\", contains?: text, context?: int, limit?: int}: Reads a page. `editor` is the editor's stdout, which also carries what the game printed; `editorError` is where the engine reports its own failures, including a script that would not parse. Terminal colour is taken out, and the editor's own progress bar — `[  16% ] first_scan_filesystem | …` — is left out and counted in `terminalLinesOmitted`, because a terminal drawing itself is a fifth of this output and none of it is about the project. One line in `editorError` is never about the project: an `ERROR:` naming a section like `res://scripts/player.gd` with the key `state` is the editor restoring which script tabs were open. It is dropped from the errors a failed call carries, and left here because this is the raw page.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ops": {
+                    "type": "array",
+                    "minItems": 1,
+                    "description": "The operations to run, in order, each with its parameters beside its `op`. One operation is a list of one; several run in this one call rather than one call each.",
+                    "items": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "read"
+                                    },
+                                    "after": {
+                                        "type": "integer"
+                                    },
+                                    "minSeverity": {
+                                        "type": "string",
+                                        "enum": ["info", "warning", "error"]
+                                    },
+                                    "source": {
+                                        "type": "string",
+                                        "enum": ["editor", "editorError"]
+                                    },
+                                    "contains": {
+                                        "type": "string"
+                                    },
+                                    "context": {
+                                        "type": "integer",
+                                        "description": "How many lines either side of each match to answer with. A banner is one matching line above the numbers it introduces, and asking for those by name only works when you already know their wording."
+                                    },
+                                    "limit": {
+                                        "type": "integer",
+                                        "description": "How many matches to answer with, at most. The lines `context` asks for ride along and are not counted, so a page can never come back holding none of what was searched for."
+                                    }
+                                },
+                                "required": ["op"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    }
+                }
+            },
+            "required": ["ops"]
+        }
+    },
+    {
+        "name": "godot_docs_search",
+        "description": "The Godot 4.7 documentation, on this machine. SEARCH IT BEFORE writing a class, method, signal or constant name, and before answering any question about how the engine behaves. Do not answer either from memory and do not reason it out from the name: what you remember is mostly Godot 3, where a great many of these names were spelled differently, and a name this does not return is a name to check rather than to guess at. Passages cite a chapter, never a URL. It holds the engine's documentation and nothing else, so send a question about this project's own scripts, scenes or files to the subagent tool instead.\nOperations:\n- search {question: text, maxTextChars?: int}: Retrieves ranked passages for a question in plain words. Use it to see which chapters the manual has on a subject at all — when the question is which class to reach for, the list of chapters is the answer.\n- ask {question: text, maxTextChars?: int}: Answers one question from those same passages and hands back a paragraph and a quote instead of the chapters. Use it when you want one fact — a signature, an argument, what a property does — and would only have read one line out of what `search` returns. The quote is checked against the manual: an answer that arrives with a warning that its quote is not there was written from memory, and is not evidence. It needs a model connection, where `search` does not.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ops": {
+                    "type": "array",
+                    "minItems": 1,
+                    "description": "The operations to run, in order, each with its parameters beside its `op`. One operation is a list of one; several run in this one call rather than one call each.",
+                    "items": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "search"
+                                    },
+                                    "question": {
+                                        "type": "string"
+                                    },
+                                    "maxPassages": {
+                                        "type": "integer",
+                                        "description": "How many passages come back is not a number the model can reason about, so it is settled here at four. gofer-rag takes it as a ceiling and applies it before pinning a chapter the question named, so the rescue survives it; replaying its 83 labelled questions through every ceiling, four keeps 79% of the bytes and loses no case, where three loses two. The desktop Docs panel sets its own bound, so the parameter stays accepted and unadvertised."
+                                    },
+                                    "maxTextChars": {
+                                        "type": "integer"
+                                    }
+                                },
+                                "required": ["op", "question"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "const": "ask"
+                                    },
+                                    "question": {
+                                        "type": "string"
+                                    },
+                                    "maxPassages": {
+                                        "type": "integer",
+                                        "description": "How many passages come back is not a number the model can reason about, so it is settled here at four. gofer-rag takes it as a ceiling and applies it before pinning a chapter the question named, so the rescue survives it; replaying its 83 labelled questions through every ceiling, four keeps 79% of the bytes and loses no case, where three loses two. The desktop Docs panel sets its own bound, so the parameter stays accepted and unadvertised."
+                                    },
+                                    "maxTextChars": {
+                                        "type": "integer"
+                                    }
+                                },
+                                "required": ["op", "question"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    }
+                }
+            },
+            "required": ["ops"]
+        }
+    },
+    {
+        "name": "subagent",
+        "description": "Delegate a bounded question to an isolated read-only agent and get back only its conclusion. USE THIS FIRST, instead of running your own bash grep, find, ls or cat, whenever a question spans more than one file or means searching for code you have not already located. The material it reads never enters this conversation: doing the search yourself fills your context with raw output you will carry for the rest of the turn, where the sub-agent hands back a paragraph and drops the rest.\n\nUse it when:\n- a file is long and you need one thing out of it\n- the question spans several files, or you do not yet know which file\n- you need to trace where something is configured, registered or called from\n- a build, a test run or a log produced more output than you need to keep\n\nDo not reach for it when:\n- you already know the file and want its contents — call read\n- anything has to change — the sub-agent cannot write, edit, or drive the editor\n- the question is about the running editor or the scene tree — use the godot_ tools\n\nAsk one self-contained question per call. The sub-agent shares your checkout but none of your conversation, so name the files, symbols and terms it should start from. Several independent questions can be dispatched in one turn.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "The self-contained question for the sub-agent. Name the files, symbols or terms it should start from, and say what shape of answer you want back. It cannot see this conversation."
+                }
+            },
+            "required": ["prompt"]
+        }
+    },
+    {
+        "name": "web_search",
+        "description": "Search the live web and get back a list of results — title, URL, and a snippet.\n\nCALL THIS BEFORE ANSWERING any question about current or version-specific facts outside this project: library and framework versions, their APIs, recent releases, newly shipped features, current events, prices, or who holds a role right now. Your built-in knowledge has a cutoff and these are exactly the facts that move. Do NOT answer such questions from memory, and do NOT shell out with bash to guess at them.\n\nThen call web_fetch on the result you want to read. This returns snippets, not pages.\n\nDo not reach for it when:\n- the question is about Godot itself — use godot_docs_search, which holds the real 4.7 docs\n- the question is about this project’s own files — use the subagent tool",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "What to search for."
+                },
+                "count": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20,
+                    "description": "How many results to return. Ten by default, twenty at most."
+                }
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "web_fetch",
+        "description": "Read one web page and get back only the answer to your question about it. The page itself never enters this conversation: an isolated reader with no tools holds it, answers, and the page is thrown away.\n\nREACH FOR THIS whenever you need to know how an external library, tool, plugin, framework or service is CONFIGURED, WIRED or INTEGRATED. Fetch its README or its official documentation page and read the setup out of it. Do NOT answer configuration or integration questions from memory — what you remember is a version ago, and a wrong wiring detail costs more to find later than the fetch costs now.\n\nUse it when:\n- you have a URL and want one thing out of it\n- web_search returned a result worth reading\n- a library, API or tool outside this project has to be configured\n\nDo not reach for it when:\n- the question is about Godot itself — use godot_docs_search\n- the question is about this project’s own files — use the subagent tool\n- you have no URL — use web_search first\n\nAsk for one specific thing per call. The reader sees your question and the page, nothing else, so name the option, function or setting you are after.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "The page to read. Must be http or https."
+                },
+                "query": {
+                    "type": "string",
+                    "description": "What to take from the page. The reader returns only what answers this, so name the option, function or setting you are after."
+                }
+            },
+            "required": ["url", "query"]
+        }
+    },
+    {
+        "name": "remember",
+        "description": "Store one thing this project should still know in a month. Call it when this turn established something a later turn would otherwise get wrong, and only then. Worth remembering: a preference or correction the user stated; a decision together with the option it rejected and why, because the code only ever shows the winner; a deliberate exception somebody would helpfully undo; a fact about this machine, project or toolchain that took real work to establish. Never worth remembering: anything the files, the git history or the project instructions already say; anything true only right now, like a test passing or a game running clean; an account of what you just did; something you already knew before you opened this project; a turn where nothing was decided or built. When in doubt, do not. An unnecessary memory is read by every later turn and costs more than the one you skipped. Write one fact per call, in a sentence or two that still reads true to somebody who was not here — no \"I\", no \"we then\", no reference to this conversation. The user is shown it and decides whether to keep it, so it does not reach any later turn until they do. Do not ask them about it and do not store the same thing twice.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": ["decision", "preference", "fact", "issue"],
+                    "description": "decision — a choice made and the one turned down. preference — how the user wants things done. fact — something established about this project or machine. issue — a known problem nobody has fixed yet."
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The fact itself, self-contained, one or two sentences. Name the file or setting it is about so it can be checked later. A decision says what was rejected and why."
+                },
+                "why": {
+                    "type": "string",
+                    "description": "One sentence on what a later turn gets wrong without this."
+                }
+            },
+            "required": ["kind", "content"]
+        }
+    },
+    {
+        "name": "ask_user",
+        "description": "Ask the user one question and wait for their answer. Use it ONLY for something you cannot settle any other way and that changes what you build: which of two designs they want, whether to keep or replace something that already exists, a trade-off only they can weigh. Read the project first — a question whose answer is in the files is a question you should not have asked. Never ask about naming, formatting, or anything you could reasonably decide and mention afterwards. Ask one thing at a time, in one sentence, and offer the two realistic answers so they can pick rather than compose. If they skip it, decide it yourself and say which way you went — do not ask again. When the answer is a LAYOUT — where something sits, how big it is, what is next to what — send a `brief` as well. A sentence describing a layout and the layout itself are not the same object, and the user cannot correct one they have to build in their head. With a brief, a designer drafts the layout, puts it in front of them, reads what they say and revises it until they agree it, and you are handed the agreed layout written down: the regions, where each sits, its size and the spacing between them. That is what you build from. You never write the markup and you never see the drafts. Send a brief only for a layout nobody has settled yet — not to confirm one that is already decided, and not to ask one question about one measurement.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The one thing you want decided, as a single sentence the user can answer without reading the rest of the conversation. With a brief, this is what the designer is being asked to settle, and it is what the user sees while the drafts are being made."
+                },
+                "options": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "description": "The realistic answers, best first. Shortcuts, not a closed set — the user can always write something else. Two is usually right."
+                },
+                "brief": {
+                    "type": "string",
+                    "description": "Send this instead of asking about a layout yourself, and a designer agrees it with the user for you. One paragraph, self-contained: what is being designed, the scene or screen it belongs to, everything that must appear on it, and any constraint already decided — the target resolution, an existing style, a control that has to stay where it is. The designer cannot see this conversation. Leave it out for every ordinary question."
+                },
+                "questionId": {
+                    "type": "string",
+                    "description": "Leave this out the first time. To ask again about the same thing — a revised layout, or the same decision narrowed down — send the id that call came back with. The user sees one thing changing rather than a pile of questions, and you are told which revision they are on."
+                },
+                "why": {
+                    "type": "string",
+                    "description": "One sentence on what turns on the answer."
+                }
+            },
+            "required": ["question"]
+        }
+    }
+]
