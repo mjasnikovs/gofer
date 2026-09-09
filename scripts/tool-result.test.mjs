@@ -113,7 +113,7 @@ test('captured frames become image content and large results are bounded', () =>
                     properties: Object.fromEntries(
                         Array.from({length: 400}, (_, i) => [
                             `theme_override_constants/margin_${String(i)}`,
-                            {type: 'vector2', value: [12.5 + i, 34.25 + i]}
+                            {type: 'Vector2', value: [12.5 + i, 34.25 + i]}
                         ])
                     )
                 }

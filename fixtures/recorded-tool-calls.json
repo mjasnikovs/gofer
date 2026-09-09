@@ -615,7 +615,7 @@
                     "op": "set_property",
                     "property": "script",
                     "value": {
-                        "type": "resource",
+                        "type": "Resource",
                         "value": {
                             "path": "res://assets/Effects/effect.gd"
                         }
@@ -772,7 +772,7 @@
                     "name": "application/run/main_scene",
                     "op": "set_setting",
                     "value": {
-                        "type": "string",
+                        "type": "String",
                         "value": "res://main.tscn"
                     }
                 },
@@ -796,7 +796,7 @@
                     "name": "display/window/stretch/mode",
                     "op": "set_setting",
                     "value": {
-                        "type": "string",
+                        "type": "String",
                         "value": "viewport"
                     }
                 },
@@ -804,7 +804,7 @@
                     "name": "display/window/stretch/scale_mode",
                     "op": "set_setting",
                     "value": {
-                        "type": "string",
+                        "type": "String",
                         "value": "integer"
                     }
                 },
@@ -820,7 +820,7 @@
                     "name": "rendering/renderer/rendering_method",
                     "op": "set_setting",
                     "value": {
-                        "type": "string",
+                        "type": "String",
                         "value": "gl_compatibility"
                     }
                 },
@@ -828,7 +828,7 @@
                     "name": "rendering/renderer/rendering_method.mobile",
                     "op": "set_setting",
                     "value": {
-                        "type": "string",
+                        "type": "String",
                         "value": "gl_compatibility"
                     }
                 }
@@ -898,7 +898,7 @@
                     "source": "game"
                 },
                 {
-                    "monitors": ["fps"],
+                    "monitors": ["TIME_FPS"],
                     "op": "get_monitors"
                 }
             ],
@@ -937,7 +937,7 @@
             "tool": "godot_runtime",
             "ops": [
                 {
-                    "monitors": ["fps", "process_time"],
+                    "monitors": ["TIME_FPS", "TIME_PROCESS"],
                     "op": "get_monitors"
                 }
             ],
@@ -972,13 +972,13 @@
                 },
                 {
                     "monitors": [
-                        "fps",
-                        "process_time",
-                        "physics_time",
-                        "render_draw_calls_in_frame",
-                        "render_objects_in_frame",
-                        "render_primitives_in_frame",
-                        "memory_static"
+                        "TIME_FPS",
+                        "TIME_PROCESS",
+                        "TIME_PHYSICS_PROCESS",
+                        "RENDER_TOTAL_DRAW_CALLS_IN_FRAME",
+                        "RENDER_TOTAL_OBJECTS_IN_FRAME",
+                        "RENDER_TOTAL_PRIMITIVES_IN_FRAME",
+                        "MEMORY_STATIC"
                     ],
                     "op": "get_monitors"
                 }
@@ -1038,16 +1038,16 @@
                 },
                 {
                     "monitors": [
-                        "fps",
-                        "process_time",
-                        "physics_time",
-                        "memory_static",
-                        "object_node_count",
-                        "object_count",
-                        "object_resource_count",
-                        "render_objects_in_frame",
-                        "render_primitives_in_frame",
-                        "render_draw_calls_in_frame"
+                        "TIME_FPS",
+                        "TIME_PROCESS",
+                        "TIME_PHYSICS_PROCESS",
+                        "MEMORY_STATIC",
+                        "OBJECT_NODE_COUNT",
+                        "OBJECT_COUNT",
+                        "OBJECT_RESOURCE_COUNT",
+                        "RENDER_TOTAL_OBJECTS_IN_FRAME",
+                        "RENDER_TOTAL_PRIMITIVES_IN_FRAME",
+                        "RENDER_TOTAL_DRAW_CALLS_IN_FRAME"
                     ],
                     "op": "get_monitors"
                 }
@@ -1691,7 +1691,7 @@
                             "node": "/Player",
                             "property": "script",
                             "value": {
-                                "type": "resource",
+                                "type": "Resource",
                                 "value": {
                                     "path": "res://player.gd"
                                 }
@@ -1701,7 +1701,7 @@
                             "node": "/Player/CollisionShape2D",
                             "property": "shape",
                             "value": {
-                                "type": "resource",
+                                "type": "Resource",
                                 "value": {
                                     "path": "res://player_collision.tres"
                                 }
@@ -1781,7 +1781,7 @@
                     "op": "set_property",
                     "property": "tile_set",
                     "value": {
-                        "type": "resource",
+                        "type": "Resource",
                         "value": {
                             "path": "res://assets/tiles.tres"
                         }
@@ -2346,7 +2346,7 @@
                     "op": "set_property",
                     "property": "script",
                     "value": {
-                        "type": "resource",
+                        "type": "Resource",
                         "value": {
                             "path": "res://scripts/pause_menu.gd"
                         }
@@ -2701,9 +2701,9 @@
                             "node": "/Main/ScoreUI/ScoreLabel",
                             "property": "text",
                             "value": {
-                                "type": "string",
+                                "type": "String",
                                 "value": {
-                                    "type": "string",
+                                    "type": "String",
                                     "value": "Score: 0"
                                 }
                             }
@@ -2740,7 +2740,7 @@
                             "node": "/Main/ScoreUI/ScoreLabel",
                             "property": "text",
                             "value": {
-                                "type": "string",
+                                "type": "String",
                                 "value": "Score: 0"
                             }
                         },
@@ -2775,7 +2775,7 @@
                             "node": "/Main/PauseMenu/CenterContainer/ResumeButton",
                             "property": "text",
                             "value": {
-                                "type": "string",
+                                "type": "String",
                                 "value": {
                                     "type": "String",
                                     "value": "Resume"
@@ -2800,7 +2800,7 @@
                     "op": "set_property",
                     "property": "text",
                     "value": {
-                        "type": "string",
+                        "type": "String",
                         "value": {
                             "type": "String",
                             "value": "Resume"
@@ -2815,7 +2815,7 @@
                             "node": "/Main/PauseMenu/CenterContainer/ResumeButton",
                             "property": "text",
                             "value": {
-                                "type": "string",
+                                "type": "String",
                                 "value": "Resume"
                             }
                         },
@@ -2834,7 +2834,7 @@
                     "node": "/Main/PauseMenu/CenterContainer/ResumeButton",
                     "property": "text",
                     "value": {
-                        "type": "string",
+                        "type": "String",
                         "value": "Resume"
                     },
                     "op": "set_property"
@@ -2849,7 +2849,7 @@
                     "op": "set_property",
                     "property": "text",
                     "value": {
-                        "type": "string",
+                        "type": "String",
                         "value": {
                             "type": "String",
                             "value": "Resume"
@@ -2862,7 +2862,7 @@
                     "node": "/Main/PauseMenu/CenterContainer/ResumeButton",
                     "property": "text",
                     "value": {
-                        "type": "string",
+                        "type": "String",
                         "value": "Resume"
                     },
                     "op": "set_property"

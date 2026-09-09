@@ -7,7 +7,7 @@
         "scene": "res://levels/first.tscn",
         "node": "Player/Sprite2D",
         "property": "position",
-        "value": {"type": "vector2", "value": [64, 32.5]}
+        "value": {"type": "Vector2", "value": [64, 32.5]}
     },
     "expectedRevision": 7
 }

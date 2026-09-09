@@ -61,7 +61,7 @@ Editing the project:
 - Scene mutations are undoable until scene.save; the revision each one is checked against is supplied by the router, so never ask for it or pass it
 - Build with node.create_nodes and node.set_properties: one call carrying every node, then one carrying every property, not one call per node — every call costs a whole request, and a batch is also one undo step
 - The edited scene (scene.*, node.*) and the running game (runtime.*) are separate: editing one never changes the other
-- A property holding a resource takes {"type": "resource", "value": {"path": "res://..."}}; a bare string is refused
+- A property holding a resource takes {"type": "Resource", "value": {"path": "res://..."}}; a bare string is refused
 - A 2D collision shape has a tool: resource.create_shape writes it and imports it, and art has one: resource.create_texture draws a PNG and imports it, which is how a project with no art gets some. A resource with neither has none — write the .tres yourself, as `[gd_resource type="BoxMesh" format=3]`, a blank line, `[resource]`, then `size = Vector3(2, 2, 2)`
 - Build a 2D level from tiles — resource.create_tileset, then node.set_cells on a TileMapLayer; a hundred ColorRects is not a level, and a TileSet written as text opens with no tiles in it
 - Wire a scene with node.connect_signal and node.add_to_group, never with a connect call in _ready as well: the second connection errors every time the node loads

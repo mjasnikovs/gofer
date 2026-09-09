@@ -66,76 +66,158 @@ struct NumericValue {
     integral: bool,
 }
 
-const NUMERIC_VALUES: [NumericValue; 14] = [
+const NUMERIC_VALUES: [NumericValue; 16] = [
     NumericValue {
-        kind: "vector2",
+        kind: "Vector2",
         arity: 2,
         integral: false,
     },
     NumericValue {
-        kind: "vector2i",
+        kind: "Vector2i",
         arity: 2,
         integral: true,
     },
     NumericValue {
-        kind: "vector3",
+        kind: "Vector3",
         arity: 3,
         integral: false,
     },
     NumericValue {
-        kind: "vector3i",
+        kind: "Vector3i",
         arity: 3,
         integral: true,
     },
     NumericValue {
-        kind: "vector4",
+        kind: "Vector4",
         arity: 4,
         integral: false,
     },
     NumericValue {
-        kind: "vector4i",
+        kind: "Vector4i",
         arity: 4,
         integral: true,
     },
     NumericValue {
-        kind: "quaternion",
+        kind: "Quaternion",
         arity: 4,
         integral: false,
     },
     NumericValue {
-        kind: "color",
+        kind: "Color",
         arity: 4,
         integral: false,
     },
     NumericValue {
-        kind: "plane",
+        kind: "Plane",
         arity: 4,
         integral: false,
     },
     NumericValue {
-        kind: "rect2",
+        kind: "Rect2",
         arity: 4,
         integral: false,
     },
     NumericValue {
-        kind: "rect2i",
+        kind: "Rect2i",
         arity: 4,
         integral: true,
     },
     NumericValue {
-        kind: "transform2d",
+        kind: "AABB",
         arity: 6,
         integral: false,
     },
     NumericValue {
-        kind: "basis",
+        kind: "Transform2D",
+        arity: 6,
+        integral: false,
+    },
+    NumericValue {
+        kind: "Basis",
         arity: 9,
         integral: false,
     },
     NumericValue {
-        kind: "transform3d",
+        kind: "Transform3D",
         arity: 12,
         integral: false,
+    },
+    NumericValue {
+        kind: "Projection",
+        arity: 16,
+        integral: false,
+    },
+];
+
+/// A packed array, and the element the wire writes each of its entries as.
+struct PackedValue {
+    kind: &'static str,
+    /// The components of one element, or `None` where an element is a lone number or a string.
+    components: Option<usize>,
+    integral: bool,
+    text: bool,
+}
+
+const PACKED_VALUES: [PackedValue; 10] = [
+    PackedValue {
+        kind: "PackedByteArray",
+        components: None,
+        integral: true,
+        text: false,
+    },
+    PackedValue {
+        kind: "PackedInt32Array",
+        components: None,
+        integral: true,
+        text: false,
+    },
+    PackedValue {
+        kind: "PackedInt64Array",
+        components: None,
+        integral: true,
+        text: false,
+    },
+    PackedValue {
+        kind: "PackedFloat32Array",
+        components: None,
+        integral: false,
+        text: false,
+    },
+    PackedValue {
+        kind: "PackedFloat64Array",
+        components: None,
+        integral: false,
+        text: false,
+    },
+    PackedValue {
+        kind: "PackedStringArray",
+        components: None,
+        integral: false,
+        text: true,
+    },
+    PackedValue {
+        kind: "PackedVector2Array",
+        components: Some(2),
+        integral: false,
+        text: false,
+    },
+    PackedValue {
+        kind: "PackedVector3Array",
+        components: Some(3),
+        integral: false,
+        text: false,
+    },
+    PackedValue {
+        kind: "PackedVector4Array",
+        components: Some(4),
+        integral: false,
+        text: false,
+    },
+    PackedValue {
+        kind: "PackedColorArray",
+        components: Some(4),
+        integral: false,
+        text: false,
     },
 ];
 
@@ -149,7 +231,7 @@ struct ObjectValue {
 
 const OBJECT_VALUES: [ObjectValue; 4] = [
     ObjectValue {
-        kind: "resource",
+        kind: "Resource",
         required_strings: &["path", "resourceType"],
         optional_strings: &["uid"],
         required_integers: &[],
@@ -314,9 +396,9 @@ pub fn validate_value(value: &Value) -> Result<(), ProtocolError> {
     let kind = non_empty_string(object.get("type"), "value.type")?;
     let payload = object.get("value");
     match kind {
-        "null" => require(
+        "Nil" => require(
             matches!(payload, None | Some(Value::Null)),
-            "a null value carries no value",
+            "a Nil value carries no value",
         ),
         "bool" => require(
             payload.is_some_and(Value::is_boolean),
@@ -327,17 +409,17 @@ pub fn validate_value(value: &Value) -> Result<(), ProtocolError> {
             payload.is_some_and(Value::is_number),
             "a float value carries a number",
         ),
-        "string" | "node_path" => require(
+        "String" | "StringName" | "NodePath" => require(
             payload.is_some_and(Value::is_string),
-            "a string value carries a string",
+            "a String value carries a string",
         ),
-        "array" => {
+        "Array" => {
             for entry in array_at(payload, "value")? {
                 validate_value(entry)?;
             }
             Ok(())
         }
-        "dictionary" => {
+        "Dictionary" => {
             for entry in array_at(payload, "value")? {
                 let entry = object_at(Some(entry), "dictionary entry")?;
                 validate_value(entry.get("key").unwrap_or(&Value::Null))?;
@@ -491,6 +573,12 @@ fn validate_composite_value(kind: &str, payload: Option<&Value>) -> Result<(), P
         }
         return Ok(());
     }
+    if let Some(packed) = PACKED_VALUES.iter().find(|entry| entry.kind == kind) {
+        for entry in array_at(payload, "value")? {
+            validate_packed_element(packed, entry)?;
+        }
+        return Ok(());
+    }
     let Some(spec) = OBJECT_VALUES.iter().find(|entry| entry.kind == kind) else {
         return Err(ProtocolError::invalid(format!(
             "{kind} is not a Godot value type"
@@ -512,6 +600,30 @@ fn validate_composite_value(kind: &str, payload: Option<&Value>) -> Result<(), P
         if let Some(field) = object.get(*name) {
             integer(Some(field), name)?;
         }
+    }
+    Ok(())
+}
+
+/// One element of a packed array, written as the payload its own type carries and nothing more:
+/// a packed array holds one type, and the array's tag has already named it.
+fn validate_packed_element(packed: &PackedValue, entry: &Value) -> Result<(), ProtocolError> {
+    let Some(components) = packed.components else {
+        if packed.text {
+            return require(entry.is_string(), "the elements are strings");
+        }
+        let component = number(Some(entry), "value")?;
+        return require(
+            !packed.integral || component.fract() == 0.0,
+            "the elements are integers",
+        );
+    };
+    let entries = array_at(Some(entry), "value")?;
+    require(
+        entries.len() == components,
+        "an element has the wrong number of components",
+    )?;
+    for component in entries {
+        number(Some(component), "value")?;
     }
     Ok(())
 }
@@ -871,15 +983,24 @@ mod tests {
     #[test]
     fn value_validators_cover_every_branch() {
         let valid = [
-            json!({"type": "null"}),
-            json!({"type": "null", "value": null}),
+            json!({"type": "Nil"}),
+            json!({"type": "Nil", "value": null}),
             json!({"type": "bool", "value": false}),
             json!({"type": "int", "value": -3}),
             json!({"type": "float", "value": 0.5}),
-            json!({"type": "string", "value": ""}),
-            json!({"type": "array", "value": []}),
-            json!({"type": "color", "value": [1, 1, 1, 1]}),
-            json!({"type": "resource", "value": {"path": "res://a.tres", "resourceType": "Theme"}}),
+            json!({"type": "String", "value": ""}),
+            json!({"type": "StringName", "value": "walk"}),
+            json!({"type": "NodePath", "value": "Box/Slider"}),
+            json!({"type": "Array", "value": []}),
+            json!({"type": "Color", "value": [1, 1, 1, 1]}),
+            json!({"type": "AABB", "value": [0, 0, 0, 1, 1, 1]}),
+            json!({"type": "Projection", "value": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]}),
+            json!({"type": "PackedInt32Array", "value": [1, 2]}),
+            json!({"type": "PackedFloat64Array", "value": [1.5]}),
+            json!({"type": "PackedStringArray", "value": ["a"]}),
+            json!({"type": "PackedVector2Array", "value": [[1, 2], [3, 4]]}),
+            json!({"type": "PackedColorArray", "value": [[1, 1, 1, 1]]}),
+            json!({"type": "Resource", "value": {"path": "res://a.tres", "resourceType": "Theme"}}),
             json!({"type": "node", "value": {"path": "/root", "nodeType": "Node"}}),
             json!({"type": "object", "value": {"className": "Timer", "instanceId": 4}}),
         ];
@@ -889,19 +1010,26 @@ mod tests {
         let invalid = [
             json!([]),
             json!({"type": ""}),
-            json!({"type": "null", "value": 1}),
+            json!({"type": "null", "value": null}),
+            json!({"type": "vector2", "value": [1, 2]}),
+            json!({"type": "Nil", "value": 1}),
             json!({"type": "bool", "value": 1}),
             json!({"type": "int", "value": 1.5}),
             json!({"type": "float", "value": "1"}),
-            json!({"type": "string", "value": 1}),
-            json!({"type": "array", "value": {}}),
-            json!({"type": "array", "value": [{"type": "sprite"}]}),
-            json!({"type": "dictionary", "value": [1]}),
-            json!({"type": "dictionary", "value": [{"key": {"type": "int", "value": 1}}]}),
-            json!({"type": "color", "value": "white"}),
-            json!({"type": "color", "value": [1, 1, 1, "1"]}),
-            json!({"type": "resource", "value": []}),
-            json!({"type": "resource", "value": {"path": "res://a.tres",
+            json!({"type": "String", "value": 1}),
+            json!({"type": "Array", "value": {}}),
+            json!({"type": "Array", "value": [{"type": "sprite"}]}),
+            json!({"type": "Dictionary", "value": [1]}),
+            json!({"type": "Dictionary", "value": [{"key": {"type": "int", "value": 1}}]}),
+            json!({"type": "Color", "value": "white"}),
+            json!({"type": "Color", "value": [1, 1, 1, "1"]}),
+            json!({"type": "AABB", "value": [0, 0, 0]}),
+            json!({"type": "PackedInt32Array", "value": [1.5]}),
+            json!({"type": "PackedStringArray", "value": [1]}),
+            json!({"type": "PackedVector2Array", "value": [[1, 2, 3]]}),
+            json!({"type": "PackedVector2Array", "value": [1, 2]}),
+            json!({"type": "Resource", "value": []}),
+            json!({"type": "Resource", "value": {"path": "res://a.tres",
                 "resourceType": "Theme", "uid": ""}}),
             json!({"type": "object", "value": {"className": "Timer"}}),
             json!({"type": "node", "value": {"path": "/root", "nodeType": "Node",

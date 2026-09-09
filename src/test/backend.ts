@@ -842,7 +842,7 @@ function godotAnswer(
                 settings: [
                     {
                         name: 'application/config/name',
-                        value: {type: 'string', value: 'Fixture'},
+                        value: {type: 'String', value: 'Fixture'},
                         restartRequired: true
                     }
                 ],

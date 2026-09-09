@@ -158,7 +158,7 @@
                 "node": "/HUD",
                 "property": "script",
                 "value": {
-                    "type": "resource",
+                    "type": "Resource",
                     "path": "res://scripts/hud.gd"
                 }
             },
@@ -166,7 +166,7 @@
                 "node": "/HUD",
                 "property": "script",
                 "value": {
-                    "type": "resource",
+                    "type": "Resource",
                     "value": {
                         "path": "res://scripts/hud.gd"
                     }
@@ -182,7 +182,7 @@
                 "node": "/HUD",
                 "property": "script",
                 "value": {
-                    "\"type\"": "resource",
+                    "\"type\"": "Resource",
                     "value": {
                         "\"path\"": "res://scripts/hud.gd"
                     }
@@ -192,7 +192,7 @@
                 "node": "/HUD",
                 "property": "script",
                 "value": {
-                    "type": "resource",
+                    "type": "Resource",
                     "value": {
                         "path": "res://scripts/hud.gd"
                     }
@@ -238,7 +238,7 @@
                 "node": "/HUD",
                 "property": "text",
                 "value": {
-                    "type": "string",
+                    "type": "String",
                     "value": {
                         "type": "String",
                         "value": "Score: 0"
@@ -249,7 +249,7 @@
                 "node": "/HUD",
                 "property": "text",
                 "value": {
-                    "type": "string",
+                    "type": "String",
                     "value": "Score: 0"
                 }
             },

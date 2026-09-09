@@ -2,14 +2,13 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "$id": "https://gofer.local/protocol/v2/value.schema.json",
     "title": "Gofer protocol v2 tagged Godot value",
+    "description": "Every tag is the spelling type_string gives that Variant type. node, object and opaque are lowercase because they describe something the wire cannot rebuild, and Resource is the one object shape it can.",
     "type": "object",
     "required": ["type"],
     "properties": {"type": {"type": "string"}},
     "additionalProperties": true,
     "oneOf": [
-        {
-            "properties": {"type": {"const": "null"}, "value": {"type": "null"}}
-        },
+        {"properties": {"type": {"const": "Nil"}, "value": {"type": "null"}}},
         {
             "required": ["value"],
             "properties": {"type": {"const": "bool"}, "value": {"type": "boolean"}}
@@ -25,21 +24,21 @@
         {
             "required": ["value"],
             "properties": {
-                "type": {"enum": ["string", "node_path"]},
+                "type": {"enum": ["String", "StringName", "NodePath"]},
                 "value": {"type": "string"}
             }
         },
         {
             "required": ["value"],
             "properties": {
-                "type": {"const": "array"},
+                "type": {"const": "Array"},
                 "value": {"type": "array", "items": {"$ref": "#"}}
             }
         },
         {
             "required": ["value"],
             "properties": {
-                "type": {"const": "dictionary"},
+                "type": {"const": "Dictionary"},
                 "value": {
                     "type": "array",
                     "items": {
@@ -54,7 +53,7 @@
         {
             "required": ["value"],
             "properties": {
-                "type": {"const": "vector2"},
+                "type": {"const": "Vector2"},
                 "value": {
                     "type": "array",
                     "minItems": 2,
@@ -66,7 +65,7 @@
         {
             "required": ["value"],
             "properties": {
-                "type": {"const": "vector2i"},
+                "type": {"const": "Vector2i"},
                 "value": {
                     "type": "array",
                     "minItems": 2,
@@ -78,7 +77,7 @@
         {
             "required": ["value"],
             "properties": {
-                "type": {"const": "vector3"},
+                "type": {"const": "Vector3"},
                 "value": {
                     "type": "array",
                     "minItems": 3,
@@ -90,7 +89,7 @@
         {
             "required": ["value"],
             "properties": {
-                "type": {"const": "vector3i"},
+                "type": {"const": "Vector3i"},
                 "value": {
                     "type": "array",
                     "minItems": 3,
@@ -102,7 +101,7 @@
         {
             "required": ["value"],
             "properties": {
-                "type": {"enum": ["vector4", "quaternion", "color", "plane", "rect2"]},
+                "type": {"enum": ["Vector4", "Quaternion", "Color", "Plane", "Rect2"]},
                 "value": {
                     "type": "array",
                     "minItems": 4,
@@ -114,7 +113,7 @@
         {
             "required": ["value"],
             "properties": {
-                "type": {"enum": ["vector4i", "rect2i"]},
+                "type": {"enum": ["Vector4i", "Rect2i"]},
                 "value": {
                     "type": "array",
                     "minItems": 4,
@@ -126,7 +125,7 @@
         {
             "required": ["value"],
             "properties": {
-                "type": {"const": "transform2d"},
+                "type": {"enum": ["Transform2D", "AABB"]},
                 "value": {
                     "type": "array",
                     "minItems": 6,
@@ -138,7 +137,7 @@
         {
             "required": ["value"],
             "properties": {
-                "type": {"const": "basis"},
+                "type": {"const": "Basis"},
                 "value": {
                     "type": "array",
                     "minItems": 9,
@@ -150,7 +149,7 @@
         {
             "required": ["value"],
             "properties": {
-                "type": {"const": "transform3d"},
+                "type": {"const": "Transform3D"},
                 "value": {
                     "type": "array",
                     "minItems": 12,
@@ -162,7 +161,85 @@
         {
             "required": ["value"],
             "properties": {
-                "type": {"const": "resource"},
+                "type": {"const": "Projection"},
+                "value": {
+                    "type": "array",
+                    "minItems": 16,
+                    "maxItems": 16,
+                    "items": {"type": "number"}
+                }
+            }
+        },
+        {
+            "required": ["value"],
+            "properties": {
+                "type": {"enum": ["PackedByteArray", "PackedInt32Array", "PackedInt64Array"]},
+                "value": {"type": "array", "items": {"type": "integer"}}
+            }
+        },
+        {
+            "required": ["value"],
+            "properties": {
+                "type": {"enum": ["PackedFloat32Array", "PackedFloat64Array"]},
+                "value": {"type": "array", "items": {"type": "number"}}
+            }
+        },
+        {
+            "required": ["value"],
+            "properties": {
+                "type": {"const": "PackedStringArray"},
+                "value": {"type": "array", "items": {"type": "string"}}
+            }
+        },
+        {
+            "required": ["value"],
+            "properties": {
+                "type": {"const": "PackedVector2Array"},
+                "value": {
+                    "type": "array",
+                    "items": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 2,
+                        "items": {"type": "number"}
+                    }
+                }
+            }
+        },
+        {
+            "required": ["value"],
+            "properties": {
+                "type": {"const": "PackedVector3Array"},
+                "value": {
+                    "type": "array",
+                    "items": {
+                        "type": "array",
+                        "minItems": 3,
+                        "maxItems": 3,
+                        "items": {"type": "number"}
+                    }
+                }
+            }
+        },
+        {
+            "required": ["value"],
+            "properties": {
+                "type": {"enum": ["PackedVector4Array", "PackedColorArray"]},
+                "value": {
+                    "type": "array",
+                    "items": {
+                        "type": "array",
+                        "minItems": 4,
+                        "maxItems": 4,
+                        "items": {"type": "number"}
+                    }
+                }
+            }
+        },
+        {
+            "required": ["value"],
+            "properties": {
+                "type": {"const": "Resource"},
                 "value": {
                     "type": "object",
                     "required": ["path", "resourceType"],

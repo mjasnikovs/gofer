@@ -339,7 +339,7 @@ fn a_node_answers_with_only_the_properties_that_were_named() {
     session.mutate(
         "node.set_property",
         json!({"node": "/narrow/Caption", "property": "global_position",
-               "value": {"type": "vector2", "value": [10, 20]}}),
+               "value": {"type": "Vector2", "value": [10, 20]}}),
     );
 
     let corrected = session.error(
@@ -396,7 +396,7 @@ fn a_handler_written_after_the_script_was_loaded_can_still_be_connected() {
     session.mutate(
         "node.set_property",
         json!({"node": "/stale/Player", "property": "script",
-               "value": {"type": "resource", "value": {"path": "res://player.gd"}}}),
+               "value": {"type": "Resource", "value": {"path": "res://player.gd"}}}),
     );
     session.mutate(
         "node.create",
@@ -445,25 +445,25 @@ fn the_properties_an_ai_reaches_for_can_be_written() {
             "Sprite2D",
             "Sprite",
             "position",
-            json!({"type": "vector2", "value": [12, 34]}),
+            json!({"type": "Vector2", "value": [12, 34]}),
         ),
         (
             "Label",
             "Text",
             "text",
-            json!({"type": "string", "value": "hello"}),
+            json!({"type": "String", "value": "hello"}),
         ),
         (
             "Label",
             "Text",
             "size",
-            json!({"type": "vector2", "value": [200, 50]}),
+            json!({"type": "Vector2", "value": [200, 50]}),
         ),
         (
             "Label",
             "Text",
             "theme_override_colors/font_color",
-            json!({"type": "color", "value": [1, 0, 0, 1]}),
+            json!({"type": "Color", "value": [1, 0, 0, 1]}),
         ),
         (
             "Label",
@@ -558,7 +558,7 @@ fn a_shape_can_be_given_to_a_collision_shape() {
         json!({
             "node": "/shape/Body/Hitbox",
             "property": "shape",
-            "value": {"type": "resource", "value": {"path": "res://hitbox.tres"}}
+            "value": {"type": "Resource", "value": {"path": "res://hitbox.tres"}}
         }),
     );
     session.mutate("scene.save", json!({}));
@@ -641,7 +641,7 @@ fn a_node_becomes_another_class_and_keeps_what_the_new_one_can_hold() {
         json!({
             "node": "/Level/Player",
             "property": "position",
-            "value": {"type": "vector2", "value": [64, 200]}
+            "value": {"type": "Vector2", "value": [64, 200]}
         }),
     );
     session.mutate(
@@ -667,7 +667,7 @@ fn a_node_becomes_another_class_and_keeps_what_the_new_one_can_hold() {
         .unwrap_or_else(|| panic!("the position it was given has to travel with it: {node}"));
     assert_eq!(
         position["value"],
-        json!({"type": "vector2", "value": [64.0, 200.0]}),
+        json!({"type": "Vector2", "value": [64.0, 200.0]}),
         "{node}"
     );
     let tree = session.call("scene.get_tree", json!({}));
@@ -754,7 +754,7 @@ fn a_script_travels_with_a_type_change_or_the_change_is_refused() {
         json!({
             "node": "/Level/Player",
             "property": "script",
-            "value": {"type": "resource", "value": {"path": "res://player.gd"}}
+            "value": {"type": "Resource", "value": {"path": "res://player.gd"}}
         }),
     );
 
@@ -790,7 +790,7 @@ fn a_script_travels_with_a_type_change_or_the_change_is_refused() {
         json!({
             "node": "/Level/Player",
             "property": "script",
-            "value": {"type": "resource", "value": {"path": "res://body.gd"}}
+            "value": {"type": "Resource", "value": {"path": "res://body.gd"}}
         }),
     );
     let at = session.call("scene.get_tree", json!({}))["revision"]
@@ -892,24 +892,24 @@ fn an_exported_node_reference_is_wired_by_the_path_it_is_saved_as() {
     session.mutate(
         "node.set_property",
         json!({"node": "/panel", "property": "script",
-               "value": {"type": "resource", "value": {"path": "res://panel.gd"}}}),
+               "value": {"type": "Resource", "value": {"path": "res://panel.gd"}}}),
     );
 
     let refused = session.error(
         "node.set_property",
         json!({"node": "/panel", "property": "rate_slider",
-               "value": {"type": "string", "value": "Box/RateSlider"}}),
+               "value": {"type": "String", "value": "Box/RateSlider"}}),
         Some(session.revision()),
     );
     assert!(
-        refused.contains("node_path"),
+        refused.contains("NodePath"),
         "a node reference written as a string names the tag that takes it: {refused}"
     );
 
     session.mutate(
         "node.set_property",
         json!({"node": "/panel", "property": "rate_slider",
-               "value": {"type": "node_path", "value": "Box/RateSlider"}}),
+               "value": {"type": "NodePath", "value": "Box/RateSlider"}}),
     );
     session.mutate("scene.save", json!({}));
 

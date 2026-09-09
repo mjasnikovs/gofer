@@ -319,12 +319,12 @@ fn every_node_command_answers_from_the_edited_tree() {
         json!({
             "node": "/Stage/Holder",
             "property": "position",
-            "value": {"type": "vector2", "value": [12, 34]}
+            "value": {"type": "Vector2", "value": [12, 34]}
         }),
     );
     assert_eq!(
         written["value"],
-        json!({"type": "vector2", "value": [12.0, 34.0]}),
+        json!({"type": "Vector2", "value": [12.0, 34.0]}),
         "set_property must answer with what the node now holds"
     );
     let inspected = session.call("node.inspect", json!({"node": "/Stage/Holder"}));
@@ -363,7 +363,7 @@ fn every_node_command_answers_from_the_edited_tree() {
         json!({
             "node": "/Stage",
             "property": "script",
-            "value": {"type": "resource", "value": {"path": "res://readback.gd"}}
+            "value": {"type": "Resource", "value": {"path": "res://readback.gd"}}
         }),
     );
     let connected = session.mutate(
@@ -477,7 +477,7 @@ fn cells_and_resources_answer_from_what_they_wrote() {
         json!({
             "node": "/Level/Terrain",
             "property": "tile_set",
-            "value": {"type": "resource", "value": {"path": "res://world.tres"}}
+            "value": {"type": "Resource", "value": {"path": "res://world.tres"}}
         }),
     );
 
@@ -725,7 +725,7 @@ fn a_path_that_climbs_out_of_the_project_is_refused_by_the_addon() {
         json!({
             "node": named["path"],
             "property": "text",
-            "value": {"type": "string", "value": "see ../docs/readme"}
+            "value": {"type": "String", "value": "see ../docs/readme"}
         }),
     );
 }

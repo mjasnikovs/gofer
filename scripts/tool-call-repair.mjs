@@ -183,7 +183,7 @@ export function unquoteATaggedKey(params, entry) {
 
 function withoutQuotedTagKeys(tagged) {
     const named = renamedWithoutQuotes(tagged, TAG_KEYS)
-    if (named.type !== 'resource' || !isObject(named.value)) return named
+    if (named.type !== 'Resource' || !isObject(named.value)) return named
     return {...named, value: renamedWithoutQuotes(named.value, ['path'])}
 }
 
@@ -247,7 +247,7 @@ export function wrapBareResource(params, entry) {
         if (param.kind === 'tagged') {
             if (!isObject(held) || 'value' in held) return walked
             const {type, path, ...rest} = held
-            if (type !== 'resource' || typeof path !== 'string') return walked
+            if (type !== 'Resource' || typeof path !== 'string') return walked
             if (Object.keys(rest).length > 0) return walked
             return {...walked, [param.name]: {type, value: {path}}}
         }

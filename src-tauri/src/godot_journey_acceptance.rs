@@ -829,8 +829,8 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
         journey.call(
             "godot_runtime",
             "get_monitors",
-            json!({"monitors": ["fps"]})
-        )["monitors"]["fps"]
+            json!({"monitors": ["TIME_FPS"]})
+        )["monitors"]["TIME_FPS"]
             .as_f64()
             .is_some_and(|fps| fps >= 0.0)
     );

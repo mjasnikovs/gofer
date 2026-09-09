@@ -31,6 +31,14 @@ const numbers = value => {
     return []
 }
 const same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i])
+// An arm is scored in its own spelling: the shipped surface said navigation_agent_count and
+// packed_vector2_array, the engine says NAVIGATION_AGENT_COUNT and PackedVector2Array.
+const norm = word =>
+    String(word ?? '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]/gu, '')
+const sameWord = (a, b) => norm(a) === norm(b)
+const oneOf = (word, vocabulary) => vocabulary.some(v => sameWord(v, word))
 const eventsOf = entry => (Array.isArray(entry.events) ? entry.events : [])
 const keysOf = ops =>
     ops.flatMap(e => eventsOf(e).map(v => v?.key)).filter(k => typeof k === 'string')
@@ -50,7 +58,7 @@ const wrote = (ops, node, property, tag, want) =>
         w =>
             String(w?.node ?? '').endsWith(node)
             && w?.property === property
-            && w?.value?.type === tag
+            && sameWord(w?.value?.type, tag)
             && same(numbers(w?.value?.value), want)
     )
 
@@ -83,8 +91,8 @@ export const TASKS = [
                 const asked = Array.isArray(e.monitors) ? e.monitors : []
                 return (
                     e.op === 'get_monitors'
-                    && asked.includes('navigation_agent_count')
-                    && asked.includes('physics_2d_active_objects')
+                    && asked.some(name => sameWord(name, 'navigation_agent_count'))
+                    && asked.some(name => sameWord(name, 'physics_2d_active_objects'))
                 )
             })
     },
@@ -135,12 +143,12 @@ export function answerOf({op, dotted, entry, revision, hint}) {
     if (op === 'get_monitors') {
         const asked = Array.isArray(entry.monitors) ? entry.monitors : []
         for (const name of asked)
-            if (!MONITORS_ALL.includes(name)) return refusal('monitor', name, MONITORS_ALL, hint)
+            if (!oneOf(name, MONITORS_ALL)) return refusal('monitor', name, MONITORS_ALL, hint)
         return {values: Object.fromEntries((asked.length > 0 ? asked : ['fps']).map(n => [n, 0]))}
     }
     for (const write of writesOf([{op, ...entry}])) {
         const tag = write?.value?.type
-        if (typeof tag === 'string' && !TAGS_ALL.includes(tag))
+        if (typeof tag === 'string' && !oneOf(tag, TAGS_ALL))
             return refusal('value tag', tag, TAGS_ALL, hint)
     }
     if (op === 'get_tree') return TREE_2D

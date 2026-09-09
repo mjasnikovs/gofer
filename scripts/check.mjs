@@ -41,6 +41,7 @@ const NODE_COVERAGE_EXCLUDES = [
     'godot-test.mjs',
     'godot-acceptance.mjs',
     'godot-api-drift.mjs',
+    'godot-vocabulary.mjs',
     'design-check.mjs',
     'setup-hooks.mjs',
     'check-ignored-tests.mjs',

@@ -1,6 +1,9 @@
 import {createHash} from 'node:crypto'
 import {readFile, writeFile} from 'node:fs/promises'
 import {fileURLToPath} from 'node:url'
+import {createGodotTools} from './godot-tools.mjs'
+import {declaredDomains} from './declared-domains.mjs'
+import {engineWords, readVocabulary} from './godot-vocabulary.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const GENERATOR = 'scripts/generate-command-surface.mjs'
@@ -36,7 +39,23 @@ async function runtimeCatalogue() {
 
 async function parameterCatalogue() {
     const path = 'protocol/schemas/v2/params.json'
-    const {operations, vocabularies = {}} = JSON.parse(await read(path))
+    const {operations, domains, vocabularies: declared = {}} = JSON.parse(await read(path))
+    const engine = await readVocabulary()
+    const vocabularies = Object.fromEntries(
+        Object.entries(declared).map(([name, words]) => {
+            const where = `${path}: the ${name} vocabulary`
+            if (typeof words.note !== 'string' || words.note.trim() === '')
+                throw new Error(`${where} does not say what its words are`)
+            return [name, {note: words.note, accepted: engineWords(engine, words.engine, where)}]
+        })
+    )
+    if (!Array.isArray(domains) || domains.length === 0)
+        throw new Error(`${path} declares no domains`)
+    for (const domain of domains) {
+        for (const key of ['name', 'description'])
+            if (typeof domain[key] !== 'string' || domain[key].trim() === '')
+                throw new Error(`${path}: a domain has no ${key}`)
+    }
     if (!Array.isArray(operations) || operations.length === 0)
         throw new Error(`${path} declares no operations`)
     for (const entry of operations) {
@@ -63,23 +82,14 @@ async function parameterCatalogue() {
                     `${path}: ${entry.tool} ${entry.op} is marked alone without a sentence saying why`
                 )
         }
-        for (const param of entry.params ?? []) {
-            checkKind(path, entry, param)
-            if (param.vocabulary && !vocabularies[param.vocabulary])
-                throw new Error(
-                    `${path}: ${entry.tool} ${entry.op} ${param.name} speaks ${param.vocabulary}, which no vocabulary declares`
-                )
-        }
+        for (const param of entry.params ?? []) checkKind(path, entry, param, vocabularies)
     }
-    for (const [name, words] of Object.entries(vocabularies)) {
-        if (!Array.isArray(words.accepted) || words.accepted.length === 0)
-            throw new Error(`${path}: the ${name} vocabulary accepts nothing`)
-        if (!Array.isArray(words.refused) || words.refused.length === 0)
-            throw new Error(
-                `${path}: the ${name} vocabulary refuses nothing, so nothing can prove it means anything`
-            )
+    const named = new Set(domains.map(domain => domain.name))
+    for (const entry of operations) {
+        if (!named.has(entry.tool))
+            throw new Error(`${path}: ${entry.tool} ${entry.op} belongs to no declared domain`)
     }
-    return {operations, vocabularies}
+    return {operations, domains, vocabularies}
 }
 
 const ALONE_SCOPES = ['repeat', 'exclusive']
@@ -100,22 +110,24 @@ const KINDS = [
     'listOf'
 ]
 
-function checkKind(path, entry, param) {
+function checkKind(path, entry, param, vocabularies) {
     const where = `${path}: ${entry.tool} ${entry.op} ${param.name ?? '(unnamed)'}`
     if (!param.name || !param.kind) throw new Error(`${where} has no name or no kind`)
     if (!KINDS.includes(param.kind)) throw new Error(`${where} is of unknown kind ${param.kind}`)
-    if (param.kind === 'choice' && !Array.isArray(param.of))
-        throw new Error(`${where} lists no choices`)
+    if (param.vocabulary && !vocabularies[param.vocabulary])
+        throw new Error(`${where} speaks ${param.vocabulary}, which no vocabulary declares`)
+    if (param.kind === 'choice' && !Array.isArray(param.of) && !param.vocabulary)
+        throw new Error(`${where} lists no choices and names no vocabulary`)
     if (param.kind === 'either') {
         if (!Array.isArray(param.of) || param.of.length < 2)
             throw new Error(`${where} is an either of fewer than two kinds`)
-        for (const one of param.of) checkKind(path, entry, {...one, name: param.name})
+        for (const one of param.of) checkKind(path, entry, {...one, name: param.name}, vocabularies)
     }
     if (param.kind === 'listOf') {
         if (!param.of?.kind) throw new Error(`${where} is a listOf nothing`)
         if (param.of.kind === 'list' || param.of.kind === 'listOf' || param.of.kind === 'object')
             throw new Error(`${where} is a listOf ${param.of.kind}; use an entry shape for that`)
-        checkKind(path, entry, {...param.of, name: param.name})
+        checkKind(path, entry, {...param.of, name: param.name}, vocabularies)
     }
     if (param.entry) {
         if (param.kind !== 'list' && param.kind !== 'object')
@@ -123,7 +135,7 @@ function checkKind(path, entry, param) {
         if (!Array.isArray(param.entry) || param.entry.length === 0)
             throw new Error(`${where} declares an empty entry shape`)
         for (const inner of param.entry)
-            checkKind(path, entry, {...inner, name: `${param.name}.${inner.name}`})
+            checkKind(path, entry, {...inner, name: `${param.name}.${inner.name}`}, vocabularies)
     }
 }
 
@@ -398,7 +410,9 @@ function rustString(text) {
 
 function rustKind(param) {
     if (param.kind === 'choice')
-        return `Kind::Choice(&[${param.of.map(word => rustString(word)).join(', ')}])`
+        return param.vocabulary ?
+                `Kind::Choice(${vocabularyConst(param.vocabulary)})`
+            :   `Kind::Choice(&[${param.of.map(word => rustString(word)).join(', ')}])`
     if (param.kind === 'either')
         return `Kind::Either(&[${param.of.map(one => rustKind(one)).join(', ')}])`
     if (param.kind === 'listOf') return `Kind::ListOf(&${rustKind(param.of)})`
@@ -411,13 +425,10 @@ function vocabularyConst(name) {
 
 function rustVocabularies(vocabularies) {
     return Object.entries(vocabularies)
-        .flatMap(([name, words]) => {
+        .map(([name, words]) => {
             const konst = vocabularyConst(name)
-            const list = names => `&[\n${names.map(word => `    ${rustString(word)},\n`).join('')}]`
-            return [
-                `/// ${words.note}\npub const ${konst}: &[&str] = ${list(words.accepted)};\n`,
-                `/// Names the engine does not have, so the drift check can prove ${konst} means something.\n///\n/// Read only by tests: the engine drift check feeds these to a real editor and requires each to\n/// be refused. Nothing in a shipped build has any use for a list of names that do not work.\n#[allow(dead_code)]\npub const ${konst}_REFUSED: &[&str] = ${list(words.refused)};\n`
-            ]
+            const list = words.accepted.map(word => `    ${rustString(word)},\n`).join('')
+            return `${wrapDoc(words.note)}pub const ${konst}: &[&str] = &[\n${list}];\n`
         })
         .join('\n')
 }
@@ -428,7 +439,8 @@ function rustParam(param) {
         : param.required ? 'need'
         : 'opt'
     let call = `${constructor}(${rustString(param.name)}, ${rustKind(param)})`
-    if (param.vocabulary) call = `speaking(${call}, ${vocabularyConst(param.vocabulary)})`
+    if (param.vocabulary && param.kind !== 'choice')
+        call = `speaking(${call}, ${vocabularyConst(param.vocabulary)})`
     if (param.entry) call = `shaped(${call}, &[${param.entry.map(rustParam).join(', ')}])`
     return param.note ? `noted(${call}, ${rustString(param.note)})` : call
 }
@@ -444,6 +456,51 @@ function rustOperation(entry) {
     if (entry.gated) call = `gated(${call}, ${rustString(entry.gated)})`
     if (entry.writes) call = `writes(${call}, ${rustWrites(entry.writes)})`
     return call
+}
+
+/**
+ * The `godot` tool object, exactly as `createGodotTools` builds it for the model.
+ *
+ * Formatted the way Prettier would write it, for the same reason the Rust regions are run through
+ * rustfmt: a generated file the formatter then rewrites fails the next surface check over a file
+ * nobody edited.
+ */
+async function godotTool() {
+    const [tool] = createGodotTools(await declaredDomains(), {call: async () => ({})})
+    const path = 'protocol/schemas/v2/godot-tool.json'
+    const prettier = await import('prettier')
+    return await prettier.format(
+        JSON.stringify({
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.parameters
+        }),
+        {
+            ...(await prettier.resolveConfig(new URL(path, `file://${root}`).pathname)),
+            parser: 'json'
+        }
+    )
+}
+
+/**
+ * The ten domains, each pointing at the operation list generated beside it.
+ *
+ * The descriptions used to be written here, which put the only prose the model reads that no
+ * check could reach inside a Rust source file. They are rows of `params.json` now, so the
+ * recitation check and the tool the model receives read the same words.
+ */
+function rustCatalog(domains) {
+    const rows = domains
+        .map(
+            domain =>
+                '    ToolDomain {\n'
+                + `        name: ${rustString(domain.name)},\n`
+                + `        description: ${rustString(domain.description)},\n`
+                + `        operations: tool_params::${operationsConst(domain.name)},\n`
+                + '    },\n'
+        )
+        .join('')
+    return `pub const CATALOG: &[ToolDomain] = &[\n${rows}];\n`
 }
 
 function operationsConst(tool) {
@@ -828,7 +885,7 @@ export async function generateSurfaces() {
     const commands = await catalogue()
     const runtime = await runtimeCatalogue()
     const desktop = await registeredDesktopCommands()
-    const {operations: parameters, vocabularies} = await parameterCatalogue()
+    const {operations: parameters, domains: toolDomains, vocabularies} = await parameterCatalogue()
     const subagentBounds = await subagentBoundsCatalogue()
     const cerebrasModels = await shippedModelCatalogue('protocol/cerebras-models.json')
     const qwenModels = await shippedModelCatalogue('protocol/qwen-models.json')
@@ -873,6 +930,12 @@ export async function generateSurfaces() {
             regions: [
                 {name: 'command-params', body: gdCommandParams(parameters, commands, runtime)}
             ]
+        },
+        {
+            path: 'src-tauri/src/ai_tools.rs',
+            comment: '//',
+            rustfmt: true,
+            regions: [{name: 'catalog', body: rustCatalog(toolDomains)}]
         },
         {
             path: 'src-tauri/src/protocol_v2.rs',
@@ -944,7 +1007,16 @@ export async function generateSurfaces() {
         }
     ]
 
+    const whole = [
+        {
+            path: 'protocol/schemas/v2/godot-tool.json',
+            body: await godotTool()
+        }
+    ]
+
     const results = []
+    for (const {path, body} of whole)
+        results.push({path, before: await read(path).catch(() => ''), after: body})
     for (const {path, comment, regions, rustfmt} of edits) {
         const before = await read(path)
         let after = before

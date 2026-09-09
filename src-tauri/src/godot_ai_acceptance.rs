@@ -1129,7 +1129,7 @@ fn a_handler_the_editor_cannot_compile_says_so_rather_than_blaming_the_script() 
         json!({"ops": [
             {"op": "create", "parent": "/AiFixture", "name": "Thing", "type": "Node2D"},
             {"op": "set_property", "node": "/AiFixture/Thing", "property": "script",
-             "value": {"type": "resource", "value": {"path": "res://scripts/thing.gd"}}},
+             "value": {"type": "Resource", "value": {"path": "res://scripts/thing.gd"}}},
             {"op": "create", "parent": "/AiFixture", "name": "Ticker", "type": "Timer"}
         ]}),
     )

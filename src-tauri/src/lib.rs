@@ -26,8 +26,6 @@ mod git;
 mod godot_addon_acceptance;
 #[cfg(all(test, feature = "godot-acceptance"))]
 mod godot_ai_acceptance;
-#[cfg(all(test, feature = "godot-api-drift"))]
-mod godot_api_drift;
 mod godot_dap;
 #[cfg(all(test, feature = "godot-acceptance"))]
 mod godot_dap_acceptance;

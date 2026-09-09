@@ -14,7 +14,11 @@ const TURNS = Number(process.env.TURNS ?? 3)
 
 const {TASKS, answerOf, HINTING, SESSION} = await import(`./${PREFIX}-tasks.mjs`)
 const map = JSON.parse(await readFile(`${S}/surf-map.json`, 'utf8'))
-const prompt = await readFile(`${S}/prompt.txt`, 'utf8')
+const shared = await readFile(`${S}/prompt.txt`, 'utf8')
+// An arm that ships its own system prompt is measured with it: <prefix>-prompt-<arm>.txt.
+const prompts = {}
+for (const arm of NAMES)
+    prompts[arm] = await readFile(`${S}/${PREFIX}-prompt-${arm}.txt`, 'utf8').catch(() => shared)
 const tools = {}
 for (const arm of NAMES)
     tools[arm] = JSON.parse(await readFile(`${S}/${PREFIX}-tools-${arm}.json`, 'utf8'))
@@ -62,9 +66,9 @@ async function ask(arm, seed, messages) {
     }
 }
 
-function conversation(task) {
+function conversation(task, arm) {
     const messages = [
-        {role: 'system', content: prompt},
+        {role: 'system', content: prompts[arm]},
         {role: 'user', content: `${task.ask}\n\n${SESSION}`}
     ]
     for (const step of task.priming) {
@@ -85,7 +89,7 @@ function conversation(task) {
 
 async function trial(arm, task, seed) {
     const hint = HINTING.has(arm)
-    const messages = conversation(task)
+    const messages = conversation(task, arm)
     const row = {
         arm,
         task: task.id,

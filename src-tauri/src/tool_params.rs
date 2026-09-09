@@ -14,7 +14,7 @@
 //! editor, across a socket, and the only thing that came back was a hand-written sentence.
 //!
 //! A live run lost a whole session to that seam. The model wrote
-//! `{"type": "resource", "value": "res://scripts/player.gd"}` — the path is right, the `{"path": …}`
+//! `{"type": "Resource", "value": {"path": "res://scripts/player.gd"}}` — the path is right, the `{"path": …}`
 //! wrapper is missing — and was answered `A resource value requires an object carrying a path`
 //! eight times. The sentence is true. It does not show the wrapper and it does not repeat what
 //! arrived, so the model changed nothing between attempts, then concluded that scripts cannot be
@@ -85,10 +85,11 @@ pub struct Param {
     pub note: &'static str,
     /// The words this parameter accepts inside a structure, where [`Kind`] cannot reach.
     ///
-    /// `key` sits inside each entry of an `events` list, so no kind can name it. These are printed
-    /// into the signature all the same, because that is where a vocabulary belongs: they used to
-    /// be two verbatim copies of the same twenty-five names inside two catalogue summaries, read
-    /// back out of the English by a parser that split on the literal string "Accepted: ".
+    /// `key` sits inside each entry of an `events` list, so no kind can name it. It reaches the
+    /// model as the schema `enum` the sampler is constrained by rather than as prose: the
+    /// signature used to print the words, which was twenty-five of the engine's hundred and
+    /// ninety, and the arm that measured the enum with that sentence still beside it lost to the
+    /// arm that measured the enum alone.
     pub vocabulary: &'static [&'static str],
     /// What one entry of this parameter holds, when [`Kind`] can only say `list` or `object`.
     ///
@@ -302,10 +303,10 @@ impl Operation {
     /// The values a model wrote in a shape the protocol does not take, rewritten into the one it
     /// does.
     ///
-    /// Repair rather than refusal, because the refusal was tried. `{"type": "vector2", "value":
+    /// Repair rather than refusal, because the refusal was tried. `{"type": "Vector2", "value":
     /// {"x": 32, "y": 48}}` is what one live turn wrote thirteen times in a single run; the refusal
     /// was then taught to print the exact value to send instead, and the next run wrote it four
-    /// more times in a row, each answered with `Send {"type": "vector2", "value": [32, 48]}` and
+    /// more times in a row, each answered with `Send {"type": "Vector2", "value": [32, 48]}` and
     /// each ignored. A correction a model will not read is one that cannot help it, and the numbers
     /// were never in doubt.
     ///
@@ -416,46 +417,308 @@ pub fn answers(domain: &str, op: &str) -> Option<Answers> {
 
 /// The words a parameter accepts inside a structure, where [`Kind`] cannot reach.
 ///
-/// Emitted from `protocol/schemas/v2/params.json`. They were two verbatim copies of the same
-/// twenty-five names inside two catalogue summaries, and the only thing holding them to the engine
-/// was a parser that split the English on the literal string "Accepted: ".
-// GENERATED-BEGIN vocabularies sha256:c9f8f5c5638d87e6
+/// Read out of the pinned engine into `protocol/godot-vocabulary.json` and emitted from there.
+/// They were twenty-five key names written by hand into `params.json`, of the hundred and ninety
+/// the engine has, and the only thing holding even those to it was a test that fed each one to a
+/// real editor.
+// GENERATED-BEGIN vocabularies sha256:60cfe3c2403194ae
 /// Godot's own name for a key, not the browser's.
 pub const GODOT_KEY_NAME: &[&str] = &[
-    "Enter",
-    "Kp Enter",
-    "Escape",
-    "Space",
-    "Backspace",
-    "Tab",
-    "Delete",
-    "Left",
-    "Right",
-    "Up",
-    "Down",
-    "PageUp",
-    "PageDown",
-    "Home",
-    "End",
-    "Shift",
-    "Ctrl",
+    "0",
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+    "A",
     "Alt",
-    "Meta",
-    "Comma",
-    "Period",
-    "Slash",
-    "Minus",
-    "Equal",
+    "Ampersand",
+    "Apostrophe",
+    "AsciiCircum",
+    "AsciiTilde",
+    "Asterisk",
+    "At",
+    "B",
+    "Back",
+    "BackSlash",
+    "Backspace",
+    "Backtab",
+    "Bar",
+    "BraceLeft",
+    "BraceRight",
     "BracketLeft",
+    "BracketRight",
+    "C",
+    "CapsLock",
+    "Clear",
+    "Colon",
+    "Comma",
+    "Ctrl",
+    "D",
+    "Delete",
+    "Dollar",
+    "Down",
+    "E",
+    "End",
+    "Enter",
+    "Equal",
+    "Escape",
+    "Exclam",
+    "F",
+    "F1",
+    "F10",
+    "F11",
+    "F12",
+    "F13",
+    "F14",
+    "F15",
+    "F16",
+    "F17",
+    "F18",
+    "F19",
+    "F2",
+    "F20",
+    "F21",
+    "F22",
+    "F23",
+    "F24",
+    "F25",
+    "F26",
+    "F27",
+    "F28",
+    "F29",
+    "F3",
+    "F30",
+    "F31",
+    "F32",
+    "F33",
+    "F34",
+    "F35",
+    "F4",
+    "F5",
+    "F6",
+    "F7",
+    "F8",
+    "F9",
+    "Favorites",
+    "Forward",
+    "G",
+    "Globe",
+    "Greater",
+    "H",
+    "Help",
+    "Home",
+    "HomePage",
+    "Hyper",
+    "I",
+    "Insert",
+    "J",
+    "JIS Eisu",
+    "JIS Kana",
+    "K",
+    "Kp 0",
+    "Kp 1",
+    "Kp 2",
+    "Kp 3",
+    "Kp 4",
+    "Kp 5",
+    "Kp 6",
+    "Kp 7",
+    "Kp 8",
+    "Kp 9",
+    "Kp Add",
+    "Kp Divide",
+    "Kp Enter",
+    "Kp Multiply",
+    "Kp Period",
+    "Kp Subtract",
+    "L",
+    "Launch0",
+    "Launch1",
+    "Launch2",
+    "Launch3",
+    "Launch4",
+    "Launch5",
+    "Launch6",
+    "Launch7",
+    "Launch8",
+    "Launch9",
+    "LaunchA",
+    "LaunchB",
+    "LaunchC",
+    "LaunchD",
+    "LaunchE",
+    "LaunchF",
+    "LaunchMail",
+    "LaunchMedia",
+    "Left",
+    "Less",
+    "M",
+    "MediaNext",
+    "MediaPlay",
+    "MediaPrevious",
+    "MediaRecord",
+    "MediaStop",
+    "Menu",
+    "Meta",
+    "Minus",
+    "N",
+    "NumLock",
+    "NumberSign",
+    "O",
+    "On-screen keyboard",
+    "OpenURL",
+    "P",
+    "PageDown",
+    "PageUp",
+    "ParenLeft",
+    "ParenRight",
+    "Pause",
+    "Percent",
+    "Period",
+    "Plus",
+    "Print",
+    "Q",
+    "Question",
+    "QuoteDbl",
+    "QuoteLeft",
+    "R",
+    "Refresh",
+    "Right",
+    "S",
+    "ScrollLock",
+    "Search",
+    "Section",
+    "Semicolon",
+    "Shift",
+    "Slash",
+    "Space",
+    "StandBy",
+    "Stop",
+    "SysReq",
+    "T",
+    "Tab",
+    "U",
+    "UnderScore",
+    "Up",
+    "V",
+    "VolumeDown",
+    "VolumeMute",
+    "VolumeUp",
+    "W",
+    "X",
+    "Y",
+    "Yen",
+    "Z",
 ];
 
-/// Names the engine does not have, so the drift check can prove GODOT_KEY_NAME means something.
-///
-/// Read only by tests: the engine drift check feeds these to a real editor and requires each to
-/// be refused. Nothing in a shipped build has any use for a list of names that do not work.
-#[allow(dead_code)]
-pub const GODOT_KEY_NAME_REFUSED: &[&str] =
-    &["Return", "Esc", "Control", "Super", "ArrowLeft", "Spacebar"];
+/// A `Performance.Monitor` constant, as the engine spells it.
+pub const GODOT_MONITOR_NAME: &[&str] = &[
+    "TIME_FPS",
+    "TIME_PROCESS",
+    "TIME_PHYSICS_PROCESS",
+    "TIME_NAVIGATION_PROCESS",
+    "MEMORY_STATIC",
+    "MEMORY_STATIC_MAX",
+    "MEMORY_MESSAGE_BUFFER_MAX",
+    "OBJECT_COUNT",
+    "OBJECT_RESOURCE_COUNT",
+    "OBJECT_NODE_COUNT",
+    "OBJECT_ORPHAN_NODE_COUNT",
+    "RENDER_TOTAL_OBJECTS_IN_FRAME",
+    "RENDER_TOTAL_PRIMITIVES_IN_FRAME",
+    "RENDER_TOTAL_DRAW_CALLS_IN_FRAME",
+    "RENDER_VIDEO_MEM_USED",
+    "RENDER_TEXTURE_MEM_USED",
+    "RENDER_BUFFER_MEM_USED",
+    "PHYSICS_2D_ACTIVE_OBJECTS",
+    "PHYSICS_2D_COLLISION_PAIRS",
+    "PHYSICS_2D_ISLAND_COUNT",
+    "PHYSICS_3D_ACTIVE_OBJECTS",
+    "PHYSICS_3D_COLLISION_PAIRS",
+    "PHYSICS_3D_ISLAND_COUNT",
+    "AUDIO_OUTPUT_LATENCY",
+    "NAVIGATION_ACTIVE_MAPS",
+    "NAVIGATION_REGION_COUNT",
+    "NAVIGATION_AGENT_COUNT",
+    "NAVIGATION_LINK_COUNT",
+    "NAVIGATION_POLYGON_COUNT",
+    "NAVIGATION_EDGE_COUNT",
+    "NAVIGATION_EDGE_MERGE_COUNT",
+    "NAVIGATION_EDGE_CONNECTION_COUNT",
+    "NAVIGATION_EDGE_FREE_COUNT",
+    "NAVIGATION_OBSTACLE_COUNT",
+    "PIPELINE_COMPILATIONS_CANVAS",
+    "PIPELINE_COMPILATIONS_MESH",
+    "PIPELINE_COMPILATIONS_SURFACE",
+    "PIPELINE_COMPILATIONS_DRAW",
+    "PIPELINE_COMPILATIONS_SPECIALIZATION",
+    "NAVIGATION_2D_ACTIVE_MAPS",
+    "NAVIGATION_2D_REGION_COUNT",
+    "NAVIGATION_2D_AGENT_COUNT",
+    "NAVIGATION_2D_LINK_COUNT",
+    "NAVIGATION_2D_POLYGON_COUNT",
+    "NAVIGATION_2D_EDGE_COUNT",
+    "NAVIGATION_2D_EDGE_MERGE_COUNT",
+    "NAVIGATION_2D_EDGE_CONNECTION_COUNT",
+    "NAVIGATION_2D_EDGE_FREE_COUNT",
+    "NAVIGATION_2D_OBSTACLE_COUNT",
+    "NAVIGATION_3D_ACTIVE_MAPS",
+    "NAVIGATION_3D_REGION_COUNT",
+    "NAVIGATION_3D_AGENT_COUNT",
+    "NAVIGATION_3D_LINK_COUNT",
+    "NAVIGATION_3D_POLYGON_COUNT",
+    "NAVIGATION_3D_EDGE_COUNT",
+    "NAVIGATION_3D_EDGE_MERGE_COUNT",
+    "NAVIGATION_3D_EDGE_CONNECTION_COUNT",
+    "NAVIGATION_3D_EDGE_FREE_COUNT",
+    "NAVIGATION_3D_OBSTACLE_COUNT",
+];
+
+/// The `type_string` spelling of every Variant type a JSON payload can be built into, plus
+/// `Resource` for the {path} payload.
+pub const GODOT_VALUE_TAG: &[&str] = &[
+    "Nil",
+    "bool",
+    "int",
+    "float",
+    "String",
+    "Vector2",
+    "Vector2i",
+    "Rect2",
+    "Rect2i",
+    "Vector3",
+    "Vector3i",
+    "Transform2D",
+    "Vector4",
+    "Vector4i",
+    "Plane",
+    "Quaternion",
+    "AABB",
+    "Basis",
+    "Transform3D",
+    "Projection",
+    "Color",
+    "StringName",
+    "NodePath",
+    "Dictionary",
+    "Array",
+    "PackedByteArray",
+    "PackedInt32Array",
+    "PackedInt64Array",
+    "PackedFloat32Array",
+    "PackedFloat64Array",
+    "PackedStringArray",
+    "PackedVector2Array",
+    "PackedVector3Array",
+    "PackedColorArray",
+    "PackedVector4Array",
+    "Resource",
+];
 // GENERATED-END vocabularies
 use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 
@@ -469,7 +732,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:5afc9fffb4f11f9b
+// GENERATED-BEGIN operations sha256:832fa9424b1fd8a1
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -816,14 +1079,14 @@ pub const GODOT_NODE_OPERATIONS: &[Operation] = &[
     op(
         "godot_node",
         "set_property",
-        "Sets a property. `value` is tagged with its type — a `type` beside a `value`: {\"type\": \"vector2\", \"value\": [12, 34]}, {\"type\": \"float\", \"value\": 1.5}, {\"type\": \"string\", \"value\": \"hi\"}. A property that holds a resource — a CollisionShape2D's `shape`, a Sprite2D's `texture` — takes {\"type\": \"resource\", \"value\": {\"path\": \"res://…\"}}, never a string: a path written as a string is refused. A property that holds another node — an @export node reference — takes {\"type\": \"node_path\", \"value\": \"Box/Slider\"}, a path read from the node the property is on. A color takes four numbers, or a name like \"skyblue\", or a hex string like \"#8b5a2b\". The other tags are null, bool, int, rect2 and rect2i (four numbers each), vector2i, vector3, vector3i, vector4, vector4i, quaternion, plane, transform2d, basis, transform3d, array (of tagged values) and dictionary (of key and value pairs of them).",
+        "Sets a property. `value` is tagged with its type — a `type` beside a `value`: {\"type\": \"Vector2\", \"value\": [12, 34]}, {\"type\": \"float\", \"value\": 1.5}, {\"type\": \"String\", \"value\": \"hi\"}. A property that holds a resource — a CollisionShape2D's `shape`, a Sprite2D's `texture` — takes {\"type\": \"Resource\", \"value\": {\"path\": \"res://…\"}}, never a string: a path written as a string is refused. A property that holds another node — an @export node reference — takes {\"type\": \"NodePath\", \"value\": \"Box/Slider\"}, a path read from the node the property is on. A color takes four numbers, or a name like \"skyblue\", or a hex string like \"#8b5a2b\". The other tags are the ones the schema's `type` lists.",
         Answers::Addon("node.set_property"),
         &[
             need("node", Text),
             need("property", Text),
             noted(
-                need("value", Tagged),
-                "A script is attached here like any other resource: property \"script\", value {\"type\": \"resource\", \"value\": {\"path\": \"res://scripts/player.gd\"}}.",
+                speaking(need("value", Tagged), GODOT_VALUE_TAG),
+                "A script is attached here like any other resource: property \"script\", value {\"type\": \"Resource\", \"value\": {\"path\": \"res://scripts/player.gd\"}}.",
             ),
             noted(
                 hidden("expectedRevision", Int),
@@ -845,8 +1108,8 @@ pub const GODOT_NODE_OPERATIONS: &[Operation] = &[
                         need("node", Text),
                         need("property", Text),
                         noted(
-                            need("value", Tagged),
-                            "A script is attached here like any other resource: property \"script\", value {\"type\": \"resource\", \"value\": {\"path\": \"res://scripts/player.gd\"}}.",
+                            speaking(need("value", Tagged), GODOT_VALUE_TAG),
+                            "A script is attached here like any other resource: property \"script\", value {\"type\": \"Resource\", \"value\": {\"path\": \"res://scripts/player.gd\"}}.",
                         ),
                     ],
                 ),
@@ -989,9 +1252,12 @@ pub const GODOT_PROJECT_OPERATIONS: &[Operation] = &[
         op(
             "godot_project",
             "set_setting",
-            "Writes one project setting. `value` is tagged with its type, the same shape node.set_property takes: {\"type\": \"int\", \"value\": 1152}, {\"type\": \"string\", \"value\": \"res://main.tscn\"}, {\"type\": \"vector2\", \"value\": [12, 34]}. A bare number or string is refused.",
+            "Writes one project setting. `value` is tagged with its type, the same shape node.set_property takes: {\"type\": \"int\", \"value\": 1152}, {\"type\": \"String\", \"value\": \"res://main.tscn\"}, {\"type\": \"Vector2\", \"value\": [12, 34]}. A bare number or string is refused.",
             Answers::Addon("project.set_setting"),
-            &[need("name", Text), need("value", Tagged)],
+            &[
+                need("name", Text),
+                speaking(need("value", Tagged), GODOT_VALUE_TAG),
+            ],
         ),
         Writes::ProjectSetting,
     ),
@@ -1043,7 +1309,7 @@ pub const GODOT_PROJECT_OPERATIONS: &[Operation] = &[
     op(
         "godot_project",
         "set_input_action",
-        "Writes an input action. `name` is the action's own name, like move_left, never a settings path. Each event names its kind and its key, as {\"kind\": \"key\", \"key\": \"A\"} — the same shape list_input_actions answers with. The named keys are in the signature; F1 to F16, A to Z and 0 to 9 are spelled as they read. The other kinds are mouse_button and joypad_button, each taking a `button` index.",
+        "Writes an input action. `name` is the action's own name, like move_left, never a settings path. Each event names its kind and its key, as {\"kind\": \"key\", \"key\": \"A\"} — the same shape list_input_actions answers with. The other kinds are mouse_button and joypad_button, each taking a `button` index.",
         Answers::Addon("project.set_input_action"),
         &[
             noted(
@@ -1061,14 +1327,17 @@ pub const GODOT_PROJECT_OPERATIONS: &[Operation] = &[
                             ),
                             "Which of the three an event is. Any other kind is refused here rather than in the editor.",
                         ),
-                        speaking(opt("key", Text), GODOT_KEY_NAME),
+                        noted(
+                            speaking(opt("key", Text), GODOT_KEY_NAME),
+                            "The accepted names are the ones the schema's `key` lists.",
+                        ),
                         noted(
                             opt("button", Int),
                             "A mouse button is an index of 1 or higher; a joypad button an index.",
                         ),
                     ],
                 ),
-                "The key is Godot's name for it, not the browser's.",
+                "The key is Godot's name for it, not the browser's. The accepted names are the ones the schema's `key` lists.",
             ),
             opt("deadzone", Number),
         ],
@@ -1129,7 +1398,10 @@ pub const GODOT_PROJECT_OPERATIONS: &[Operation] = &[
                 "set_editor_setting",
                 "Writes one machine-wide editor setting. `value` is tagged with its type, as {\"type\": \"bool\", \"value\": true} — the same shape set_setting and node.set_property take.",
                 Answers::Addon("editor.set_setting"),
-                &[need("name", Text), need("value", Tagged)],
+                &[
+                    need("name", Text),
+                    speaking(need("value", Tagged), GODOT_VALUE_TAG),
+                ],
             ),
             "Editor settings are machine-wide: they live outside the task worktree and outside Git, so this change is not part of anything the task can roll back.",
         ),
@@ -1216,7 +1488,7 @@ pub const GODOT_RESOURCE_OPERATIONS: &[Operation] = &[
     op(
         "godot_resource",
         "create_shape",
-        "Saves a 2D collision shape as a resource. `path` is the .tres to write. `shapeType` is one of RectangleShape2D (size as [width, height]), CircleShape2D (radius), CapsuleShape2D (radius and height), SegmentShape2D (points as [ax, ay, bx, by]), or WorldBoundaryShape2D (nothing). Set the node's `shape` property to the path afterwards — a CollisionShape2D without one collides with nothing, and a shape can only be assigned from a file that already exists.",
+        "Saves a 2D collision shape as a resource. `path` is the .tres to write. `shapeType` is one of the names the schema lists; each takes the parameters its own name implies — a size as [width, height], a radius, a radius and a height, points as [ax, ay, bx, by], or nothing at all. Set the node's `shape` property to the path afterwards — a CollisionShape2D without one collides with nothing, and a shape can only be assigned from a file that already exists.",
         Answers::Addon("resource.create_shape"),
         &[
             need("path", Text),
@@ -1841,7 +2113,7 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
     op(
         "godot_runtime",
         "input",
-        "Injects input and captures the result. Each event names its kind and the parameters that kind uses, as {\"kind\": \"key\", \"key\": \"A\", \"pressed\": true} — send the release as a second event, or the key stays down. An event that leaves `pressed` out alternates on its own: the first is the press and the second the release, so a click is the same event written twice. A Button answers the release, not the press. The named keys are in the signature; F1 to F16, A to Z and 0 to 9 are spelled as they read. A mouse button is named left, right, middle, wheel_up or wheel_down, or given as an index. A position is [x, y]. This drives the Input Map, so it is how you check that a level you built can actually be played. Its answer carries a frame, unless a later entry of the same call carries one too: a picture another picture replaces is not worth sending, and a moment in the middle of a key sequence is what capture is for.",
+        "Injects input and captures the result. Each event names its kind and the parameters that kind uses, as {\"kind\": \"key\", \"key\": \"A\", \"pressed\": true} — send the release as a second event, or the key stays down. An event that leaves `pressed` out alternates on its own: the first is the press and the second the release, so a click is the same event written twice. A Button answers the release, not the press. A mouse button is named left, right, middle, wheel_up or wheel_down, or given as an index. A position is [x, y]. This drives the Input Map, so it is how you check that a level you built can actually be played. Its answer carries a frame, unless a later entry of the same call carries one too: a picture another picture replaces is not worth sending, and a moment in the middle of a key sequence is what capture is for.",
         Answers::Addon("runtime.input"),
         &[noted(
             shaped(
@@ -1860,7 +2132,10 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
                         ),
                         "Which of the five an event is. Checked here rather than in the game: an event with no kind used to cross the socket and come back as `Input event kind '' is not supported`, which names nothing to send instead. One live turn wrote it 22 times.",
                     ),
-                    speaking(opt("key", Text), GODOT_KEY_NAME),
+                    noted(
+                        speaking(opt("key", Text), GODOT_KEY_NAME),
+                        "The accepted names are the ones the schema's `key` lists.",
+                    ),
                     noted(
                         opt("pressed", Flag),
                         "Held down unless this says otherwise, so the release is a second event carrying false.",
@@ -1876,7 +2151,7 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
                     opt("device", Int),
                 ],
             ),
-            "Each event is {\"kind\": \"key\", \"key\": \"A\", \"pressed\": true}, and the release is a second event.",
+            "Each event is {\"kind\": \"key\", \"key\": \"A\", \"pressed\": true}, and the release is a second event. The accepted names are the ones the schema's `key` lists.",
         )],
     ),
     op(
@@ -1927,9 +2202,12 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
     op(
         "godot_runtime",
         "get_monitors",
-        "Reads engine performance monitors. Without a list it answers with fps, memory_static and object_node_count. The rest are process_time, physics_time, memory_message_buffer, object_count, object_resource_count, object_orphan_node_count, render_objects_in_frame, render_primitives_in_frame, render_draw_calls_in_frame, render_video_memory, render_texture_memory and render_buffer_memory; any other name is an error.",
+        "Reads engine performance monitors. Without a list it answers with TIME_FPS, MEMORY_STATIC and OBJECT_NODE_COUNT; the names it accepts are the ones the schema lists, and any other name is an error.",
         Answers::Addon("runtime.get_monitors"),
-        &[opt("monitors", List)],
+        &[opt(
+            "monitors",
+            Kind::ListOf(&Kind::Choice(GODOT_MONITOR_NAME)),
+        )],
     ),
 ];
 
@@ -2019,19 +2297,6 @@ pub fn signature(params: &[Param]) -> String {
                         signature(param.entry)
                     ),
                 },
-                _ if !param.vocabulary.is_empty() => {
-                    let quoted: Vec<String> = param
-                        .vocabulary
-                        .iter()
-                        .map(|word| format!("\"{word}\""))
-                        .collect();
-                    format!(
-                        "{}{mark}: {} like {}",
-                        param.name,
-                        short(param.kind),
-                        quoted.join("|")
-                    )
-                }
                 Kind::Text => format!("{}{mark}: text", param.name),
                 Kind::Int => format!("{}{mark}: int", param.name),
                 Kind::Number => format!("{}{mark}: number", param.name),
@@ -2062,7 +2327,9 @@ fn short(kind: Kind) -> &'static str {
         Kind::Object => "object",
         Kind::Hash => "hash",
         Kind::Tagged => "tagged",
-        Kind::Choice(_) => "choice",
+        // Text from a fixed set, and the schema carries which words. Spelling it "choice" would
+        // name the declaration rather than what goes in the call.
+        Kind::Choice(_) => "text",
         Kind::Either(_) => "either",
         Kind::ListOf(_) => "list",
     }

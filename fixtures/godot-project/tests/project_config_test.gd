@@ -84,7 +84,7 @@ func _test_the_dot_repair(config: GDScript, failures: Array[String]) -> void:
     # A name written with dots creates a brand-new custom setting that governs nothing, while the
     # built-in one stays untouched. The repair is the whole reason this refusal exists.
     var dotted: Dictionary = config.set_setting(
-        {"name": "application.config.name", "value": {"type": "string", "value": "x"}}
+        {"name": "application.config.name", "value": {"type": "String", "value": "x"}}
     )
     if _refusal(dotted) != "setting_not_found":
         failures.append("A setting name written with dots must be refused, not created")

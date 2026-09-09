@@ -1,10 +1,14 @@
 // Godot's real vocabularies, and the wire names Gofer spells them with.
+//
+// The engine's lists are read from protocol/godot-vocabulary.json, which `npm run generate`
+// writes by running the pinned engine. The hand copies this used to hold — a 12 MB extension API
+// dump and a keycode probe of its own — were the same measurement's scaffolding, and a bench arm
+// that names words the shipped surface no longer names measures nothing.
 import {readFile} from 'node:fs/promises'
 
-const S = process.env.SCRATCH ?? import.meta.dirname
-
-const api = JSON.parse(await readFile(`${S}/extension_api.json`, 'utf8'))
-const keycodes = JSON.parse(await readFile(`${S}/probe/keycodes.json`, 'utf8'))
+const engine = JSON.parse(
+    await readFile(new URL('../../protocol/godot-vocabulary.json', import.meta.url), 'utf8')
+)
 
 export const KEYS_25 = [
     'Enter',
@@ -33,38 +37,27 @@ export const KEYS_25 = [
     'Equal',
     'BracketLeft'
 ]
-export const KEYS_ALL = [...new Set(Object.values(keycodes))]
+export const KEYS_ALL = engine.keys
 
-// The fifteen the addon maps today, then every other Performance.Monitor as its lowercased name.
-const SHIPPED_MONITORS = {
-    fps: 'TIME_FPS',
-    process_time: 'TIME_PROCESS',
-    physics_time: 'TIME_PHYSICS_PROCESS',
-    memory_static: 'MEMORY_STATIC',
-    memory_message_buffer: 'MEMORY_MESSAGE_BUFFER_MAX',
-    object_count: 'OBJECT_COUNT',
-    object_resource_count: 'OBJECT_RESOURCE_COUNT',
-    object_node_count: 'OBJECT_NODE_COUNT',
-    object_orphan_node_count: 'OBJECT_ORPHAN_NODE_COUNT',
-    render_objects_in_frame: 'RENDER_TOTAL_OBJECTS_IN_FRAME',
-    render_primitives_in_frame: 'RENDER_TOTAL_PRIMITIVES_IN_FRAME',
-    render_draw_calls_in_frame: 'RENDER_TOTAL_DRAW_CALLS_IN_FRAME',
-    render_video_memory: 'RENDER_VIDEO_MEM_USED',
-    render_texture_memory: 'RENDER_TEXTURE_MEM_USED',
-    render_buffer_memory: 'RENDER_BUFFER_MEM_USED'
-}
-export const MONITORS_15 = Object.keys(SHIPPED_MONITORS)
-const taken = new Set(Object.values(SHIPPED_MONITORS))
-const monitorEnum = api.classes
-    .find(c => c.name === 'Performance')
-    .enums.find(e => e.name === 'Monitor')
-export const MONITORS_ALL = [
-    ...MONITORS_15,
-    ...monitorEnum.values
-        .map(v => v.name)
-        .filter(name => name !== 'MONITOR_MAX' && !taken.has(name))
-        .map(name => name.toLowerCase())
+// The fifteen the addon mapped when the arms were measured, under the names it took then.
+export const MONITORS_15 = [
+    'fps',
+    'process_time',
+    'physics_time',
+    'memory_static',
+    'memory_message_buffer',
+    'object_count',
+    'object_resource_count',
+    'object_node_count',
+    'object_orphan_node_count',
+    'render_objects_in_frame',
+    'render_primitives_in_frame',
+    'render_draw_calls_in_frame',
+    'render_video_memory',
+    'render_texture_memory',
+    'render_buffer_memory'
 ]
+export const MONITORS_ALL = engine.monitors
 
 export const TAGS_23 = [
     'null',
@@ -91,19 +84,10 @@ export const TAGS_23 = [
     'resource',
     'node_path'
 ]
-const snake = name =>
-    name
-        .replace(/^TYPE_/u, '')
-        .toLowerCase()
-        .replace(/(\d)i$/u, '$1i')
-export const VARIANT_TYPES = api.global_enums
-    .find(e => e.name === 'Variant.Type')
-    .values.map(v => v.name)
-    .filter(n => n !== 'TYPE_MAX')
-    .map(snake)
-// `resource` and `null` are wire tags with no Variant of their own, so the union is what the
-// addon could answer, not the enum verbatim.
-export const TAGS_ALL = [...new Set([...VARIANT_TYPES, 'resource', 'null'])]
+export const VARIANT_TYPES = engine.variantTypes.map(type => type.string)
+// `Resource` is a wire tag with no Variant of its own, so the union is what the addon can answer
+// rather than the enum verbatim.
+export const TAGS_ALL = [...new Set([...VARIANT_TYPES, 'Resource'])]
 
 const norm = s =>
     String(s)

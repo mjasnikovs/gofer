@@ -6,38 +6,62 @@
     "$gatedComment": "`gated` is the sentence the user is shown before the agent may run this operation. Its absence means auto-allowed, so a new operation is allowed by default and has to be gated deliberately. It lives beside the parameters and the route because all three are facts about the same operation, and keeping the safety model in a table of its own meant a fifth place to look and a fifth thing to hold to the catalogue afterwards.",
     "$writesComment": "`writes` names what an operation writes where one of the user's enforced Godot rules may refuse it: `projectSetting` and `editorSetting` are the two settings surfaces, `scriptText` is a call carrying GDScript source. `godot_policy::enforcement_refusal` reads the tag rather than matching on the tool and the operation, so an operation renamed here cannot quietly stop being enforced. Absence means no rule keys on this operation — which is every operation but five.",
     "$aloneComment": "`alone` narrows where an operation may sit in an `ops` list, and carries the sentence a caller reads when it gets that wrong. Every tool call is a list, so a model wanting three inspections writes one call rather than three. `scope: \"repeat\"` is the ordinary case: the operation may sit beside other operations, and may not appear twice, because it takes no parameters to vary or drives something the session owns exactly one of — the open scene, the running game, the undo stack, the dialog. The router runs a list in order, so a second one would only redo or undo the first. `scope: \"exclusive\"` is the debugger, where each answer decides what the next operation means, so the operation has to be the only entry of its call. Absence means the operation may appear as often as a list names it.",
-    "$vocabularyComment": "`vocabularies` names a set of words a parameter accepts inside a structure, where `kind` cannot reach: `key` sits inside each entry of an `events` list. `accepted` is printed into the signature the model reads, because a generated signature is measurably more reliable than a sentence — see the note on `Kind` in tool_params.rs. `refused` is names the engine does not have, and it exists so `every_key_name_the_catalog_advertises_is_one_the_engine_knows` can prove the accepted list is meaningful rather than merely present. Both used to be written out twice, in English, inside two catalogue summaries, and read back out of the prose by a parser that split on the literal string “Accepted: ”.",
+    "$vocabularyComment": "`vocabularies` names a set of words a parameter accepts where `kind` cannot reach — `key` sits inside each entry of an `events` list — and it names them by pointing at a list in `protocol/godot-vocabulary.json`, which is written by running the pinned engine. Nothing here is hand-listed: the twenty-five key names that used to be were a quarter of the hundred and ninety the engine has, and the only thing holding them to it was a test feeding them to a real editor one at a time. The generator resolves `engine` into the words, emits them as the schema `enum` the sampler is constrained by, and the prose says nothing about them: an enum permits and prose steers, and the same enum with a stale list beside it measured worse than with none.",
+    "$domainsComment": "`domains` is the ten groupings the hundred operations are offered as, and the sentence the model reads about each. It is a decision about presentation rather than a fact about an operation, which is why it is a block of its own — but it is prose the model reads, so it lives where every other sentence it reads lives and the same checks reach it. `ai_tools.rs` CATALOG is generated from this, in this order.",
+    "domains": [
+        {
+            "name": "godot_session",
+            "description": "Owns the managed Godot editor session bound to the active task worktree."
+        },
+        {
+            "name": "godot_scene",
+            "description": "The edited scene in the editor — never the running game's scene tree. Every mutation here is checked against the scene's revision, and the router supplies that number from the last answer that carried one, so never pass it and never read the tree to fetch it."
+        },
+        {
+            "name": "godot_node",
+            "description": "Node authoring inside the edited scene. Every mutation is undoable and every one of them is checked against the scene's revision — which the router supplies from the last answer that carried one, and every mutation's own answer carries the next. So mutate, then mutate again: there is no revision to pass and no tree to re-read between them. Paths are the scene's own, like /Level1 or /Level1/Ground. Nothing here writes the file: scene.save does."
+        },
+        {
+            "name": "godot_project",
+            "description": "Project settings, autoloads, the Input Map, plugins, and machine-wide editor settings. Project writes persist in the task worktree; editor settings are machine-wide and outside Git."
+        },
+        {
+            "name": "godot_resource",
+            "description": "Project files as the editor sees them. Deleting and moving need the user's approval; nothing outside the task worktree can be named at all."
+        },
+        {
+            "name": "godot_script",
+            "description": "GDScript editing and intelligence through Godot's language server. Positions are {line, character}, zero-based. Open a script before querying it — and write GDScript here rather than with the file tools, which refuse a .gd, because writing here is what tells the server whether it parses. A script that does not parse stops the scene using it from loading. `edit` changes a script that exists and answers with its diagnostics, so it needs no `diagnostics` call after it; `save` creates one, and `diagnostics` on the same path is what then says whether it parses. Paths may be named either way, `scripts/mario.gd` or res://scripts/mario.gd."
+        },
+        {
+            "name": "godot_debug",
+            "description": "Godot's debug adapter. Install breakpoints with the launch itself, then wait for a stop before inspecting: stopping is an event, not a response."
+        },
+        {
+            "name": "godot_runtime",
+            "description": "The running game: its live scene tree, input, performance, and screenshots. Distinct from the edited scene, and named differently: every path here starts at /root, where the node.* operations' start at the edited scene's own root."
+        },
+        {
+            "name": "godot_logs",
+            "description": "The session's captured output — editor, importer, plugin, and the game the editor launched — with a cursor and severity filtering."
+        },
+        {
+            "name": "godot_docs_search",
+            "description": "The Godot 4.7 documentation, on this machine. SEARCH IT BEFORE writing a class, method, signal or constant name, and before answering any question about how the engine behaves. Do not answer either from memory and do not reason it out from the name: what you remember is mostly Godot 3, where a great many of these names were spelled differently, and a name this does not return is a name to check rather than to guess at. Passages cite a chapter, never a URL. It holds the engine's documentation and nothing else, so send a question about this project's own scripts, scenes or files to the subagent tool instead."
+        }
+    ],
     "vocabularies": {
         "godotKeyName": {
-            "note": "Godot's own name for a key, not the browser's.",
-            "accepted": [
-                "Enter",
-                "Kp Enter",
-                "Escape",
-                "Space",
-                "Backspace",
-                "Tab",
-                "Delete",
-                "Left",
-                "Right",
-                "Up",
-                "Down",
-                "PageUp",
-                "PageDown",
-                "Home",
-                "End",
-                "Shift",
-                "Ctrl",
-                "Alt",
-                "Meta",
-                "Comma",
-                "Period",
-                "Slash",
-                "Minus",
-                "Equal",
-                "BracketLeft"
-            ],
-            "refused": ["Return", "Esc", "Control", "Super", "ArrowLeft", "Spacebar"]
+            "engine": "keys",
+            "note": "Godot's own name for a key, not the browser's."
+        },
+        "godotMonitorName": {
+            "engine": "monitors",
+            "note": "A `Performance.Monitor` constant, as the engine spells it."
+        },
+        "godotValueTag": {
+            "engine": "valueTags",
+            "note": "The `type_string` spelling of every Variant type a JSON payload can be built into, plus `Resource` for the {path} payload."
         }
     },
     "operations": [
@@ -290,7 +314,7 @@
         {
             "tool": "godot_node",
             "op": "inspect",
-            "summary": "Inspects a node. Answers with its type, its groups, every signal it can emit, the connections it already has, and every property whose value is not still the one its class ships with. The rest are named, without their values, in `atClassDefault` \u2014 a Label has 129 properties and four of them differ, so this is most of the node. `properties` narrows the answer to the names you list and answers every one of them in full, at their default or not, exactly as runtime.inspect_node does for the running game. Read a property here before setting it rather than guessing what it holds; `stored` is false for properties the scene recomputes, like a Control's position and size and every theme_override_*, and those are set the same way as any other.",
+            "summary": "Inspects a node. Answers with its type, its groups, every signal it can emit, the connections it already has, and every property whose value is not still the one its class ships with. The rest are named, without their values, in `atClassDefault` — a Label has 129 properties and four of them differ, so this is most of the node. `properties` narrows the answer to the names you list and answers every one of them in full, at their default or not, exactly as runtime.inspect_node does for the running game. Read a property here before setting it rather than guessing what it holds; `stored` is false for properties the scene recomputes, like a Control's position and size and every theme_override_*, and those are set the same way as any other.",
             "params": [
                 {
                     "name": "node",
@@ -557,7 +581,7 @@
         {
             "tool": "godot_node",
             "op": "set_property",
-            "summary": "Sets a property. `value` is tagged with its type — a `type` beside a `value`: {\"type\": \"vector2\", \"value\": [12, 34]}, {\"type\": \"float\", \"value\": 1.5}, {\"type\": \"string\", \"value\": \"hi\"}. A property that holds a resource — a CollisionShape2D's `shape`, a Sprite2D's `texture` — takes {\"type\": \"resource\", \"value\": {\"path\": \"res://…\"}}, never a string: a path written as a string is refused. A property that holds another node — an @export node reference — takes {\"type\": \"node_path\", \"value\": \"Box/Slider\"}, a path read from the node the property is on. A color takes four numbers, or a name like \"skyblue\", or a hex string like \"#8b5a2b\". The other tags are null, bool, int, rect2 and rect2i (four numbers each), vector2i, vector3, vector3i, vector4, vector4i, quaternion, plane, transform2d, basis, transform3d, array (of tagged values) and dictionary (of key and value pairs of them).",
+            "summary": "Sets a property. `value` is tagged with its type — a `type` beside a `value`: {\"type\": \"Vector2\", \"value\": [12, 34]}, {\"type\": \"float\", \"value\": 1.5}, {\"type\": \"String\", \"value\": \"hi\"}. A property that holds a resource — a CollisionShape2D's `shape`, a Sprite2D's `texture` — takes {\"type\": \"Resource\", \"value\": {\"path\": \"res://…\"}}, never a string: a path written as a string is refused. A property that holds another node — an @export node reference — takes {\"type\": \"NodePath\", \"value\": \"Box/Slider\"}, a path read from the node the property is on. A color takes four numbers, or a name like \"skyblue\", or a hex string like \"#8b5a2b\". The other tags are the ones the schema's `type` lists.",
             "params": [
                 {
                     "name": "node",
@@ -573,7 +597,8 @@
                     "name": "value",
                     "kind": "tagged",
                     "required": true,
-                    "note": "A script is attached here like any other resource: property \"script\", value {\"type\": \"resource\", \"value\": {\"path\": \"res://scripts/player.gd\"}}."
+                    "note": "A script is attached here like any other resource: property \"script\", value {\"type\": \"Resource\", \"value\": {\"path\": \"res://scripts/player.gd\"}}.",
+                    "vocabulary": "godotValueTag"
                 },
                 {
                     "name": "expectedRevision",
@@ -610,7 +635,8 @@
                             "name": "value",
                             "kind": "tagged",
                             "required": true,
-                            "note": "A script is attached here like any other resource: property \"script\", value {\"type\": \"resource\", \"value\": {\"path\": \"res://scripts/player.gd\"}}."
+                            "note": "A script is attached here like any other resource: property \"script\", value {\"type\": \"Resource\", \"value\": {\"path\": \"res://scripts/player.gd\"}}.",
+                            "vocabulary": "godotValueTag"
                         }
                     ],
                     "note": "Entries may name different nodes."
@@ -882,7 +908,7 @@
         {
             "tool": "godot_project",
             "op": "set_setting",
-            "summary": "Writes one project setting. `value` is tagged with its type, the same shape node.set_property takes: {\"type\": \"int\", \"value\": 1152}, {\"type\": \"string\", \"value\": \"res://main.tscn\"}, {\"type\": \"vector2\", \"value\": [12, 34]}. A bare number or string is refused.",
+            "summary": "Writes one project setting. `value` is tagged with its type, the same shape node.set_property takes: {\"type\": \"int\", \"value\": 1152}, {\"type\": \"String\", \"value\": \"res://main.tscn\"}, {\"type\": \"Vector2\", \"value\": [12, 34]}. A bare number or string is refused.",
             "params": [
                 {
                     "name": "name",
@@ -892,7 +918,8 @@
                 {
                     "name": "value",
                     "kind": "tagged",
-                    "required": true
+                    "required": true,
+                    "vocabulary": "godotValueTag"
                 }
             ],
             "command": "project.set_setting",
@@ -977,7 +1004,7 @@
         {
             "tool": "godot_project",
             "op": "set_input_action",
-            "summary": "Writes an input action. `name` is the action's own name, like move_left, never a settings path. Each event names its kind and its key, as {\"kind\": \"key\", \"key\": \"A\"} — the same shape list_input_actions answers with. The named keys are in the signature; F1 to F16, A to Z and 0 to 9 are spelled as they read. The other kinds are mouse_button and joypad_button, each taking a `button` index.",
+            "summary": "Writes an input action. `name` is the action's own name, like move_left, never a settings path. Each event names its kind and its key, as {\"kind\": \"key\", \"key\": \"A\"} — the same shape list_input_actions answers with. The other kinds are mouse_button and joypad_button, each taking a `button` index.",
             "params": [
                 {
                     "name": "name",
@@ -989,7 +1016,7 @@
                     "name": "events",
                     "kind": "list",
                     "required": true,
-                    "note": "The key is Godot's name for it, not the browser's.",
+                    "note": "The key is Godot's name for it, not the browser's. The accepted names are the ones the schema's `key` lists.",
                     "vocabulary": "godotKeyName",
                     "entry": [
                         {
@@ -1003,7 +1030,8 @@
                             "name": "key",
                             "kind": "text",
                             "required": false,
-                            "vocabulary": "godotKeyName"
+                            "vocabulary": "godotKeyName",
+                            "note": "The accepted names are the ones the schema's `key` lists."
                         },
                         {
                             "name": "button",
@@ -1116,7 +1144,8 @@
                 {
                     "name": "value",
                     "kind": "tagged",
-                    "required": true
+                    "required": true,
+                    "vocabulary": "godotValueTag"
                 }
             ],
             "command": "editor.set_setting",
@@ -1286,7 +1315,7 @@
         {
             "tool": "godot_resource",
             "op": "create_shape",
-            "summary": "Saves a 2D collision shape as a resource. `path` is the .tres to write. `shapeType` is one of RectangleShape2D (size as [width, height]), CircleShape2D (radius), CapsuleShape2D (radius and height), SegmentShape2D (points as [ax, ay, bx, by]), or WorldBoundaryShape2D (nothing). Set the node's `shape` property to the path afterwards — a CollisionShape2D without one collides with nothing, and a shape can only be assigned from a file that already exists.",
+            "summary": "Saves a 2D collision shape as a resource. `path` is the .tres to write. `shapeType` is one of the names the schema lists; each takes the parameters its own name implies — a size as [width, height], a radius, a radius and a height, points as [ax, ay, bx, by], or nothing at all. Set the node's `shape` property to the path afterwards — a CollisionShape2D without one collides with nothing, and a shape can only be assigned from a file that already exists.",
             "params": [
                 {
                     "name": "path",
@@ -1344,7 +1373,7 @@
         {
             "tool": "godot_resource",
             "op": "move",
-            "summary": "Moves a file or directory inside the worktree. Godot's own record of a file \u2014 its `.uid`, an asset's `.import` \u2014 travels with it, so a scene that refers to the file by id keeps finding it. Never move one of those on its own.",
+            "summary": "Moves a file or directory inside the worktree. Godot's own record of a file — its `.uid`, an asset's `.import` — travels with it, so a scene that refers to the file by id keeps finding it. Never move one of those on its own.",
             "params": [
                 {
                     "name": "from",
@@ -1363,7 +1392,7 @@
         {
             "tool": "godot_resource",
             "op": "delete",
-            "summary": "Deletes a file or directory, and Godot's own record of it \u2014 its `.uid`, an asset's `.import` \u2014 with it. Never name one of those on its own. A file you have read is deleted as you last read it: the router holds the hash that read answered with and refuses the delete if the file changed since, so read it first when it matters that nothing moved underneath.",
+            "summary": "Deletes a file or directory, and Godot's own record of it — its `.uid`, an asset's `.import` — with it. Never name one of those on its own. A file you have read is deleted as you last read it: the router holds the hash that read answered with and refuses the delete if the file changed since, so read it first when it matters that nothing moved underneath.",
             "params": [
                 {
                     "name": "path",
@@ -2224,7 +2253,7 @@
         {
             "tool": "godot_runtime",
             "op": "run",
-            "summary": "Runs the project and captures the first frame, unless `playArgs` start it with `--headless`, which draws none. `scene` runs that one scene instead of the project's main scene, which is the editor's own F6 \u2014 use it to try a scene you just built, rather than writing application/run/main_scene, running, and writing it back. restart restarts whatever run started, with the same scene and the same playArgs.",
+            "summary": "Runs the project and captures the first frame, unless `playArgs` start it with `--headless`, which draws none. `scene` runs that one scene instead of the project's main scene, which is the editor's own F6 — use it to try a scene you just built, rather than writing application/run/main_scene, running, and writing it back. restart restarts whatever run started, with the same scene and the same playArgs.",
             "alone": {
                 "scope": "repeat",
                 "why": "There is one running game, so a second one in the same call is the first one again."
@@ -2239,9 +2268,7 @@
                 {
                     "name": "playArgs",
                     "kind": "listOf",
-                    "of": {
-                        "kind": "text"
-                    },
+                    "of": {"kind": "text"},
                     "required": false,
                     "note": "Command-line arguments for the game, like [\"--\", \"--rate=30\"]. A game reads its own with OS.get_cmdline_user_args(), which sees only what follows a `--`. The editor carries them as one string it splits on spaces, so an argument holding a space is refused rather than delivered in pieces. restart reuses whatever run passed."
                 }
@@ -2329,13 +2356,13 @@
         {
             "tool": "godot_runtime",
             "op": "input",
-            "summary": "Injects input and captures the result. Each event names its kind and the parameters that kind uses, as {\"kind\": \"key\", \"key\": \"A\", \"pressed\": true} — send the release as a second event, or the key stays down. An event that leaves `pressed` out alternates on its own: the first is the press and the second the release, so a click is the same event written twice. A Button answers the release, not the press. The named keys are in the signature; F1 to F16, A to Z and 0 to 9 are spelled as they read. A mouse button is named left, right, middle, wheel_up or wheel_down, or given as an index. A position is [x, y]. This drives the Input Map, so it is how you check that a level you built can actually be played. Its answer carries a frame, unless a later entry of the same call carries one too: a picture another picture replaces is not worth sending, and a moment in the middle of a key sequence is what capture is for.",
+            "summary": "Injects input and captures the result. Each event names its kind and the parameters that kind uses, as {\"kind\": \"key\", \"key\": \"A\", \"pressed\": true} — send the release as a second event, or the key stays down. An event that leaves `pressed` out alternates on its own: the first is the press and the second the release, so a click is the same event written twice. A Button answers the release, not the press. A mouse button is named left, right, middle, wheel_up or wheel_down, or given as an index. A position is [x, y]. This drives the Input Map, so it is how you check that a level you built can actually be played. Its answer carries a frame, unless a later entry of the same call carries one too: a picture another picture replaces is not worth sending, and a moment in the middle of a key sequence is what capture is for.",
             "params": [
                 {
                     "name": "events",
                     "kind": "list",
                     "required": true,
-                    "note": "Each event is {\"kind\": \"key\", \"key\": \"A\", \"pressed\": true}, and the release is a second event.",
+                    "note": "Each event is {\"kind\": \"key\", \"key\": \"A\", \"pressed\": true}, and the release is a second event. The accepted names are the ones the schema's `key` lists.",
                     "vocabulary": "godotKeyName",
                     "entry": [
                         {
@@ -2355,7 +2382,8 @@
                             "name": "key",
                             "kind": "text",
                             "required": false,
-                            "vocabulary": "godotKeyName"
+                            "vocabulary": "godotKeyName",
+                            "note": "The accepted names are the ones the schema's `key` lists."
                         },
                         {
                             "name": "pressed",
@@ -2466,11 +2494,12 @@
         {
             "tool": "godot_runtime",
             "op": "get_monitors",
-            "summary": "Reads engine performance monitors. Without a list it answers with fps, memory_static and object_node_count. The rest are process_time, physics_time, memory_message_buffer, object_count, object_resource_count, object_orphan_node_count, render_objects_in_frame, render_primitives_in_frame, render_draw_calls_in_frame, render_video_memory, render_texture_memory and render_buffer_memory; any other name is an error.",
+            "summary": "Reads engine performance monitors. Without a list it answers with TIME_FPS, MEMORY_STATIC and OBJECT_NODE_COUNT; the names it accepts are the ones the schema lists, and any other name is an error.",
             "params": [
                 {
                     "name": "monitors",
-                    "kind": "list",
+                    "kind": "listOf",
+                    "of": {"kind": "choice", "vocabulary": "godotMonitorName"},
                     "required": false
                 }
             ],

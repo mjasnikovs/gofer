@@ -59,11 +59,12 @@ Use npm for package scripts. Run the full validation suite with:
 npm run check
 ```
 
-One gate is deliberately outside it. `npm run test:godot:api` holds what the AI tool catalog tells
-the model about the _engine_ — the key names it advertises, which come out of Godot's own keycode
-table — to a real editor. Nothing it covers can break because of a commit, so it does not run on
-every change. Run it when the pinned version in `protocol/godot-artifacts.json` moves; a failure
-there is the engine having renamed something, and the fix is the sentence in `CATALOG`.
+One gate is deliberately outside it. `npm run test:godot:api` runs the pinned engine and compares
+what it answers with `protocol/godot-vocabulary.json` — the key names, the performance monitors and
+the Variant types the model is given as schema enums. None of that is ours, and nothing it covers
+can break because of a commit, so it does not run on every change. Run it when the pinned version in
+`protocol/godot-artifacts.json` moves; a failure there is the engine having renamed something, and
+the fix is `npm run generate` against the moved pin, committing what it writes.
 
 ## Visual snapshots
 
@@ -119,10 +120,17 @@ npm run generate
 
 The sources are `protocol/schemas/v2/request.schema.json` (which commands mutate the edited scene),
 `protocol/schemas/v2/commands.json` (every command and the addon method answering it, plus the
-`runtime.*` commands the addon routes to the running game), and the `generate_handler!` list in
-`src-tauri/src/lib.rs` (which desktop commands exist). A new Godot command means a new catalogue
-entry and a new addon method. A new desktop command means registering it in `lib.rs` and adding its
-types to `src/services/desktop.ts` by hand.
+`runtime.*` commands the addon routes to the running game), `protocol/schemas/v2/params.json` (every
+tool operation, its parameters, the prose the model reads and the ten domain descriptions), and the
+`generate_handler!` list in `src-tauri/src/lib.rs` (which desktop commands exist).
+
+`npm run generate` runs the pinned engine first, into `protocol/godot-vocabulary.json`, and then the
+surface generator — which reads that file for every vocabulary a parameter names. Without the pinned
+engine on this machine it says so in one line and generates from the committed vocabulary, so
+nothing else needs it. `protocol/schemas/v2/godot-tool.json` is a whole generated file rather than a
+region: it is the `godot` tool the model reads, and a test asserts the worker builds the same bytes.
+A new Godot command means a new catalogue entry and a new addon method. A new desktop command means
+registering it in `lib.rs` and adding its types to `src/services/desktop.ts` by hand.
 
 The renderer spells a Godot command with `GodotCommandName`, emitted into
 `src/models/godot-commands.ts`. Give a command a real params or result type by adding one entry to

@@ -124,7 +124,7 @@ fn launch_args(session: &Session) -> String {
     );
     inspected["properties"]["launch_args"]
         .as_object()
-        .filter(|tagged| tagged["type"] == "string")
+        .filter(|tagged| tagged["type"] == "String")
         .and_then(|tagged| tagged["value"].as_str())
         .unwrap_or_else(|| {
             panic!("the launch arguments must cross the wire as a tagged string: {inspected}")
@@ -140,7 +140,7 @@ fn label_text(session: &Session) -> String {
     );
     inspected["properties"]["text"]
         .as_object()
-        .filter(|tagged| tagged["type"] == "string")
+        .filter(|tagged| tagged["type"] == "String")
         .and_then(|tagged| tagged["value"].as_str())
         .unwrap_or_else(|| {
             panic!("the label text must cross the wire as a tagged string: {inspected}")
@@ -370,8 +370,8 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
         None,
     );
     assert!(
-        no_monitor.contains("The monitors are") && no_monitor.contains("fps"),
-        "the refusal has to name the monitors there are: {no_monitor}"
+        no_monitor.contains("the schema lists"),
+        "the refusal has to point at the names there are: {no_monitor}"
     );
 
     let unnamed = session.error(
@@ -431,14 +431,14 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
 
     let monitors = session.call(
         "runtime.get_monitors",
-        json!({"monitors": ["fps", "object_node_count"]}),
+        json!({"monitors": ["TIME_FPS", "OBJECT_NODE_COUNT"]}),
     );
     assert!(
-        monitors["monitors"]["fps"].as_f64().expect("fps") >= 0.0,
-        "fps must report: {monitors}"
+        monitors["monitors"]["TIME_FPS"].as_f64().expect("fps") >= 0.0,
+        "the frame rate must report: {monitors}"
     );
     assert!(
-        monitors["monitors"]["object_node_count"]
+        monitors["monitors"]["OBJECT_NODE_COUNT"]
             .as_f64()
             .expect("node count")
             > 0.0,
@@ -1200,7 +1200,7 @@ fn a_running_node_answers_its_groups_and_a_path_the_engine_named_says_why_it_is_
     assert_eq!(groups, vec!["coins"], "{inspected}");
 
     assert_eq!(
-        inspected["properties"]["position"]["type"], "vector2",
+        inspected["properties"]["position"]["type"], "Vector2",
         "{inspected}"
     );
 

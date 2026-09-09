@@ -520,29 +520,42 @@ fn check_inside(
 /// place a shape is examined, because by then the call has crossed a socket and the answer has been
 /// flattened to `code: message`.
 const TAGS: &[(&str, Payload)] = &[
-    ("null", Payload::Anything),
+    ("Nil", Payload::Anything),
     ("bool", Payload::Boolean),
     ("int", Payload::Numeric),
     ("float", Payload::Numeric),
-    ("string", Payload::Str),
-    ("node_path", Payload::Str),
-    ("vector2", Payload::Numbers(2)),
-    ("vector2i", Payload::Numbers(2)),
-    ("vector3", Payload::Numbers(3)),
-    ("vector3i", Payload::Numbers(3)),
-    ("vector4", Payload::Numbers(4)),
-    ("vector4i", Payload::Numbers(4)),
-    ("quaternion", Payload::Numbers(4)),
-    ("color", Payload::Colour),
-    ("rect2", Payload::Numbers(4)),
-    ("rect2i", Payload::Numbers(4)),
-    ("plane", Payload::Numbers(4)),
-    ("transform2d", Payload::Numbers(6)),
-    ("basis", Payload::Numbers(9)),
-    ("transform3d", Payload::Numbers(12)),
-    ("array", Payload::Items),
-    ("dictionary", Payload::Pairs),
-    ("resource", Payload::ResourcePath),
+    ("String", Payload::Str),
+    ("StringName", Payload::Str),
+    ("NodePath", Payload::Str),
+    ("Vector2", Payload::Numbers(2)),
+    ("Vector2i", Payload::Numbers(2)),
+    ("Vector3", Payload::Numbers(3)),
+    ("Vector3i", Payload::Numbers(3)),
+    ("Vector4", Payload::Numbers(4)),
+    ("Vector4i", Payload::Numbers(4)),
+    ("Quaternion", Payload::Numbers(4)),
+    ("Color", Payload::Colour),
+    ("Rect2", Payload::Numbers(4)),
+    ("Rect2i", Payload::Numbers(4)),
+    ("AABB", Payload::Numbers(6)),
+    ("Plane", Payload::Numbers(4)),
+    ("Transform2D", Payload::Numbers(6)),
+    ("Basis", Payload::Numbers(9)),
+    ("Transform3D", Payload::Numbers(12)),
+    ("Projection", Payload::Numbers(16)),
+    ("Array", Payload::Items),
+    ("Dictionary", Payload::Pairs),
+    ("PackedByteArray", Payload::PackedIntegers),
+    ("PackedInt32Array", Payload::PackedIntegers),
+    ("PackedInt64Array", Payload::PackedIntegers),
+    ("PackedFloat32Array", Payload::PackedNumbers),
+    ("PackedFloat64Array", Payload::PackedNumbers),
+    ("PackedStringArray", Payload::PackedStrings),
+    ("PackedVector2Array", Payload::PackedComponents(2)),
+    ("PackedVector3Array", Payload::PackedComponents(3)),
+    ("PackedVector4Array", Payload::PackedComponents(4)),
+    ("PackedColorArray", Payload::PackedComponents(4)),
+    ("Resource", Payload::ResourcePath),
 ];
 
 #[derive(Clone, Copy, PartialEq)]
@@ -559,7 +572,18 @@ enum Payload {
     Numbers(usize),
     Items,
     Pairs,
+    /// A packed array's elements, written as the payload each element's own type carries and
+    /// nothing more: the array's tag has already said which type that is.
+    PackedIntegers,
+    PackedNumbers,
+    PackedStrings,
+    PackedComponents(usize),
     ResourcePath,
+}
+
+/// Whether every element of a packed array's payload is an element of the type the tag names.
+fn packed_of(inner: &Value, fits: impl Fn(&Value) -> bool) -> bool {
+    inner.as_array().is_some_and(|items| items.iter().all(fits))
 }
 
 /// How many numbers a payload is written as, where it is written as numbers at all.
@@ -575,7 +599,7 @@ fn how_many_numbers(payload: &Payload) -> Option<usize> {
 }
 
 fn check_tagged(call: &str, here: &str, param: &Param, value: &Value) -> Result<(), ToolFailure> {
-    let example = "{\"type\": \"vector2\", \"value\": [12, 34]}";
+    let example = "{\"type\": \"Vector2\", \"value\": [12, 34]}";
     let Some(object) = value.as_object() else {
         return Err(failure(
             "invalid_param",
@@ -632,6 +656,22 @@ fn check_tagged(call: &str, here: &str, param: &Param, value: &Value) -> Result<
             })
         }
         Payload::Items => (!inner.is_array()).then(|| "an array of tagged values".to_owned()),
+        Payload::PackedIntegers => (!packed_of(inner, |item| {
+            item.as_f64().is_some_and(|number| number.fract() == 0.0)
+        }))
+        .then(|| "an array of whole numbers".to_owned()),
+        Payload::PackedNumbers => {
+            (!packed_of(inner, Value::is_number)).then(|| "an array of numbers".to_owned())
+        }
+        Payload::PackedStrings => {
+            (!packed_of(inner, Value::is_string)).then(|| "an array of strings".to_owned())
+        }
+        Payload::PackedComponents(count) => (!packed_of(inner, |item| {
+            item.as_array().is_some_and(|components| {
+                components.len() == *count && components.iter().all(Value::is_number)
+            })
+        }))
+        .then(|| format!("an array of arrays of {count} numbers")),
         Payload::Pairs => {
             (!inner.is_array()).then(|| "an array of {key, value} tagged pairs".to_owned())
         }
@@ -652,7 +692,7 @@ fn check_tagged(call: &str, here: &str, param: &Param, value: &Value) -> Result<
     let fix = match payload {
         Payload::ResourcePath => {
             let path = inner.as_str().unwrap_or("res://…");
-            format!(" Send {{\"type\": \"resource\", \"value\": {{\"path\": \"{path}\"}}}}.")
+            format!(" Send {{\"type\": \"Resource\", \"value\": {{\"path\": \"{path}\"}}}}.")
         }
         Payload::Numbers(_) | Payload::Colour => how_many_numbers(payload)
             .and_then(|count| numbers_under_names(inner, count))
@@ -1496,7 +1536,7 @@ fn allows_a_list(kind: Kind) -> bool {
 /// The only value in an object of one entry, or nothing.
 ///
 /// A model that reads `value: tagged` and the kind beside it writes the kind back into the value:
-/// `{"type": "float", "value": {"number": 3.5}}` and `{"type": "string", "value": {"text": "…"}}`,
+/// `{"type": "float", "value": {"number": 3.5}}` and `{"type": "String", "value": {"text": "…"}}`,
 /// eight times in one live turn, under the protocol's own words for those kinds. One entry of the
 /// type the tag wants is not a shape with an order to guess at — it is the value, in a box.
 ///
@@ -1523,18 +1563,16 @@ fn sole_entry(value: &Value) -> Option<&Value> {
     object.values().next()
 }
 
-/// The protocol's spelling of a tag a model wrote in the engine's.
+/// The engine's spelling of a tag a model wrote in another case.
 ///
-/// `{"type": "String", "value": "Resume"}` is one wrapper written by one model that knew both
-/// words: the protocol tag and Godot's own class name. It was refused sixteen times in one live
-/// turn — the same call resent unchanged, then split into single properties and resent again — and
-/// cost that turn most of its twelve minutes, while the `bool` beside it in the same call went
-/// through. Across five recorded turns 41 of 86 tagged values were wrapped twice, and 22 of the 41
-/// spelled the inner tag with the engine's capital.
+/// The tags are Godot's own type names now, and `{"type": "string", "value": "Resume"}` is the
+/// lowercase habit the protocol taught before they were. Across five recorded turns 41 of 86
+/// tagged values were wrapped twice and 22 of the 41 spelled the inner tag one way and the outer
+/// the other, so the two spellings really do arrive together in one call.
 ///
-/// Every tag the protocol carries is lowercase and no two of them differ only in case, so the fold
-/// cannot reach two answers. A word that is not a tag in any case is left exactly as it arrived,
-/// so [`check_tagged`] still refuses it in the spelling the caller wrote.
+/// No two tags differ only in case, so the fold cannot reach two answers. A word that is not a tag
+/// in any case is left exactly as it arrived, so [`check_tagged`] still refuses it in the spelling
+/// the caller wrote.
 fn fold_the_tag(held: &mut Value) {
     let Some(tag) = held.get("type").and_then(Value::as_str) else {
         return;
@@ -1542,10 +1580,9 @@ fn fold_the_tag(held: &mut Value) {
     if TAGS.iter().any(|(name, _)| *name == tag) {
         return;
     }
-    let lowered = tag.to_lowercase();
     let Some(name) = TAGS
         .iter()
-        .find(|(name, _)| *name == lowered)
+        .find(|(name, _)| name.eq_ignore_ascii_case(tag))
         .map(|(name, _)| *name)
     else {
         return;
@@ -1557,7 +1594,7 @@ fn fold_the_tag(held: &mut Value) {
 
 /// The tagged value a model wrapped in a second copy of its own tag, unwrapped.
 ///
-/// `{"type": "vector2", "value": {"type": "vector2", "value": [32, 48]}}` is what one live turn
+/// `{"type": "Vector2", "value": {"type": "Vector2", "value": [32, 48]}}` is what one live turn
 /// against a local Qwen3.6-27B wrote 51 times in 114 tool calls. The router refused every one of
 /// them by naming the payload it wanted, and the payload it wanted was inside the value it was
 /// handed.
@@ -1581,7 +1618,7 @@ fn unwrap_a_tag_written_twice(held: &mut Value) {
 /// `t11-platformer` attached a script with this:
 ///
 /// ```text
-/// {"path": "res://scripts/player.gd", "type": "resource", "value": null}
+/// {"path": "res://scripts/player.gd", "type": "Resource", "value": null}
 /// ```
 ///
 /// Everything the call needs is there — the tag says `resource`, the path says which one — and the
@@ -2190,10 +2227,10 @@ mod tests {
     /// mistake.
     #[test]
     fn a_payload_written_beside_its_tag_is_put_back_in_its_slot() {
-        let attached = json!({"type": "resource", "value": {"path": "res://scripts/player.gd"}});
+        let attached = json!({"type": "Resource", "value": {"path": "res://scripts/player.gd"}});
         for written in [
-            json!({"path": "res://scripts/player.gd", "type": "resource", "value": null}),
-            json!({"path": "res://scripts/player.gd", "type": "resource"}),
+            json!({"path": "res://scripts/player.gd", "type": "Resource", "value": null}),
+            json!({"path": "res://scripts/player.gd", "type": "Resource"}),
         ] {
             let mut call =
                 json!({"node": "/Main/Player", "property": "script", "value": written.clone()});
@@ -2203,9 +2240,9 @@ mod tests {
         }
 
         for whole in [
-            json!({"type": "vector2", "value": [12, 34]}),
-            json!({"type": "resource", "value": {"path": "res://scripts/player.gd"}}),
-            json!({"type": "null", "value": null}),
+            json!({"type": "Vector2", "value": [12, 34]}),
+            json!({"type": "Resource", "value": {"path": "res://scripts/player.gd"}}),
+            json!({"type": "Nil", "value": null}),
         ] {
             let mut call =
                 json!({"node": "/Main/Player", "property": "script", "value": whole.clone()});
@@ -2586,9 +2623,9 @@ mod tests {
     #[test]
     fn a_colour_may_be_named_as_well_as_counted() {
         for value in [
-            json!({"type": "color", "value": "red"}),
-            json!({"type": "color", "value": "#8b5a2b"}),
-            json!({"type": "color", "value": [1, 0.5, 0.25, 1]}),
+            json!({"type": "Color", "value": "red"}),
+            json!({"type": "Color", "value": "#8b5a2b"}),
+            json!({"type": "Color", "value": [1, 0.5, 0.25, 1]}),
         ] {
             check_ok(
                 "godot_node",
@@ -2603,7 +2640,7 @@ mod tests {
             json!({
                 "node": "/Main/Player",
                 "property": "modulate",
-                "value": {"type": "color", "value": 7}
+                "value": {"type": "Color", "value": 7}
             }),
         );
         assert!(neither.contains("name like skyblue"), "{neither}");
@@ -2612,7 +2649,7 @@ mod tests {
     /// A resource wrapper that is right with a path that is empty says so, rather than contradicting
     /// itself.
     ///
-    /// Observed live: `{"type": "resource", "value": {"path": ""}}` for a material the turn had not
+    /// Observed live: `{"type": "Resource", "value": {"path": ""}}` for a material the turn had not
     /// made yet, answered `a resource value takes an object carrying a path, and this one was an
     /// object holding path` — a sentence that says the shape is wrong when the shape is right, and
     /// never names the empty string that is.
@@ -2624,7 +2661,7 @@ mod tests {
             json!({
                 "node": "/Game/Ground",
                 "property": "material",
-                "value": {"type": "resource", "value": {"path": ""}}
+                "value": {"type": "Resource", "value": {"path": ""}}
             }),
         );
         assert!(
@@ -2638,7 +2675,7 @@ mod tests {
             json!({
                 "node": "/Game/Ground",
                 "property": "material",
-                "value": {"type": "resource", "value": {"res": "a.tres"}}
+                "value": {"type": "Resource", "value": {"res": "a.tres"}}
             }),
         );
         assert!(
@@ -3094,7 +3131,7 @@ mod tests {
     /// A blank key is shown as one, rather than as nothing at all.
     ///
     /// An `AnimationPlayer`'s default library is keyed with the empty string, so a live turn sent
-    /// `{"type": "dictionary", "value": {"": …}}` and read back ``a dictionary value takes an array
+    /// `{"type": "Dictionary", "value": {"": …}}` and read back ``a dictionary value takes an array
     /// of {key, value} tagged pairs, and this one was an object holding .`` — true, and a sentence
     /// that stops before it says anything.
     #[test]
@@ -3210,7 +3247,7 @@ mod tests {
 
         let mut nested = json!({
             "properties": [{"node": ["/Player"], "property": "position",
-                            "value": {"type": "vector2", "value": [1, 2]}}]
+                            "value": {"type": "Vector2", "value": [1, 2]}}]
         });
         repair("godot_node", "set_properties", &mut nested);
         assert_eq!(
@@ -3302,13 +3339,13 @@ mod tests {
             json!({
                 "node": "/Player",
                 "property": "script",
-                "value": {"type": "resource", "value": "res://scripts/player.gd"},
+                "value": {"type": "Resource", "value": "res://scripts/player.gd"},
                 "expectedRevision": 1
             }),
         );
         assert!(
             refused.contains(
-                "Send {\"type\": \"resource\", \"value\": {\"path\": \"res://scripts/player.gd\"}}."
+                "Send {\"type\": \"Resource\", \"value\": {\"path\": \"res://scripts/player.gd\"}}."
             ),
             "the correction must carry the model's own path: {refused}"
         );
@@ -3485,7 +3522,7 @@ mod tests {
             json!({
                 "properties": [
                     {"node": "/Player", "property": "position",
-                     "value": {"type": "vector2", "value": [1, 2]}}
+                     "value": {"type": "Vector2", "value": [1, 2]}}
                 ],
                 "expectedRevision": 3
             }),
@@ -3495,7 +3532,7 @@ mod tests {
             "set_properties",
             json!({
                 "properties": [{"node": "/Player", "property": "script",
-                                "value": {"type": "resource", "value": "res://a.gd"}}]
+                                "value": {"type": "Resource", "value": "res://a.gd"}}]
             }),
         );
         assert!(
@@ -3512,7 +3549,7 @@ mod tests {
             json!({
                 "node": "/Player",
                 "property": "script",
-                "value": {"type": "resource", "value": {"path": "res://scripts/player.gd"}},
+                "value": {"type": "Resource", "value": {"path": "res://scripts/player.gd"}},
                 "expectedRevision": 1
             }),
         );
@@ -3522,7 +3559,7 @@ mod tests {
             json!({
                 "node": "/Player/Sprite2D",
                 "property": "region_rect",
-                "value": {"type": "rect2", "value": [112, 0, 16, 16]},
+                "value": {"type": "Rect2", "value": [112, 0, 16, 16]},
                 "expectedRevision": 2
             }),
         );
@@ -3603,7 +3640,7 @@ mod tests {
             json!({
                 "node": "/Player",
                 "property": "position",
-                "value": {"type": "vector2", "value": [12]},
+                "value": {"type": "Vector2", "value": [12]},
                 "expectedRevision": 1
             }),
         );
@@ -3619,10 +3656,10 @@ mod tests {
         let mut one = json!({
             "node": "/Main/Player",
             "property": "position",
-            "value": {"type": "vector2", "value": {"x": 32, "y": 48}}
+            "value": {"type": "Vector2", "value": {"x": 32, "y": 48}}
         });
         repair("godot_node", "set_property", &mut one);
-        assert_eq!(one["value"], json!({"type": "vector2", "value": [32, 48]}));
+        assert_eq!(one["value"], json!({"type": "Vector2", "value": [32, 48]}));
         assert!(check("godot_node", "set_property", &one).is_ok());
 
         let mut listed = json!({
@@ -3630,7 +3667,7 @@ mod tests {
                 {
                     "node": "/Main/Floor",
                     "property": "position",
-                    "value": {"type": "vector2", "value": {"x": 0, "y": -100}}
+                    "value": {"type": "Vector2", "value": {"x": 0, "y": -100}}
                 },
                 {
                     "node": "/Main/Floor",
@@ -3642,7 +3679,7 @@ mod tests {
         repair("godot_node", "set_properties", &mut listed);
         assert_eq!(
             listed["properties"][0]["value"],
-            json!({"type": "vector2", "value": [0, -100]})
+            json!({"type": "Vector2", "value": [0, -100]})
         );
         assert_eq!(
             listed["properties"][1]["value"],
@@ -3653,19 +3690,19 @@ mod tests {
         let mut colour = json!({
             "node": "/Main/Player",
             "property": "modulate",
-            "value": {"type": "color", "value": {"r": 1, "g": 0.5, "b": 0.25, "a": 1}}
+            "value": {"type": "Color", "value": {"r": 1, "g": 0.5, "b": 0.25, "a": 1}}
         });
         repair("godot_node", "set_property", &mut colour);
         assert_eq!(
             colour["value"],
-            json!({"type": "color", "value": [1, 0.5, 0.25, 1]})
+            json!({"type": "Color", "value": [1, 0.5, 0.25, 1]})
         );
     }
 
     /// The kind word, written back into the value.
     ///
     /// A model that reads `value: tagged` and the kind beside it wrote
-    /// `{"type": "float", "value": {"number": 3.5}}` and `{"type": "string", "value": {"text": …}}`
+    /// `{"type": "float", "value": {"number": 3.5}}` and `{"type": "String", "value": {"text": …}}`
     /// eight times in one live turn — the protocol's own words for those kinds, used as a key.
     #[test]
     fn a_scalar_written_in_a_box_is_taken_out_of_it() {
@@ -3680,8 +3717,8 @@ mod tests {
             json!({"type": "float", "value": 3.5})
         );
         assert_eq!(
-            boxed(json!({"type": "string", "value": {"text": "Coin"}})),
-            json!({"type": "string", "value": "Coin"})
+            boxed(json!({"type": "String", "value": {"text": "Coin"}})),
+            json!({"type": "String", "value": "Coin"})
         );
         assert_eq!(
             boxed(json!({"type": "bool", "value": {"value": true}})),
@@ -3706,11 +3743,11 @@ mod tests {
         for (property, value) in [
             (
                 "transform",
-                json!({"type": "transform2d", "value": {"origin": [0, 0], "x": [1, 0], "y": [0, 1]}}),
+                json!({"type": "Transform2D", "value": {"origin": [0, 0], "x": [1, 0], "y": [0, 1]}}),
             ),
             (
                 "rect",
-                json!({"type": "rect2", "value": {"top": 0, "left": 1, "width": 2, "height": 3}}),
+                json!({"type": "Rect2", "value": {"top": 0, "left": 1, "width": 2, "height": 3}}),
             ),
         ] {
             let mut written = json!({"node": "/Main/Player", "property": property, "value": value});
@@ -3726,7 +3763,7 @@ mod tests {
         let mut right = json!({
             "node": "/Main/Player",
             "property": "script",
-            "value": {"type": "resource", "value": {"path": "res://scripts/player.gd"}}
+            "value": {"type": "Resource", "value": {"path": "res://scripts/player.gd"}}
         });
         let before = right.clone();
         repair("godot_node", "set_property", &mut right);
@@ -3748,12 +3785,12 @@ mod tests {
             json!({
                 "node": "/Player",
                 "property": "position",
-                "value": {"type": "vector2", "value": {"x": 32, "y": 48}}
+                "value": {"type": "Vector2", "value": {"x": 32, "y": 48}}
             }),
         );
         assert!(refused.contains("an object holding x, y"), "{refused}");
         assert!(
-            refused.contains(r#"Send {"type": "vector2", "value": [32, 48]}"#),
+            refused.contains(r#"Send {"type": "Vector2", "value": [32, 48]}"#),
             "{refused}"
         );
 
@@ -3763,11 +3800,11 @@ mod tests {
             json!({
                 "node": "/Player",
                 "property": "modulate",
-                "value": {"type": "color", "value": {"r": 1, "g": 0.5, "b": 0.25, "a": 1}}
+                "value": {"type": "Color", "value": {"r": 1, "g": 0.5, "b": 0.25, "a": 1}}
             }),
         );
         assert!(
-            colour.contains(r#"Send {"type": "color", "value": [1, 0.5, 0.25, 1]}"#),
+            colour.contains(r#"Send {"type": "Color", "value": [1, 0.5, 0.25, 1]}"#),
             "{colour}"
         );
     }
@@ -3782,7 +3819,7 @@ mod tests {
             json!({
                 "node": "/Player",
                 "property": "rect",
-                "value": {"type": "rect2", "value": {"top": 0, "left": 1, "width": 2, "height": 3}}
+                "value": {"type": "Rect2", "value": {"top": 0, "left": 1, "width": 2, "height": 3}}
             }),
         );
         assert!(refused.contains("an array of 4 numbers"), "{refused}");
@@ -3827,7 +3864,7 @@ mod tests {
             refused.contains("`number` is not a value type"),
             "{refused}"
         );
-        assert!(refused.contains("vector2"), "{refused}");
+        assert!(refused.contains("Vector2"), "{refused}");
     }
 
     #[test]
@@ -3998,8 +4035,8 @@ mod tests {
         };
 
         assert_eq!(
-            repaired(json!({"type": "vector2", "value": {"type": "vector2", "value": [32, 48]}})),
-            json!({"type": "vector2", "value": [32, 48]})
+            repaired(json!({"type": "Vector2", "value": {"type": "Vector2", "value": [32, 48]}})),
+            json!({"type": "Vector2", "value": [32, 48]})
         );
 
         for wrapper in [
@@ -4008,14 +4045,14 @@ mod tests {
         ] {
             assert_eq!(
                 repaired(wrapper.clone()),
-                json!({"type": "string", "value": "Resume"}),
+                json!({"type": "String", "value": "Resume"}),
                 "{wrapper}"
             );
         }
 
         assert_eq!(
-            repaired(json!({"type": "String", "value": "Resume"})),
-            json!({"type": "string", "value": "Resume"})
+            repaired(json!({"type": "string", "value": "Resume"})),
+            json!({"type": "String", "value": "Resume"})
         );
 
         assert_eq!(
@@ -4027,23 +4064,23 @@ mod tests {
         );
 
         for left in [
-            json!({"type": "vector2", "value": {"type": "float", "value": 1}}),
+            json!({"type": "Vector2", "value": {"type": "float", "value": 1}}),
             json!({"type": "int", "value": {"type": "float", "value": 1}}),
             json!({"type": "Vektor2", "value": [1, 2]}),
-            json!({"type": "resource", "value": {"path": "res://scripts/player.gd"}}),
+            json!({"type": "Resource", "value": {"path": "res://scripts/player.gd"}}),
         ] {
             assert_eq!(repaired(left.clone()), left, "{left}");
         }
 
         let mut listed = json!({"properties": [
             {"node": "/P", "property": "position",
-             "value": {"type": "vector2", "value": {"type": "vector2", "value": [1, 2]}}},
+             "value": {"type": "Vector2", "value": {"type": "Vector2", "value": [1, 2]}}},
             {"node": "/P", "property": "visible", "value": {"type": "bool", "value": true}},
         ]});
         repair("godot_node", "set_properties", &mut listed);
         assert_eq!(
             listed["properties"][0]["value"],
-            json!({"type": "vector2", "value": [1, 2]}),
+            json!({"type": "Vector2", "value": [1, 2]}),
             "{listed}"
         );
         assert_eq!(

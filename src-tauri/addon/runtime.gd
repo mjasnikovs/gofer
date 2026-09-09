@@ -43,25 +43,9 @@ const MAX_WAIT_MS := 10000
 ## Frames, capped so a frame count cannot outlast the same budget on a slow scene.
 const MAX_WAIT_FRAMES := 600
 
-## The performance monitors the wire may name, mapped onto engine constants.
-const MONITORS := {
-    "fps": Performance.TIME_FPS,
-    "process_time": Performance.TIME_PROCESS,
-    "physics_time": Performance.TIME_PHYSICS_PROCESS,
-    "memory_static": Performance.MEMORY_STATIC,
-    "memory_message_buffer": Performance.MEMORY_MESSAGE_BUFFER_MAX,
-    "object_count": Performance.OBJECT_COUNT,
-    "object_resource_count": Performance.OBJECT_RESOURCE_COUNT,
-    "object_node_count": Performance.OBJECT_NODE_COUNT,
-    "object_orphan_node_count": Performance.OBJECT_ORPHAN_NODE_COUNT,
-    "render_objects_in_frame": Performance.RENDER_TOTAL_OBJECTS_IN_FRAME,
-    "render_primitives_in_frame": Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME,
-    "render_draw_calls_in_frame": Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME,
-    "render_video_memory": Performance.RENDER_VIDEO_MEM_USED,
-    "render_texture_memory": Performance.RENDER_TEXTURE_MEM_USED,
-    "render_buffer_memory": Performance.RENDER_BUFFER_MEM_USED,
-}
-const DEFAULT_MONITORS: Array[String] = ["fps", "memory_static", "object_node_count"]
+## What a call that names no monitor answers with: a frame rate, a memory figure and a node count.
+## Every `Performance.Monitor` constant is accepted; these three are what "how is it running" asks.
+const DEFAULT_MONITORS: Array[String] = ["TIME_FPS", "MEMORY_STATIC", "OBJECT_NODE_COUNT"]
 
 const MOUSE_BUTTONS := {
     "left": MOUSE_BUTTON_LEFT,
@@ -375,18 +359,24 @@ func _op_monitors(params: Dictionary) -> Dictionary:
     var values := {}
     for entry in names:
         var monitor := str(entry)
-        if not MONITORS.has(monitor):
-            var offered: Array = MONITORS.keys()
-            offered.sort()
-            return _failure(
-                "unknown_monitor",
-                (
-                    "Performance monitor '%s' is not supported. The monitors are %s"
-                    % [monitor, ", ".join(offered)]
-                )
-            )
-        values[monitor] = Performance.get_monitor(MONITORS[monitor])
+        if not ClassDB.class_has_integer_constant(&"Performance", monitor):
+            return _unknown_monitor(monitor)
+        var index := ClassDB.class_get_integer_constant(&"Performance", monitor)
+        if index < 0 or index >= Performance.MONITOR_MAX:
+            return _unknown_monitor(monitor)
+        values[monitor] = Performance.get_monitor(index)
     return _succeed({"monitors": values})
+
+## `Performance` carries the sentinel `MONITOR_MAX` alongside the monitors themselves, and asking
+## the engine for it reads past the last one, so the range check refuses it with the misspellings.
+func _unknown_monitor(monitor: String) -> Dictionary:
+    return _failure(
+        "unknown_monitor",
+        (
+            "Performance monitor '%s' is not supported. The names it takes are the ones the "
+            + "schema lists, and any other name is an error"
+        ) % monitor
+    )
 
 ## Builds typed input events from their wire summaries. Returns the same ok/events/message shape
 ## the editor plugin's decoder uses, so malformed events are rejected rather than injected wrong.

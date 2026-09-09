@@ -158,7 +158,7 @@ fn the_addon_authors_scenes_undoably_inside_a_real_editor() {
             "scene": scene,
             "node": "/acceptance/Sprite",
             "property": "position",
-            "value": {"type": "vector2", "value": [12, 34]}
+            "value": {"type": "Vector2", "value": [12, 34]}
         }),
     );
 
@@ -240,11 +240,11 @@ fn the_addon_authors_a_whole_subtree_in_one_call() {
         json!({
             "properties": [
                 {"node": "/batch/Player", "property": "position",
-                 "value": {"type": "vector2", "value": [12, 34]}},
+                 "value": {"type": "Vector2", "value": [12, 34]}},
                 {"node": "/batch/Player/Body", "property": "flip_h",
                  "value": {"type": "bool", "value": true}},
                 {"node": "/batch/Ground", "property": "position",
-                 "value": {"type": "vector2", "value": [0, 200]}}
+                 "value": {"type": "Vector2", "value": [0, 200]}}
             ]
         }),
     );
@@ -260,7 +260,7 @@ fn the_addon_authors_a_whole_subtree_in_one_call() {
             .iter()
             .find(|property| property["name"] == "position")
             .expect("position")["value"],
-        json!({"type": "vector2", "value": [12.0, 34.0]}),
+        json!({"type": "Vector2", "value": [12.0, 34.0]}),
         "the batched write must reach the node"
     );
 
@@ -269,9 +269,9 @@ fn the_addon_authors_a_whole_subtree_in_one_call() {
         json!({
             "properties": [
                 {"node": "/batch/Ground", "property": "position",
-                 "value": {"type": "vector2", "value": [999, 999]}},
+                 "value": {"type": "Vector2", "value": [999, 999]}},
                 {"node": "/batch/Nowhere", "property": "position",
-                 "value": {"type": "vector2", "value": [1, 1]}}
+                 "value": {"type": "Vector2", "value": [1, 1]}}
             ]
         }),
         Some(session.revision()),
@@ -287,7 +287,7 @@ fn the_addon_authors_a_whole_subtree_in_one_call() {
             .iter()
             .find(|property| property["name"] == "position")
             .expect("position")["value"],
-        json!({"type": "vector2", "value": [0.0, 200.0]}),
+        json!({"type": "Vector2", "value": [0.0, 200.0]}),
         "the entry before the refused one must not have been written"
     );
 
@@ -375,7 +375,7 @@ fn the_addon_refuses_stale_revisions_and_malformed_values() {
         session
             .error(
                 "node.set_property",
-                with_value(json!({"type": "vector2", "value": [1]})),
+                with_value(json!({"type": "Vector2", "value": [1]})),
                 Some(current)
             )
             .starts_with("unsupported_value"),
@@ -542,7 +542,7 @@ fn the_addon_wires_a_scene_with_groups_and_signals() {
         json!({
             "node": "/wiring",
             "property": "script",
-            "value": {"type": "resource", "value": {"path": "res://wiring.gd"}}
+            "value": {"type": "Resource", "value": {"path": "res://wiring.gd"}}
         }),
     );
     session.mutate(
@@ -780,7 +780,7 @@ fn the_addon_builds_a_tile_level_from_an_atlas() {
         json!({
             "node": "/level/Terrain",
             "property": "tile_set",
-            "value": {"type": "resource", "value": {"path": "res://tiles/world.tres"}}
+            "value": {"type": "Resource", "value": {"path": "res://tiles/world.tres"}}
         }),
     );
 
@@ -1261,7 +1261,7 @@ fn the_addon_refuses_wiring_that_would_never_fire() {
         json!({
             "node": "/refused_wiring",
             "property": "script",
-            "value": {"type": "resource", "value": {"path": "res://wiring.gd"}}
+            "value": {"type": "Resource", "value": {"path": "res://wiring.gd"}}
         }),
     );
     session.mutate(
@@ -1391,7 +1391,7 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
         );
         assert_eq!(
             name["value"],
-            json!({"type": "string", "value": "Gofer Protocol Fixture"})
+            json!({"type": "String", "value": "Gofer Protocol Fixture"})
         );
         assert_eq!(name["restartRequired"], false);
 
@@ -1447,7 +1447,7 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
             "project.set_setting",
             json!({
                 "name": "gofer_acceptance/persisted",
-                "value": {"type": "string", "value": "survives-restart"}
+                "value": {"type": "String", "value": "survives-restart"}
             }),
         );
         assert_eq!(set["saved"], true);
@@ -1481,7 +1481,7 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
             session
                 .error(
                     "project.set_setting",
-                    json!({"name": "input/bypass", "value": {"type": "null"}}),
+                    json!({"name": "input/bypass", "value": {"type": "Nil"}}),
                     None
                 )
                 .starts_with("reserved_setting")
@@ -1502,7 +1502,7 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
                 "project.get_setting",
                 json!({"name": "application/config/name"})
             )["value"],
-            json!({"type": "string", "value": "Gofer Protocol Fixture"}),
+            json!({"type": "String", "value": "Gofer Protocol Fixture"}),
             "a refused write must leave the setting alone"
         );
 
@@ -1510,12 +1510,15 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
             "project.get_setting",
             json!({"name": "application/config/tags"}),
         );
-        assert_eq!(tags["value"], json!({"type": "array", "value": []}));
+        assert_eq!(
+            tags["value"],
+            json!({"type": "PackedStringArray", "value": []})
+        );
         session.call(
             "project.set_setting",
             json!({
                 "name": "application/config/tags",
-                "value": {"type": "array", "value": [{"type": "string", "value": "gofer-acceptance"}]}
+                "value": {"type": "Array", "value": [{"type": "String", "value": "gofer-acceptance"}]}
             }),
         );
         assert_eq!(
@@ -1523,7 +1526,23 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
                 "project.get_setting",
                 json!({"name": "application/config/tags"})
             )["value"],
-            json!({"type": "array", "value": [{"type": "string", "value": "gofer-acceptance"}]})
+            json!({"type": "PackedStringArray", "value": ["gofer-acceptance"]}),
+            "a setting the engine declares as a packed array answers under that tag"
+        );
+        session.call(
+            "project.set_setting",
+            json!({
+                "name": "application/config/tags",
+                "value": {"type": "PackedStringArray", "value": ["gofer-acceptance"]}
+            }),
+        );
+        assert_eq!(
+            session.call(
+                "project.get_setting",
+                json!({"name": "application/config/tags"})
+            )["value"],
+            json!({"type": "PackedStringArray", "value": ["gofer-acceptance"]}),
+            "the tag the setting answers under is one it also takes"
         );
         assert!(
             session
@@ -1531,7 +1550,7 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
                     "project.set_setting",
                     json!({
                         "name": "application/config/tags",
-                        "value": {"type": "array", "value": [{"type": "int", "value": 3}]}
+                        "value": {"type": "Array", "value": [{"type": "int", "value": 3}]}
                     }),
                     None
                 )
@@ -1596,7 +1615,7 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
             "project.set_setting",
             json!({
                 "name": "application.run.main_scene",
-                "value": {"type": "string", "value": "res://acceptance.tscn"}
+                "value": {"type": "String", "value": "res://acceptance.tscn"}
             }),
             None,
         );
@@ -1788,7 +1807,7 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
     );
     assert_eq!(
         persisted["value"],
-        json!({"type": "string", "value": "survives-restart"}),
+        json!({"type": "String", "value": "survives-restart"}),
         "the setting must survive an editor restart"
     );
 }
@@ -2416,7 +2435,7 @@ fn a_size_under_a_controls_floor_says_which_floor() {
             "scene": scene,
             "node": "/sizes/Words",
             "property": "size",
-            "value": {"type": "vector2", "value": [0.0, 0.0]},
+            "value": {"type": "Vector2", "value": [0.0, 0.0]},
         }),
         Some(session.revision()),
     );
@@ -2432,7 +2451,7 @@ fn a_size_under_a_controls_floor_says_which_floor() {
             "scene": scene,
             "node": "/sizes/Plain",
             "property": "size",
-            "value": {"type": "vector2", "value": [64.0, 64.0]},
+            "value": {"type": "Vector2", "value": [64.0, 64.0]},
         }),
     );
     assert_eq!(held["value"]["value"], json!([64.0, 64.0]));
@@ -2540,7 +2559,7 @@ fn creating_over_the_projects_main_scene_names_the_setting_that_moves_it() {
     session
         .try_call(
             "project.set_setting",
-            json!({"name": "application/run/main_scene", "value": {"type": "string", "value": mine}}),
+            json!({"name": "application/run/main_scene", "value": {"type": "String", "value": mine}}),
             None,
         )
         .expect("point the project at the new scene");
@@ -3019,9 +3038,9 @@ fn an_instance_keeps_the_properties_set_on_it_over_the_scene_it_came_from() {
 
 /// A colour written under the wrong tag, and the refusal that names the right one.
 ///
-/// `loc-21-platformer` sent two ColorRects `{"type": "string", "value": "#5c8a3c"}` and was told
+/// `loc-21-platformer` sent two ColorRects `{"type": "String", "value": "#5c8a3c"}` and was told
 /// `expected Color, received String` — true, and silent about the fact that the colour was right
-/// and `{"type": "color", "value": "#5c8a3c"}` takes that exact text.
+/// and `{"type": "Color", "value": "#5c8a3c"}` takes that exact text.
 #[test]
 fn a_value_under_the_wrong_tag_is_told_the_tag_the_property_takes() {
     let mut session = Session::start();
@@ -3041,11 +3060,11 @@ fn a_value_under_the_wrong_tag_is_told_the_tag_the_property_takes() {
             "scene": scene,
             "node": "/Tagged/Paint",
             "property": "color",
-            "value": {"type": "string", "value": "#5c8a3c"},
+            "value": {"type": "String", "value": "#5c8a3c"},
         }),
         Some(session.revision()),
     );
-    for named in ["expected Color", "\"type\": \"color\"", "#5c8a3c"] {
+    for named in ["expected Color", "\"type\": \"Color\"", "#5c8a3c"] {
         assert!(
             refused.contains(named),
             "the refusal must name {named}: {refused}"
@@ -3058,7 +3077,7 @@ fn a_value_under_the_wrong_tag_is_told_the_tag_the_property_takes() {
             "scene": scene,
             "node": "/Tagged/Paint",
             "property": "color",
-            "value": {"type": "color", "value": "#5c8a3c"},
+            "value": {"type": "Color", "value": "#5c8a3c"},
         }),
     );
 }
@@ -3138,7 +3157,7 @@ fn the_text_and_settings_outside_ascii_come_back_the_way_they_went_in() {
             "scene": scene,
             "node": "/Beschriftung/Titel",
             "property": "text",
-            "value": {"type": "string", "value": shown},
+            "value": {"type": "String", "value": shown},
         }),
     );
     let read = session.call(
@@ -3164,7 +3183,7 @@ fn the_text_and_settings_outside_ascii_come_back_the_way_they_went_in() {
         "project.set_setting",
         json!({
             "name": "application/config/name",
-            "value": {"type": "string", "value": "Münzjäger"},
+            "value": {"type": "String", "value": "Münzjäger"},
         }),
     );
     let setting = session.call(

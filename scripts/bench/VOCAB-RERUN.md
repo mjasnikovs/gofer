@@ -80,3 +80,18 @@ BASE=P2 node vreport.mjs # P2 vs P3
 # prose-tasks.mjs five behavioural asks, their traps, and the rule each trap answers with
 
 # vrun.mjs vreport.mjs vwords.mjs vtok.mjs
+
+# ---------------------------------------------------------------- after a step that moves the vocabulary
+
+V1 is the surface shipped before the step, with the prompt it shipped. V2 is what the worker builds
+now. Each arm is scored in its own spelling. The sign of the paired gap must not change.
+
+```sh
+cp surf-tools-S2.json vocab-tools-V1.json          # the built arm of the previous step
+cp surf-prompt-S2.txt vocab-prompt-V1.txt
+GOFER_DUMP_CATALOG=/dev/null GOFER_DUMP_PROMPT=$S/vocab-prompt-V2.txt \
+  cargo test --manifest-path src-tauri/Cargo.toml --features godot-acceptance --lib -- dump_catalog_and_prompt
+SCRATCH=$S PREFIX=vocab ARM=V2 node surf-built.mjs
+SCRATCH=$S ARMS=V1,V2 SEEDS=10 OUT=vocab-rows-step node vrun.mjs
+SCRATCH=$S ROWS=vocab-rows-step BASE=V1 node vreport.mjs
+```

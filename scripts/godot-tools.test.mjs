@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import {readFile} from 'node:fs/promises'
 import {createGodotTools} from './godot-tools.mjs'
+import {declaredDomains} from './declared-domains.mjs'
 import {catalog} from './ai-turn-harness.mjs'
 
 test('one tool carries the whole router catalog and forwards every call', async () => {
@@ -89,4 +91,24 @@ test('one editor is one caller at a time, before and after the wrappers', async 
         model: {input: ['text']}
     })
     for (const tool of decorated) assert.equal(tool.executionMode, 'sequential', tool.name)
+})
+
+// The worker builds the tool at runtime and the generator prints it into the repository; the model
+// only ever reads one of them, so the two have to be one string. Serialized rather than deep-equal
+// on purpose: key order is part of what the model reads, and a deep comparison ignores it.
+test('the tool the worker builds is the one the generator committed, byte for byte', async () => {
+    const [godot] = createGodotTools(await declaredDomains(), {call: async () => ({})})
+    const committed = JSON.parse(
+        await readFile(new URL('../protocol/schemas/v2/godot-tool.json', import.meta.url), 'utf8')
+    )
+
+    assert.equal(
+        JSON.stringify({
+            name: godot.name,
+            description: godot.description,
+            parameters: godot.parameters
+        }),
+        JSON.stringify(committed),
+        'protocol/schemas/v2/godot-tool.json is stale — run `npm run generate`'
+    )
 })

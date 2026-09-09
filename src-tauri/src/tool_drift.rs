@@ -625,19 +625,18 @@ fn every_parameter_the_addon_reads_is_the_one_the_catalog_documents() {
 /// find one before it could step.
 const NOT_WORTH_THE_MODEL_S_ATTENTION: [&str; 1] = ["threadId"];
 
-/// Both operations that take a key read it with the same vocabulary, and it is not empty.
+/// Both operations that take a key read it with the same vocabulary, and it is the engine's.
 ///
 /// Both decoders are `OS.find_keycode_from_string`, so a key the Input Map takes is a key the
 /// running game takes. This used to compare two hand-written English sentences to each other,
-/// through a parser that split them on the literal string "Accepted: ". There is one list now,
-/// so what is left to check is that both operations point at it — and that the names it offers
-/// and the names it says are refused do not overlap, because a list that did both would make
-/// the acceptance suite assert two contradictory things about one key.
+/// through a parser that split them on the literal string "Accepted: ", and then two copies of
+/// twenty-five names. There is one list now and the engine writes it, so what is left to check is
+/// that both operations point at it.
 #[test]
 fn both_operations_that_take_a_key_speak_the_same_vocabulary() {
-    use crate::tool_params::{GODOT_KEY_NAME, GODOT_KEY_NAME_REFUSED, params_of};
+    use crate::tool_params::{GODOT_KEY_NAME, params_of};
 
-    assert!(GODOT_KEY_NAME.contains(&"Enter") && GODOT_KEY_NAME_REFUSED.contains(&"Return"));
+    assert!(GODOT_KEY_NAME.contains(&"Enter") && !GODOT_KEY_NAME.contains(&"Return"));
     for pair in [
         ("godot_project", "set_input_action"),
         ("godot_runtime", "input"),
@@ -651,12 +650,6 @@ fn both_operations_that_take_a_key_speak_the_same_vocabulary() {
             events.vocabulary, GODOT_KEY_NAME,
             "{}.{} must read a key with the same vocabulary as the other",
             pair.0, pair.1
-        );
-    }
-    for refused in GODOT_KEY_NAME_REFUSED {
-        assert!(
-            !GODOT_KEY_NAME.contains(refused),
-            "{refused} is both offered and refused"
         );
     }
 }
@@ -770,128 +763,268 @@ fn every_field_the_rust_handlers_deserialize_is_the_one_the_catalog_documents() 
     );
 }
 
-/// The keys of one GDScript `const NAME := {…}` dictionary, which is how the addon keeps the
-/// vocabularies it accepts.
-fn gd_dictionary_keys(source: &str, declaration: &str) -> BTreeSet<String> {
-    let Some(body) = source
-        .split_once(&format!("{declaration} := {{"))
-        .and_then(|(_, rest)| rest.split_once("\n}"))
-        .map(|(body, _)| body)
-    else {
-        panic!("{declaration} is a dictionary this test can read");
-    };
-    body.lines()
-        .filter_map(|line| line.trim().strip_prefix('"'))
-        .filter_map(|line| line.split('"').next())
-        .map(str::to_owned)
+/// The committed tool, which is what the model actually reads.
+///
+/// `scripts/generate-command-surface.mjs` prints it from `params.json` and the engine's
+/// vocabulary; the worker loads what Rust hands it at runtime. Both are checked against this file,
+/// so the two printers cannot drift apart without a red test.
+const COMMITTED_TOOL: &str = include_str!("../../protocol/schemas/v2/godot-tool.json");
+
+fn committed_tool() -> serde_json::Value {
+    serde_json::from_str(COMMITTED_TOOL).expect("the committed godot tool is JSON")
+}
+
+/// The `oneOf` branch pinned to one dotted operation.
+fn committed_branch<'a>(tool: &'a serde_json::Value, op: &str) -> &'a serde_json::Value {
+    tool["parameters"]["properties"]["ops"]["items"]["oneOf"]
+        .as_array()
+        .expect("the tool offers one branch per operation")
+        .iter()
+        .find(|branch| branch["properties"]["op"]["const"] == op)
+        .unwrap_or_else(|| panic!("{op} has no branch of its own"))
+}
+
+fn committed_enum(schema: &serde_json::Value) -> Vec<String> {
+    schema["enum"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{schema} carries no enum"))
+        .iter()
+        .map(|word| word.as_str().expect("an enum of strings").to_owned())
         .collect()
 }
 
-/// The labels of the match inside one GDScript function — the kinds a decoder accepts, or the
-/// tags the protocol decodes.
-fn gd_match_labels(functions: &HashMap<&str, String>, name: &str) -> BTreeSet<String> {
-    let body = functions
-        .get(name)
-        .unwrap_or_else(|| panic!("{name} is a function this test can read"));
-    match_arms(body, "")
-        .into_iter()
-        .map(|(label, _)| label)
-        .filter(|label| label != "_")
-        .collect()
-}
-
-/// A vocabulary that is written down rather than read out of a file.
+/// Every word a vocabulary holds reaches the model as the schema `enum` that constrains it.
 ///
-/// The Rust-answered ones are declared beside their own type — see
-/// [`crate::godot_session::LOG_SEVERITY_NAMES`] — so all this does is put them in the same shape as
-/// the six the addon's source still has to be parsed for.
-fn declared_names(names: &[&str]) -> BTreeSet<String> {
-    names.iter().map(|name| (*name).to_owned()).collect()
-}
-
-/// Every name a summary offers as a vocabulary has to be a name its handler accepts.
-///
-/// A parameter's *name* is now checked from both sides; what may go inside it is still prose.
-/// The summaries spell out eleven vocabularies — the value tags, the event kinds, the mouse
-/// buttons, the performance monitors, the collision shapes, the log severities and sources —
-/// and every one of them is a table somewhere that can be read. A missing name is a capability
-/// the model will never use because it was never told about it; the value tags had lost
-/// `rect2i` that way.
-///
-/// One direction only. A name in the table has to be in the sentence; a word in the sentence is
-/// prose and cannot be held to a table.
+/// The inverse of the check this replaces. That one read the words back out of an English summary
+/// and required each to be named there, which is what a hand-written list of twenty-five out of
+/// the engine's hundred and ninety looks like when a test is asked to bless it. The words are the
+/// engine's now and the sampler is constrained by them, so what has to hold is that the list in
+/// the prompt is the list this build compiled — not that a sentence recites it, which the check
+/// below refuses outright.
 #[test]
-fn every_name_a_vocabulary_holds_is_offered_by_the_summary_that_advertises_it() {
-    let editor = editor_functions();
-    let runtime = gd_functions(RUNTIME_ADDON);
-    let protocol = gd_functions(include_str!("../addon/protocol.gd"));
-    let vocabularies: [(&str, &str, &str, BTreeSet<String>); 8] = [
-        (
-            "godot_node",
-            "set_property",
-            "the tags Protocol.decode takes",
-            gd_match_labels(&protocol, "decode"),
-        ),
-        (
-            "godot_project",
-            "set_input_action",
-            "the event kinds the Input Map decoder takes",
-            gd_match_labels(&editor, "decode_input_events"),
-        ),
-        (
-            "godot_runtime",
-            "input",
-            "the event kinds the running game takes",
-            gd_match_labels(&runtime, "_decode_runtime_events"),
-        ),
-        (
-            "godot_runtime",
-            "input",
-            "the mouse buttons the running game names",
-            gd_dictionary_keys(RUNTIME_ADDON, "const MOUSE_BUTTONS"),
-        ),
-        (
-            "godot_runtime",
-            "get_monitors",
-            "the performance monitors",
-            gd_dictionary_keys(RUNTIME_ADDON, "const MONITORS"),
-        ),
-        (
-            "godot_resource",
-            "create_shape",
-            "the collision shapes",
-            gd_dictionary_keys(EDITOR_ADDON, "const SHAPE_TYPES"),
-        ),
-        (
-            "godot_logs",
-            "read",
-            "the log severities",
-            declared_names(crate::godot_session::LOG_SEVERITY_NAMES),
-        ),
-        (
-            "godot_logs",
-            "read",
-            "the log sources",
-            declared_names(crate::godot_session::LOG_SOURCE_NAMES),
-        ),
-    ];
-    let mut unoffered = Vec::new();
-    for (tool, op, what, names) in vocabularies {
-        assert!(
-            names.len() > 1,
-            "{what} came out empty, so this proves nothing"
+fn every_word_a_vocabulary_holds_reaches_the_model_as_a_schema_enum() {
+    use crate::tool_params::{GODOT_KEY_NAME, GODOT_MONITOR_NAME, GODOT_VALUE_TAG};
+
+    let tool = committed_tool();
+    for op in ["project.set_input_action", "runtime.input"] {
+        let key =
+            &committed_branch(&tool, op)["properties"]["events"]["items"]["properties"]["key"];
+        assert_eq!(
+            committed_enum(key),
+            GODOT_KEY_NAME,
+            "{op} offers other keys"
         );
-        let summary = summary_of(tool, op);
-        let signature = crate::tool_params::params_of(tool, op)
-            .map(crate::tool_params::signature)
-            .unwrap_or_default();
-        for name in names {
-            if !summary.contains(&name) && !signature.contains(&name) {
-                unoffered.push(format!("{tool} {op} never offers `{name}`, one of {what}"));
+    }
+    let monitors =
+        &committed_branch(&tool, "runtime.get_monitors")["properties"]["monitors"]["items"];
+    assert_eq!(committed_enum(monitors), GODOT_MONITOR_NAME);
+    for (op, path) in [
+        ("node.set_property", vec!["value"]),
+        ("node.set_properties", vec!["properties", "items", "value"]),
+        ("project.set_setting", vec!["value"]),
+        ("project.set_editor_setting", vec!["value"]),
+    ] {
+        let mut walked = &committed_branch(&tool, op)["properties"];
+        for step in path {
+            walked = if step == "items" {
+                &walked["items"]
+            } else {
+                &walked[step]
+            };
+            if walked.get("properties").is_some() && walked["type"] == "object" {
+                walked = &walked["properties"];
+            }
+        }
+        assert_eq!(
+            committed_enum(&walked["type"]),
+            GODOT_VALUE_TAG,
+            "{op} tags"
+        );
+    }
+}
+
+/// The signature and the summary the committed tool prints are the ones this build would print.
+///
+/// Two programs print the operation line now: `signature` in `tool_params.rs`, which reaches the
+/// model through the worker at runtime, and `signatureFrom` in `scripts/tool-schema.mjs`, which
+/// prints the committed file. A second spelling of one contract is the drift `tool_params.rs`
+/// exists to end, so the two are held together here rather than left to agree by hand.
+#[test]
+fn the_committed_tool_prints_what_this_build_would() {
+    let tool = committed_tool();
+    let description = tool["description"]
+        .as_str()
+        .expect("the tool describes itself");
+    let mut missing = Vec::new();
+    for domain in CATALOG {
+        let short = domain.name.trim_start_matches("godot_");
+        let heading = format!("# {short} — {}", domain.description);
+        if !description.contains(&heading) {
+            missing.push(format!("{} is described differently", domain.name));
+        }
+        for operation in domain.operations {
+            let signature = crate::tool_params::signature(operation.params);
+            let spaced = if signature.is_empty() {
+                String::new()
+            } else {
+                format!(" {signature}")
+            };
+            let line = format!(
+                "\n- {short}.{}{spaced}: {}",
+                operation.op, operation.summary
+            );
+            if !description.contains(&line) {
+                missing.push(format!(
+                    "{short}.{} reads differently: {line}",
+                    operation.op
+                ));
             }
         }
     }
-    assert!(unoffered.is_empty(), "{}", unoffered.join("\n"));
+    assert!(
+        missing.is_empty(),
+        "the committed tool is not what this build prints — run `npm run generate`:\n{}",
+        missing.join("\n")
+    );
+}
+
+/// Where one member of a vocabulary is written down, as a byte range of the prose.
+fn whole_word_hits(text: &str, words: &[&str]) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let boundary = |index: usize| match bytes.get(index) {
+        None => true,
+        Some(byte) => !(byte.is_ascii_alphanumeric() || *byte == b'_'),
+    };
+    let mut hits: Vec<(usize, usize)> = Vec::new();
+    for word in words {
+        for (start, _) in text.match_indices(word) {
+            let end = start + word.len();
+            if (start == 0 || boundary(start - 1)) && boundary(end) {
+                hits.push((start, end));
+            }
+        }
+    }
+    hits.sort_by_key(|(start, end)| (*start, std::cmp::Reverse(*end)));
+    let mut kept: Vec<(usize, usize)> = Vec::new();
+    for hit in hits {
+        if kept.last().is_some_and(|(_, end)| hit.0 < *end) {
+            continue;
+        }
+        kept.push(hit);
+    }
+    kept
+}
+
+/// The one word or two that may sit between two members of a list and still be a list.
+const A_LIST_JOINS_WITH: [&str; 5] = [", ", ", and ", ", or ", " and ", " or "];
+
+/// Every run of two or more members of one vocabulary, written as a list, as its members.
+fn recited_runs(text: &str, words: &[&str]) -> Vec<Vec<String>> {
+    let mut runs = Vec::new();
+    let mut run: Vec<(usize, usize)> = Vec::new();
+    for hit in whole_word_hits(text, words) {
+        let joined = run
+            .last()
+            .is_some_and(|(_, end)| A_LIST_JOINS_WITH.contains(&&text[*end..hit.0]));
+        if !joined {
+            if run.len() > 1 {
+                runs.push(std::mem::take(&mut run));
+            }
+            run.clear();
+        }
+        run.push(hit);
+    }
+    if run.len() > 1 {
+        runs.push(run);
+    }
+    runs.into_iter()
+        .map(|run| {
+            run.into_iter()
+                .map(|(start, end)| text[start..end].to_owned())
+                .collect()
+        })
+        .collect()
+}
+
+/// The three monitors `get_monitors` answers with when a call names none.
+///
+/// They are allowed to be written down because they are the default, not the list: a model that
+/// has to ask for a list to find out what it gets for free spends a round trip on it.
+const NAMED_AS_THE_DEFAULT: [&str; 3] = ["TIME_FPS", "MEMORY_STATIC", "OBJECT_NODE_COUNT"];
+
+/// Every sentence the model reads, with the operation it belongs to.
+fn prose_the_model_reads() -> Vec<(String, &'static str)> {
+    fn notes(
+        at: &str,
+        params: &'static [crate::tool_params::Param],
+        into: &mut Vec<(String, &'static str)>,
+    ) {
+        for param in params {
+            let inside = format!("{at} `{}`", param.name);
+            if !param.note.is_empty() {
+                into.push((inside.clone(), param.note));
+            }
+            notes(&inside, param.entry, into);
+        }
+    }
+    let mut prose = Vec::new();
+    for domain in CATALOG {
+        prose.push((domain.name.to_owned(), domain.description));
+        for operation in domain.operations {
+            let at = format!("{} {}", domain.name, operation.op);
+            prose.push((at.clone(), operation.summary));
+            notes(&at, operation.params, &mut prose);
+        }
+    }
+    prose
+}
+
+/// No sentence the model reads recites a vocabulary the schema already carries.
+///
+/// The enum permits and the prose steers, and the two measured against each other: the engine's
+/// lists as enums with the old sentences still beside them scored below the same enums with prose
+/// that names no member. A list in prose is the half that goes stale, and a sampler constrained to
+/// a hundred and ninety key names reading a sentence about twenty-five of them writes one of the
+/// twenty-five.
+///
+/// A single member is an example and stays — `{"type": "Vector2", "value": [12, 34]}` is what a
+/// tagged value looks like, and no enum shows that. What is refused is the *list*: two or more
+/// members with nothing between them but a comma or an "and". Anything narrower is unusable here,
+/// because `Left`, `Open`, `Delete` and `A` are all key names and all ordinary English.
+#[test]
+fn no_sentence_the_model_reads_recites_a_vocabulary() {
+    use crate::tool_params::{GODOT_KEY_NAME, GODOT_MONITOR_NAME, GODOT_VALUE_TAG};
+
+    // A one-character key is `A` or `7`. Held to this rule, "[0, 0]" is a recitation of two of
+    // them and every coordinate in the catalogue is a failure.
+    let keys: Vec<&str> = GODOT_KEY_NAME
+        .iter()
+        .copied()
+        .filter(|name| name.len() > 1)
+        .collect();
+    let mut recited = Vec::new();
+    for (name, words) in [
+        ("a key name", keys.as_slice()),
+        ("a performance monitor", GODOT_MONITOR_NAME),
+        ("a value tag", GODOT_VALUE_TAG),
+    ] {
+        for (at, text) in prose_the_model_reads() {
+            for run in recited_runs(text, words) {
+                if run
+                    .iter()
+                    .all(|member| NAMED_AS_THE_DEFAULT.contains(&member.as_str()))
+                {
+                    continue;
+                }
+                recited.push(format!("{at} lists {name}: {}", run.join(", ")));
+            }
+        }
+    }
+    assert!(
+        recited.is_empty(),
+        "the schema already carries these, and a list beside it goes stale:\n{}",
+        recited.join("\n")
+    );
 }
 
 /// A value the addon decodes has to be documented as the tagged object it decodes.

@@ -395,25 +395,25 @@ test('a resource written straight into a tagged value is put back inside it', as
                     {
                         node: '/Coin',
                         property: 'script',
-                        value: {type: 'resource', path: 'res://scripts/coin.gd'}
+                        value: {type: 'Resource', path: 'res://scripts/coin.gd'}
                     },
                     {
                         node: '/Coin/Sprite',
                         property: 'texture',
-                        value: {type: 'resource', value: {path: 'res://assets/coin.png'}}
+                        value: {type: 'Resource', value: {path: 'res://assets/coin.png'}}
                     },
-                    {node: '/Coin', property: 'position', value: {type: 'vector2', value: [8, 8]}}
+                    {node: '/Coin', property: 'position', value: {type: 'Vector2', value: [8, 8]}}
                 ]
             }
         ]
     })
     const [written, already, untagged] = repaired.ops[0].properties
     assert.deepEqual(written.value, {
-        type: 'resource',
+        type: 'Resource',
         value: {path: 'res://scripts/coin.gd'}
     })
-    assert.deepEqual(already.value, {type: 'resource', value: {path: 'res://assets/coin.png'}})
-    assert.deepEqual(untagged.value, {type: 'vector2', value: [8, 8]})
+    assert.deepEqual(already.value, {type: 'Resource', value: {path: 'res://assets/coin.png'}})
+    assert.deepEqual(untagged.value, {type: 'Vector2', value: [8, 8]})
 })
 
 test('the same repair reaches a tagged value that is not inside a list', async () => {
@@ -425,12 +425,12 @@ test('the same repair reaches a tagged value that is not inside a list', async (
                 op: 'set_property',
                 node: '/Main/Player',
                 property: 'script',
-                value: {type: 'resource', path: 'res://scripts/player.gd'}
+                value: {type: 'Resource', path: 'res://scripts/player.gd'}
             }
         ]
     })
     assert.deepEqual(repaired.ops[0].value, {
-        type: 'resource',
+        type: 'Resource',
         value: {path: 'res://scripts/player.gd'}
     })
 })
@@ -438,7 +438,7 @@ test('the same repair reaches a tagged value that is not inside a list', async (
 test('a resource tag carrying more than a path is left for the router to refuse', async () => {
     const domains = await declaredDomains()
     const node = domains.find(domain => domain.name === 'godot_node')
-    const written = {type: 'resource', path: 'res://a.tres', subresource: 'Shape'}
+    const written = {type: 'Resource', path: 'res://a.tres', subresource: 'Shape'}
     const repaired = normalizeToolCalls(node.operations, {
         ops: [{op: 'set_property', node: '/A', property: 'shape', value: written}]
     })
@@ -686,7 +686,7 @@ test('a tagged value whose keys wear quotation marks is read without them', asyn
                     op: 'set_property',
                     node: '/HUD',
                     property: 'script',
-                    value: {'"type"': 'resource', value: {'"path"': 'res://scripts/hud.gd'}}
+                    value: {'"type"': 'Resource', value: {'"path"': 'res://scripts/hud.gd'}}
                 }
             ]
         }),
@@ -696,7 +696,7 @@ test('a tagged value whose keys wear quotation marks is read without them', asyn
                     op: 'set_property',
                     node: '/HUD',
                     property: 'script',
-                    value: {type: 'resource', value: {path: 'res://scripts/hud.gd'}}
+                    value: {type: 'Resource', value: {path: 'res://scripts/hud.gd'}}
                 }
             ]
         }
@@ -711,7 +711,7 @@ test('a tagged value whose keys wear quotation marks is read without them', asyn
                         {
                             node: '/A',
                             property: 'position',
-                            value: {'"type"': 'vector2', value: [1, 2]}
+                            value: {'"type"': 'Vector2', value: [1, 2]}
                         }
                     ]
                 }
@@ -722,7 +722,7 @@ test('a tagged value whose keys wear quotation marks is read without them', asyn
                 {
                     op: 'set_properties',
                     properties: [
-                        {node: '/A', property: 'position', value: {type: 'vector2', value: [1, 2]}}
+                        {node: '/A', property: 'position', value: {type: 'Vector2', value: [1, 2]}}
                     ]
                 }
             ]
@@ -734,8 +734,8 @@ test('a tagged value whose keys wear quotation marks is read without them', asyn
         node: '/A',
         property: 'metadata',
         value: {
-            type: 'dictionary',
-            value: [{key: {type: 'string', value: '"quoted"'}, value: {type: 'int', value: 1}}]
+            type: 'Dictionary',
+            value: [{key: {type: 'String', value: '"quoted"'}, value: {type: 'int', value: 1}}]
         }
     }
     assert.deepEqual(normalizeToolCalls(node, {ops: [dictionary]}), {ops: [dictionary]})
@@ -744,7 +744,7 @@ test('a tagged value whose keys wear quotation marks is read without them', asyn
         op: 'set_property',
         node: '/A',
         property: 'script',
-        value: {'"type"': 'resource', type: 'texture', value: {path: 'res://a.png'}}
+        value: {'"type"': 'Resource', type: 'texture', value: {path: 'res://a.png'}}
     }
     assert.deepEqual(normalizeToolCalls(node, {ops: [both]}), {ops: [both]})
 })
@@ -816,8 +816,8 @@ test('a parameter named with whitespace around it is named without it', async ()
     )
 
     const padded = {
-        type: 'dictionary',
-        value: [{key: {type: 'string', value: 'node '}, value: {type: 'int', value: 1}}]
+        type: 'Dictionary',
+        value: [{key: {type: 'String', value: 'node '}, value: {type: 'int', value: 1}}]
     }
     assert.deepEqual(
         normalizeToolCalls(node, {
@@ -1072,7 +1072,7 @@ test('an operation written as the key of its own parameters is read as the opera
                     set_property: {
                         node: '/Main/HUD',
                         property: 'script',
-                        value: {type: 'resource', value: {path: 'res://scripts/hud.gd'}}
+                        value: {type: 'Resource', value: {path: 'res://scripts/hud.gd'}}
                     }
                 }
             ]
@@ -1085,7 +1085,7 @@ test('an operation written as the key of its own parameters is read as the opera
                     op: 'set_property',
                     node: '/Main/HUD',
                     property: 'script',
-                    value: {type: 'resource', value: {path: 'res://scripts/hud.gd'}}
+                    value: {type: 'Resource', value: {path: 'res://scripts/hud.gd'}}
                 }
             ]
         }

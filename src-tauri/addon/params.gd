@@ -1290,7 +1290,7 @@ static func fit_to_property(node: Node, property: String, value: Variant) -> Dic
         if holds_a_node:
             return Protocol.decode_failed(
                 (
-                    '%s holds a node: send {"type": "node_path", "value": "Box/Slider"}, a path '
+                    '%s holds a node: send {"type": "NodePath", "value": "Box/Slider"}, a path '
                     + "read from the node the property is on."
                 ) % property
             )

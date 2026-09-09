@@ -29,24 +29,31 @@ function formatEntries(value: unknown): string {
         .join(', ')
 }
 
+function formatComponents(entry: unknown): string {
+    if (!Array.isArray(entry)) return asText(entry)
+    return `(${(entry as readonly unknown[]).map(one => asText(one)).join(', ')})`
+}
+
 export function formatGodotValue(value: GodotValue): string {
     const inner = value.value
     switch (value.type) {
-        case 'null':
+        case 'Nil':
             return 'null'
         case 'bool':
             return inner === true ? 'true' : 'false'
         case 'int':
         case 'float':
-        case 'string':
+        case 'String':
+        case 'StringName':
+        case 'NodePath':
             return asText(inner)
-        case 'array':
+        case 'Array':
             return `[${(Array.isArray(inner) ? (inner as readonly unknown[]) : [])
                 .map(entry => formatGodotValue(asGodotValue(entry)))
                 .join(', ')}]`
-        case 'dictionary':
+        case 'Dictionary':
             return `{${formatEntries(inner)}}`
-        case 'resource':
+        case 'Resource':
             return `${asText(asRecord(inner)['resourceType'], 'Resource')} ${asText(asRecord(inner)['path'])}`
         case 'node':
             return `${asText(asRecord(inner)['nodeType'], 'Node')} ${asText(asRecord(inner)['path'])}`
@@ -56,7 +63,7 @@ export function formatGodotValue(value: GodotValue): string {
             return asText(asRecord(inner)['text'], asText(asRecord(inner)['typeName']))
         default:
             return Array.isArray(inner) ?
-                    `${value.type}(${(inner as readonly unknown[]).map(entry => asText(entry)).join(', ')})`
+                    `${value.type}(${(inner as readonly unknown[]).map(formatComponents).join(', ')})`
                 :   asText(inner)
     }
 }

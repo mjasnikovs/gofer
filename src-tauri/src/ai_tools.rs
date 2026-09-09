@@ -125,6 +125,7 @@ impl ToolDomain {
 /// The ten domains. A grouping rather than a tool each: the model is given one `godot` tool whose
 /// dotted `op` names the domain, because a hundred flat tools fill its context with names it will
 /// never call and cost a round trip apiece.
+// GENERATED-BEGIN catalog sha256:92f2e31e09cfc234
 pub const CATALOG: &[ToolDomain] = &[
     ToolDomain {
         name: "godot_session",
@@ -133,92 +134,51 @@ pub const CATALOG: &[ToolDomain] = &[
     },
     ToolDomain {
         name: "godot_scene",
-        description: "The edited scene in the editor — never the running game's scene tree. Every \
-                      mutation here is checked against the scene's revision, and the router supplies \
-                      that number from the last answer that carried one, so never pass it and never \
-                      read the tree to fetch it.",
+        description: "The edited scene in the editor — never the running game's scene tree. Every mutation here is checked against the scene's revision, and the router supplies that number from the last answer that carried one, so never pass it and never read the tree to fetch it.",
         operations: tool_params::GODOT_SCENE_OPERATIONS,
     },
     ToolDomain {
         name: "godot_node",
-        description: "Node authoring inside the edited scene. Every mutation is undoable and every \
-                      one of them is checked against the scene's revision — which the router \
-                      supplies from the last answer that carried one, and every mutation's own \
-                      answer carries the next. So mutate, then mutate again: there is no revision to \
-                      pass and no tree to re-read between them. Paths are the scene's own, like \
-                      /Level1 or /Level1/Ground. Nothing here writes the file: scene.save \
-                      does.",
+        description: "Node authoring inside the edited scene. Every mutation is undoable and every one of them is checked against the scene's revision — which the router supplies from the last answer that carried one, and every mutation's own answer carries the next. So mutate, then mutate again: there is no revision to pass and no tree to re-read between them. Paths are the scene's own, like /Level1 or /Level1/Ground. Nothing here writes the file: scene.save does.",
         operations: tool_params::GODOT_NODE_OPERATIONS,
     },
     ToolDomain {
         name: "godot_project",
-        description: "Project settings, autoloads, the Input Map, plugins, and machine-wide editor \
-                      settings. Project writes persist in the task worktree; editor settings are \
-                      machine-wide and outside Git.",
+        description: "Project settings, autoloads, the Input Map, plugins, and machine-wide editor settings. Project writes persist in the task worktree; editor settings are machine-wide and outside Git.",
         operations: tool_params::GODOT_PROJECT_OPERATIONS,
     },
     ToolDomain {
         name: "godot_resource",
-        description: "Project files as the editor sees them. Deleting and moving need the user's \
-                      approval; nothing outside the task worktree can be named at all.",
+        description: "Project files as the editor sees them. Deleting and moving need the user's approval; nothing outside the task worktree can be named at all.",
         operations: tool_params::GODOT_RESOURCE_OPERATIONS,
     },
     ToolDomain {
         name: "godot_script",
-        description: "GDScript editing and intelligence through Godot's language server. Positions \
-                      are {line, character}, zero-based. Open a script before querying it — and \
-                      write GDScript here rather than with the file tools, which refuse a .gd, \
-                      because writing here is what tells the server whether it parses. A script \
-                      that does not parse stops the scene using it from loading. `edit` changes a \
-                      script that exists and answers with its diagnostics, so it needs no \
-                      `diagnostics` call after it; `save` creates one, and `diagnostics` on the \
-                      same path is what then says whether it parses. Paths may be named either \
-                      way, `scripts/mario.gd` or res://scripts/mario.gd.",
+        description: "GDScript editing and intelligence through Godot's language server. Positions are {line, character}, zero-based. Open a script before querying it — and write GDScript here rather than with the file tools, which refuse a .gd, because writing here is what tells the server whether it parses. A script that does not parse stops the scene using it from loading. `edit` changes a script that exists and answers with its diagnostics, so it needs no `diagnostics` call after it; `save` creates one, and `diagnostics` on the same path is what then says whether it parses. Paths may be named either way, `scripts/mario.gd` or res://scripts/mario.gd.",
         operations: tool_params::GODOT_SCRIPT_OPERATIONS,
     },
     ToolDomain {
         name: "godot_debug",
-        description: "Godot's debug adapter. Install breakpoints with the launch itself, then wait \
-                      for a stop before inspecting: stopping is an event, not a response.",
+        description: "Godot's debug adapter. Install breakpoints with the launch itself, then wait for a stop before inspecting: stopping is an event, not a response.",
         operations: tool_params::GODOT_DEBUG_OPERATIONS,
     },
     ToolDomain {
         name: "godot_runtime",
-        description: "The running game: its live scene tree, input, performance, and screenshots. \
-                      Distinct from the edited scene, and named differently: every path here \
-                      starts at /root, where the node.* operations' start at the edited scene's \
-                      own root.",
+        description: "The running game: its live scene tree, input, performance, and screenshots. Distinct from the edited scene, and named differently: every path here starts at /root, where the node.* operations' start at the edited scene's own root.",
         operations: tool_params::GODOT_RUNTIME_OPERATIONS,
     },
     ToolDomain {
         name: "godot_logs",
-        description: "The session's captured output — editor, importer, plugin, and the game the \
-                      editor launched — with a cursor and severity filtering.",
+        description: "The session's captured output — editor, importer, plugin, and the game the editor launched — with a cursor and severity filtering.",
         operations: tool_params::GODOT_LOGS_OPERATIONS,
     },
     ToolDomain {
         name: "godot_docs_search",
-        description: "The Godot 4.7 documentation, on this machine. SEARCH IT BEFORE writing a \
-                      class, method, signal or constant name, and before answering any question \
-                      about how the engine behaves. Do not answer either from memory and do not \
-                      reason it out from the name: what you remember is mostly Godot 3, where a \
-                      great many of these names were spelled differently, and a name this does not \
-                      return is a name to check rather than to guess at. Passages cite a chapter, \
-                      never a URL. It holds the engine's documentation and nothing else, so send a \
-                      question about this project's own scripts, scenes or files to the subagent \
-                      tool instead.",
+        description: "The Godot 4.7 documentation, on this machine. SEARCH IT BEFORE writing a class, method, signal or constant name, and before answering any question about how the engine behaves. Do not answer either from memory and do not reason it out from the name: what you remember is mostly Godot 3, where a great many of these names were spelled differently, and a name this does not return is a name to check rather than to guess at. Passages cite a chapter, never a URL. It holds the engine's documentation and nothing else, so send a question about this project's own scripts, scenes or files to the subagent tool instead.",
         operations: tool_params::GODOT_DOCS_SEARCH_OPERATIONS,
     },
 ];
-
-/// The summary of one catalog operation, for the tests and the acceptance suite that hold the
-/// prose to the addon behind it.
-#[cfg(test)]
-pub fn summary_of(tool: &str, op: &str) -> &'static str {
-    tool_params::operation_of(tool, op)
-        .unwrap_or_else(|| panic!("{tool} {op} is in the catalog"))
-        .summary
-}
+// GENERATED-END catalog
 
 /// Marks a tool request as a reachability probe rather than an operation.
 ///
@@ -1375,7 +1335,7 @@ fn a_path_that_climbs_out(params: &Value) -> Result<(), ToolFailure> {
 /// A node's `text` may say anything, `../docs/readme` included, and refusing that would be this
 /// gate inventing a rule nobody has. A string that carries the scheme is a path wherever it sits,
 /// and everything else has to be named here. `path` covers the nested one a resource value holds:
-/// `{"type": "resource", "value": {"path": "res://…"}}` arrives under that key like any other.
+/// `{"type": "Resource", "value": {"path": "res://…"}}` arrives under that key like any other.
 const A_KEY_THAT_NAMES_A_FILE: [&str; 8] = [
     "path", "paths", "texture", "scene", "file", "files", "from", "to",
 ];
@@ -2458,15 +2418,15 @@ mod tests {
             json!({"path": "assets/../../escaped.png"}),
             json!({"path": "user://../escaped.png"}),
             json!({"texture": "res://a.png", "tiles": ["res://../x.png"]}),
-            json!({"properties": [{"value": {"type": "resource", "value": {"path": "res://../x.tres"}}}]}),
+            json!({"properties": [{"value": {"type": "Resource", "value": {"path": "res://../x.tres"}}}]}),
         ] {
             let refused = a_path_that_climbs_out(&climbing).expect_err("a climbing path");
             assert_eq!(refused.code, "outside_workspace", "{climbing}");
         }
         for ordinary in [
             json!({"path": "res://assets/tiles.png"}),
-            json!({"value": {"type": "string", "value": "Loading.."}}),
-            json!({"properties": [{"property": "text", "value": {"type": "string", "value": "see ../docs/readme"}}]}),
+            json!({"value": {"type": "String", "value": "Loading.."}}),
+            json!({"properties": [{"property": "text", "value": {"type": "String", "value": "see ../docs/readme"}}]}),
             json!({"name": "a..b"}),
             json!({"query": "physics/2d/default_gravity"}),
         ] {
@@ -2474,7 +2434,7 @@ mod tests {
         }
         assert!(
             a_path_that_climbs_out(&json!({
-                "properties": [{"value": {"type": "string", "value": "res://../secrets"}}]
+                "properties": [{"value": {"type": "String", "value": "res://../secrets"}}]
             }))
             .is_err(),
         );

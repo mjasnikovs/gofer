@@ -1,16 +1,16 @@
 {
-    "type": "dictionary",
+    "type": "Dictionary",
     "value": [
         {
-            "key": {"type": "string", "value": "name"},
-            "value": {"type": "string", "value": "Player"}
+            "key": {"type": "String", "value": "name"},
+            "value": {"type": "String", "value": "Player"}
         },
         {"key": {"type": "int", "value": 3}, "value": {"type": "bool", "value": true}},
         {
-            "key": {"type": "vector2i", "value": [1, 2]},
+            "key": {"type": "Vector2i", "value": [1, 2]},
             "value": {
-                "type": "array",
-                "value": [{"type": "null"}, {"type": "float", "value": 0.25}]
+                "type": "Array",
+                "value": [{"type": "Nil"}, {"type": "float", "value": 0.25}]
             }
         }
     ]

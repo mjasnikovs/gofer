@@ -111,7 +111,7 @@ describe('packaged desktop application', () => {
                 scene,
                 node: '/packaged/PackagedNode',
                 property: 'position',
-                value: {type: 'vector2', value: [12, 34]}
+                value: {type: 'Vector2', value: [12, 34]}
             },
             true
         )

@@ -60,7 +60,23 @@ func _test_codec(failures: Array[String]) -> void:
         Basis(Vector3(1, 2, 3), Vector3(4, 5, 6), Vector3(7, 8, 9)),
         Transform3D(Basis(Vector3(1, 2, 3), Vector3(4, 5, 6), Vector3(7, 8, 9)), Vector3(9, 8, 7)),
         [1, "two", Vector2(3, 3)],
-        {"a": 1, "b": [Vector2(1, 1)]}
+        {"a": 1, "b": [Vector2(1, 1)]},
+        &"walk",
+        NodePath("Box/Slider"),
+        AABB(Vector3(1, 2, 3), Vector3(4, 5, 6)),
+        Projection(
+            Vector4(1, 0, 0, 0), Vector4(0, 1, 0, 0), Vector4(0, 0, 1, 0), Vector4(0, 0, 0, 1)
+        ),
+        PackedByteArray([1, 2, 255]),
+        PackedInt32Array([1, -2]),
+        PackedInt64Array([1, -2]),
+        PackedFloat32Array([0.5, -1.25]),
+        PackedFloat64Array([0.1, -2.75]),
+        PackedStringArray(["a", "b"]),
+        PackedVector2Array([Vector2(1, 2), Vector2(3, 4)]),
+        PackedVector3Array([Vector3(1, 2, 3)]),
+        PackedVector4Array([Vector4(1, 2, 3, 4)]),
+        PackedColorArray([Color(1, 0, 0, 1)])
     ]
     for sample in samples:
         var round_trip: Dictionary = protocol.call("decode", protocol.call("encode", sample))
@@ -74,14 +90,22 @@ func _test_codec(failures: Array[String]) -> void:
     var refusals := {
         "a value that is not tagged at all": 7,
         "a bool with a numeric payload": {"type": "bool", "value": 1},
-        "a vector2 with three numbers": {"type": "vector2", "value": [1, 2, 3]},
-        "a vector2 with a string in it": {"type": "vector2", "value": [1, "2"]},
-        "a resource with no path": {"type": "resource", "value": {}},
-        "an array that is not an array": {"type": "array", "value": 1},
-        "a dictionary entry with no key": {"type": "dictionary", "value": [{"value": 1}]},
+        "a vector2 with three numbers": {"type": "Vector2", "value": [1, 2, 3]},
+        "a vector2 with a string in it": {"type": "Vector2", "value": [1, "2"]},
+        "a resource with no path": {"type": "Resource", "value": {}},
+        "an array that is not an array": {"type": "Array", "value": 1},
+        "a dictionary entry with no key": {"type": "Dictionary", "value": [{"value": 1}]},
         "a tag nothing writes": {"type": "sprite", "value": null},
         "a node reference": {"type": "node", "value": {"path": "/root", "nodeType": "Node"}},
-        "an opaque value": {"type": "opaque", "value": {"typeName": "Callable", "text": ""}}
+        "an opaque value": {"type": "opaque", "value": {"typeName": "Callable", "text": ""}},
+        "a packed array of the wrong element": {"type": "PackedInt32Array", "value": ["one"]},
+        "a packed vector array of loose numbers": {"type": "PackedVector2Array", "value": [1, 2]},
+        "an AABB of three numbers": {"type": "AABB", "value": [1, 2, 3]},
+        "a Projection of four numbers": {"type": "Projection", "value": [1, 2, 3, 4]},
+        "a Callable": {"type": "Callable", "value": null},
+        "a Signal": {"type": "Signal", "value": null},
+        "an RID": {"type": "RID", "value": 9},
+        "a live Object": {"type": "Object", "value": null}
     }
     for what in refusals:
         var refused: Dictionary = protocol.call("decode", refusals[what])
@@ -91,19 +115,20 @@ func _test_codec(failures: Array[String]) -> void:
             failures.append("The codec refused %s without saying why" % what)
 
     for spelling in ["red", "skyblue", "#8b5a2b", "8b5a2b"]:
-        var named: Dictionary = protocol.call("decode", {"type": "color", "value": spelling})
+        var named: Dictionary = protocol.call("decode", {"type": "Color", "value": spelling})
         if not named["ok"] or typeof(named["value"]) != TYPE_COLOR:
             failures.append("The codec refused the colour %s" % spelling)
-    if protocol.call("decode", {"type": "color", "value": "red"})["value"] != Color.RED:
+    if protocol.call("decode", {"type": "Color", "value": "red"})["value"] != Color.RED:
         failures.append("A named colour must decode to that colour")
-    var unnamed: Dictionary = protocol.call("decode", {"type": "color", "value": "notacolour"})
+    var unnamed: Dictionary = protocol.call("decode", {"type": "Color", "value": "notacolour"})
     if unnamed["ok"] or not str(unnamed["message"]).contains("skyblue"):
         failures.append("A colour nobody can write must be refused with the spellings there are")
 
     _test_declared_types(protocol, failures)
 
-## The wire has one array tag, so which packed array a value becomes is decided by the type the
-## property was declared with. A coerced element is what this exists to refuse.
+## A plain `Array` written to a property declared as a packed array still fits, and which packed
+## array it becomes is decided by that declared type. A coerced element is what this exists to
+## refuse.
 func _test_declared_types(protocol: GDScript, failures: Array[String]) -> void:
     var fitted: Dictionary = protocol.call("fit_to_declared_type", [1, 2, 3], TYPE_PACKED_INT32_ARRAY)
     if not fitted["ok"] or typeof(fitted["value"]) != TYPE_PACKED_INT32_ARRAY:
@@ -202,15 +227,17 @@ func _test_frame_composite(failures: Array[String]) -> void:
     var tags: Dictionary = protocol.get("TAG_FOR_TYPE")
     for declared in tags:
         var tag: String = tags[declared]
+        if declared != TYPE_OBJECT and tag != type_string(declared):
+            failures.append("%s is spelled %s and not as the engine spells it" % [declared, tag])
         var answered: Dictionary = protocol.call("decode", {"type": tag, "value": null})
-        if str(answered.get("message", "")).contains("Unknown value type"):
+        if str(answered.get("message", "")).contains("is not supported"):
             failures.append("%s is not a tag decode knows" % tag)
     var wrong: Dictionary = protocol.call(
         "fit_to_declared_type", "#5c8a3c", TYPE_COLOR
     )
     if wrong.get("ok", true):
         failures.append("a string is not a Color")
-    for named in ["expected Color", '"type": "color"', "#5c8a3c", "hex string"]:
+    for named in ["expected Color", '"type": "Color"', "#5c8a3c", "hex string"]:
         if not str(wrong.get("message", "")).contains(named):
             failures.append("a colour under the wrong tag must name %s" % named)
     var number: Dictionary = protocol.call("fit_to_declared_type", "3", TYPE_INT)
