@@ -52,11 +52,16 @@ export function jsonSchemaOfParam(param) {
     return description ? {...schema, description} : schema
 }
 
+// A hidden parameter is the router's to fill in. Leaving it in the schema lets the grammar permit
+// the one key the prose forbids, and a live turn wrote it.
 export function jsonSchemaOfParams(params) {
+    const visible = params.filter(param => !param.hidden)
     return {
         type: 'object',
-        properties: Object.fromEntries(params.map(param => [param.name, jsonSchemaOfParam(param)])),
-        required: params.filter(param => param.required).map(param => param.name),
+        properties: Object.fromEntries(
+            visible.map(param => [param.name, jsonSchemaOfParam(param)])
+        ),
+        required: visible.filter(param => param.required).map(param => param.name),
         additionalProperties: false
     }
 }
@@ -64,6 +69,7 @@ export function jsonSchemaOfParams(params) {
 // One branch per op rather than every op's parameters merged into one open object: the merged
 // shape made a bare {op} and any key at all legal, so a constrained sampler wrote keys that
 // swallowed their value ("nameUnit1") and the router had to repair what it should never receive.
+// The summary is in the tool description already; a copy here cost 5,286 tokens a turn.
 export function jsonSchemaOfEntry(operations) {
     return {
         oneOf: operations.map(operation => {
@@ -71,7 +77,7 @@ export function jsonSchemaOfEntry(operations) {
             return {
                 type: 'object',
                 properties: {
-                    op: {const: operation.op, description: operation.summary},
+                    op: {const: operation.op},
                     ...body.properties
                 },
                 required: ['op', ...body.required],

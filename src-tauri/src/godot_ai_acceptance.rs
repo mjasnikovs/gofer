@@ -151,8 +151,9 @@ fn tools(name: &'static str, operations: &[Value]) -> ModelTurn {
 }
 
 /// The scripted turn: one tool call per model response, each built from what the previous tool
-/// calls actually answered. A fixed script could not do this — the scene revision, the file hash,
-/// the frame id, and the variables reference are all values only the editor can produce.
+/// calls actually answered. A fixed script could not do this — the frame id and the variables
+/// reference are values only the editor can produce. The scene and its revision it never names:
+/// the router supplies both, and the schema no longer offers the keys.
 fn next_turn(index: usize, results: &[Value]) -> ModelTurn {
     let result = |position: usize| -> &Value {
         results
@@ -167,17 +168,13 @@ fn next_turn(index: usize, results: &[Value]) -> ModelTurn {
         1 => tool(
             "godot_node",
             json!({"op": "create", "params": {
-                "scene": SCENE_PATH,
                 "parent": "/AiFixture",
                 "name": "AiMarker",
                 "type": "Marker2D",
             }}),
         ),
         2 => tool("godot_scene", json!({"op": "get_tree", "params": {}})),
-        3 => tool(
-            "godot_scene",
-            json!({"op": "save", "params": {"expectedRevision": result(1)["revision"]}}),
-        ),
+        3 => tool("godot_scene", json!({"op": "save", "params": {}})),
         4 => tool(
             "godot_script",
             json!({"op": "open", "params": {"path": BROKEN_PATH}}),

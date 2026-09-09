@@ -318,7 +318,6 @@
             "tool": "godot_node",
             "ops": [
                 {
-                    "expectedRevision": 0,
                     "nodes": [
                         {
                             "name": "AnimatedSprite2D",
@@ -495,42 +494,36 @@
             "tool": "godot_node",
             "ops": [
                 {
-                    "expectedRevision": 0,
                     "name": "AntiTank",
                     "op": "instantiate",
                     "parent": "/Main/Units",
                     "path": "res://assets/Soldiers/soldier.tscn"
                 },
                 {
-                    "expectedRevision": 1,
                     "name": "Assault",
                     "op": "instantiate",
                     "parent": "/Main/Units",
                     "path": "res://assets/Soldiers/soldier.tscn"
                 },
                 {
-                    "expectedRevision": 2,
                     "name": "Grenadier",
                     "op": "instantiate",
                     "parent": "/Main/Units",
                     "path": "res://assets/Soldiers/soldier.tscn"
                 },
                 {
-                    "expectedRevision": 3,
                     "name": "MachineGunner",
                     "op": "instantiate",
                     "parent": "/Main/Units",
                     "path": "res://assets/Soldiers/soldier.tscn"
                 },
                 {
-                    "expectedRevision": 4,
                     "name": "RadioOperator",
                     "op": "instantiate",
                     "parent": "/Main/Units",
                     "path": "res://assets/Soldiers/soldier.tscn"
                 },
                 {
-                    "expectedRevision": 5,
                     "name": "Sniper",
                     "op": "instantiate",
                     "parent": "/Main/Units",
@@ -579,7 +572,6 @@
                             "y": 3
                         }
                     ],
-                    "expectedRevision": 7,
                     "node": "/Main/Terrain",
                     "op": "set_cells"
                 }
@@ -591,7 +583,6 @@
             "tool": "godot_node",
             "ops": [
                 {
-                    "expectedRevision": 0,
                     "op": "set_properties",
                     "properties": [
                         {
@@ -620,7 +611,6 @@
             "tool": "godot_node",
             "ops": [
                 {
-                    "expectedRevision": 0,
                     "node": "/Effect",
                     "op": "set_property",
                     "property": "script",

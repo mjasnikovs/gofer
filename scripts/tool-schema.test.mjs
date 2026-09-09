@@ -78,7 +78,8 @@ test('the entry schema types every parameter and pins it to its own operation', 
             params: [
                 {name: 'path', kind: 'text', required: true, entry: []},
                 {name: 'text', kind: 'text', required: true, entry: []},
-                {name: 'expectedHash', kind: 'hash', required: false, entry: []}
+                {name: 'expectedHash', kind: 'hash', required: false, entry: []},
+                {name: 'expectedRevision', kind: 'int', required: false, hidden: true, entry: []}
             ]
         },
         {
@@ -110,9 +111,10 @@ test('the entry schema types every parameter and pins it to its own operation', 
         pattern: '^[0-9a-f]{64}$'
     })
     assert.deepEqual(save.properties.path, {type: 'string'})
-    assert.deepEqual(save.properties.op.const, 'save')
+    assert.deepEqual(save.properties.op, {const: 'save'})
     assert.deepEqual(save.required, ['op', 'path', 'text'])
     assert.equal(save.additionalProperties, false)
+    assert.equal(save.properties.expectedRevision, undefined)
 
     assert.deepEqual(diagnostics.properties.timeoutMs, {type: 'integer'})
     assert.deepEqual(diagnostics.properties.path, {anyOf: [{type: 'string'}, {type: 'array'}]})
@@ -196,4 +198,28 @@ test('the entry schema refuses a key that belongs to another operation', async (
         [],
         `these operations admit a parameter that is not theirs: ${admitted.slice(0, 8).join(', ')} (${admitted.length} total)`
     )
+})
+
+test('the schema offers no key the router fills in, and repeats no summary', async () => {
+    const domains = await declaredDomains()
+    const tools = createGodotTools(domains, {call: async () => ({})})
+    let hidden = 0
+    for (const domain of domains) {
+        const tool = tools.find(candidate => candidate.name === domain.name)
+        for (const [operation, branch] of domain.operations.map((operation, index) => [
+            operation,
+            tool.parameters.properties.ops.items.oneOf[index]
+        ])) {
+            assert.deepEqual(branch.properties.op, {const: operation.op})
+            for (const param of (operation.params ?? []).filter(param => param.hidden)) {
+                assert.equal(
+                    branch.properties[param.name],
+                    undefined,
+                    `${domain.name}.${operation.op} offers \`${param.name}\``
+                )
+                hidden += 1
+            }
+        }
+    }
+    assert.ok(hidden > 30, 'the catalogue lost its hidden parameters')
 })
