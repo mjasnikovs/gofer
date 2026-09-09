@@ -1,0 +1,157 @@
+[
+  {
+    "i": 0,
+    "arm": "A",
+    "claims": 5,
+    "findings": 3,
+    "kinds": {
+      "cross-repo-path": 2,
+      "unresolved-path": 1
+    },
+    "file": "/tmp/live-plans/task0-A.md",
+    "list": [
+      "cross-repo-path:scripts/main.gd",
+      "unresolved-path:scenes/enemies/spider.tscn",
+      "cross-repo-path:scripts/units/unit.gd"
+    ]
+  },
+  {
+    "i": 0,
+    "arm": "B",
+    "claims": 6,
+    "findings": 0,
+    "kinds": {},
+    "file": "/tmp/live-plans/task0-B.md",
+    "list": []
+  },
+  {
+    "i": 1,
+    "arm": "A",
+    "claims": 3,
+    "findings": 9,
+    "kinds": {
+      "cross-repo-path": 2,
+      "unfailable-command": 7
+    },
+    "file": "/tmp/live-plans/task1-A.md",
+    "list": [
+      "cross-repo-path:scenes/units/enemy.tscn",
+      "cross-repo-path:scenes/ui/hud.tscn",
+      "unfailable-command:grep -q 'WaveLabel' scenes/ui/hud.tscn && echo \"OK: WaveLabel present\" || echo \"FAIL: WaveLabel missing\"",
+      "unfailable-command:grep -q 'signal wave_cleared' scripts/game/swarm_manager.gd && echo \"OK: signal declared\" || echo \"FAIL: signal missing\"",
+      "unfailable-command:grep -q 'func set_wave' scripts/ui/hud.gd && echo \"OK: set_wave defined\" || echo \"FAIL: set_wave missing\"",
+      "unfailable-command:grep -q 'wave_cleared' scripts/game/main.gd && echo \"OK: connection present\" || echo \"FAIL: connection missing\"",
+      "unfailable-command:timeout 5 godot --headless --path . res://scenes/game/main.tscn 2>&1 | grep -i 'script error' && echo \"FAIL: script errors found\" || echo \"OK: no script errors\"",
+      "unfailable-command:git diff --name-only HEAD -- project.godot | grep -q 'project.godot' && echo \"FAIL: project.godot modified\" || echo \"OK: project.godot unmodified\"",
+      "unfailable-command:git diff --name-only HEAD -- scenes/units/enemy.tscn scripts/units/enemy.gd | grep -q . && echo \"FAIL: enemy files modified\" || echo \"OK: enemy files unmodified\""
+    ]
+  },
+  {
+    "i": 1,
+    "arm": "B",
+    "claims": 4,
+    "findings": 0,
+    "kinds": {},
+    "file": "/tmp/live-plans/task1-B.md",
+    "list": []
+  },
+  {
+    "i": 2,
+    "arm": "A",
+    "claims": 2,
+    "findings": 3,
+    "kinds": {
+      "cross-repo-path": 1,
+      "unfailable-command": 2
+    },
+    "file": "/tmp/live-plans/task2-A.md",
+    "list": [
+      "cross-repo-path:scripts/units/unit.gd",
+      "unfailable-command:godot --headless --import --path . 2>&1 | grep -i 'error' && echo \"FAIL: parse errors found\" || echo \"OK: no parse errors\"",
+      "unfailable-command:timeout 2 godot --headless --path . --quit 2>&1 | grep -i 'error' && echo \"FAIL: runtime error\" || echo \"OK: headless run clean\""
+    ]
+  },
+  {
+    "i": 2,
+    "arm": "B",
+    "claims": 3,
+    "findings": 0,
+    "kinds": {},
+    "file": "/tmp/live-plans/task2-B.md",
+    "list": []
+  },
+  {
+    "i": 3,
+    "arm": "A",
+    "claims": 5,
+    "findings": 5,
+    "kinds": {
+      "unresolved-path": 5
+    },
+    "file": "/tmp/live-plans/task3-A.md",
+    "list": [
+      "unresolved-path:scripts/units/unit_base.gd",
+      "unresolved-path:scripts/core/game_state.gd",
+      "unresolved-path:scripts/core/input.gd",
+      "unresolved-path:unit_base.gd",
+      "unresolved-path:scripts/core/spawner.gd"
+    ]
+  },
+  {
+    "i": 3,
+    "arm": "B",
+    "claims": 6,
+    "findings": 0,
+    "kinds": {},
+    "file": "/tmp/live-plans/task3-B.md",
+    "list": []
+  },
+  {
+    "i": 4,
+    "arm": "A",
+    "claims": 3,
+    "findings": 1,
+    "kinds": {
+      "cross-repo-path": 1
+    },
+    "file": "/tmp/live-plans/task4-A.md",
+    "list": [
+      "cross-repo-path:scripts/unit/unit.gd"
+    ]
+  },
+  {
+    "i": 4,
+    "arm": "B",
+    "claims": 5,
+    "findings": 0,
+    "kinds": {},
+    "file": "/tmp/live-plans/task4-B.md",
+    "list": []
+  },
+  {
+    "i": 5,
+    "arm": "A",
+    "claims": 2,
+    "findings": 1,
+    "kinds": {
+      "unresolved-path": 1
+    },
+    "file": "/tmp/live-plans/task5-A.md",
+    "list": [
+      "unresolved-path:scenes/spider/spider.tscn"
+    ]
+  },
+  {
+    "i": 5,
+    "arm": "B",
+    "claims": 4,
+    "findings": 1,
+    "kinds": {
+      "unfailable-command": 1
+    },
+    "file": "/tmp/live-plans/task5-B.md",
+    "list": [
+      "unfailable-command:git diff --name-only HEAD | grep -E '\\.(png|ttf|ogg|wav|mp3|tscn|tres|godot|import)$' && echo \"FAIL: asset/scene changed\" || echo \"PASS: no assets/scenes touched\""
+    ]
+  }
+]

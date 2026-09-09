@@ -1,0 +1,5 @@
+line one
+line two
+func _spawn_projectile() -> void:
+line four
+line five
