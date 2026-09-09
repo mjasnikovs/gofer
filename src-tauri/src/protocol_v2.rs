@@ -17,9 +17,21 @@ pub const MAX_TIMEOUT_MS: u64 = 600_000;
 pub const IMAGE_ENCODING: &str = "png-base64";
 pub const SESSION_TOKEN_LENGTH: usize = 64;
 
+/// The domains a handshake may claim and an event may be named in, agreeing with `capabilities` in
+/// handshake.schema.json and `event` in event.schema.json.
 pub const DOMAINS: [&str; 12] = [
     "session", "scene", "node", "project", "editor", "resource", "script", "debug", "runtime",
     "logs", "files", "docs",
+];
+
+/// The domains a command name may sit in, agreeing with `command` in request.schema.json.
+///
+/// Narrower than [`DOMAINS`], and it has to be its own list: a capability is a claim and an event
+/// an announcement, while this is the set of domains something actually answers in. Requests named
+/// in the five that are only ever a capability or an event used to reach the addon's dispatch
+/// table and be refused there.
+pub const COMMAND_DOMAINS: [&str; 7] = [
+    "editor", "node", "project", "resource", "runtime", "scene", "session",
 ];
 
 // GENERATED-BEGIN mutating-commands sha256:98953c2ac3fdb81e
@@ -399,7 +411,7 @@ fn validate_handshake(object: &Map<String, Value>) -> Result<(), ProtocolError> 
 fn validate_request(object: &Map<String, Value>) -> Result<(), ProtocolError> {
     let command = non_empty_string(object.get("command"), "command")?;
     require(
-        is_domain_operation(command),
+        is_domain_operation(command, &COMMAND_DOMAINS),
         "command must be a domain.operation name",
     )?;
     object_at(object.get("params"), "params")?;
@@ -435,7 +447,7 @@ fn validate_event(object: &Map<String, Value>) -> Result<(), ProtocolError> {
     non_negative_integer(object.get("sequence"), "sequence")?;
     let event = non_empty_string(object.get("event"), "event")?;
     require(
-        is_domain_operation(event),
+        is_domain_operation(event, &DOMAINS),
         "event must be a domain.operation name",
     )?;
     object_at(object.get("data"), "data")?;
@@ -543,11 +555,11 @@ fn is_lowercase_word(part: &str) -> bool {
     !part.is_empty() && part.chars().all(|character| character.is_ascii_lowercase())
 }
 
-fn is_domain_operation(name: &str) -> bool {
+fn is_domain_operation(name: &str, domains: &[&str]) -> bool {
     let Some((domain, operation)) = name.split_once('.') else {
         return false;
     };
-    DOMAINS.contains(&domain) && is_snake_case(operation)
+    domains.contains(&domain) && is_snake_case(operation)
 }
 
 fn is_snake_case(name: &str) -> bool {
@@ -920,9 +932,14 @@ mod tests {
         assert!(!is_engine_version("4.7.2.STABLE"));
         assert!(!is_engine_version("4.7.2."));
         assert!(!is_engine_version("4..1.stable"));
-        assert!(is_domain_operation("scene.save_as"));
-        assert!(!is_domain_operation("scene"));
-        assert!(!is_domain_operation("physics.step"));
+        assert!(is_domain_operation("scene.save_as", &COMMAND_DOMAINS));
+        assert!(!is_domain_operation("scene", &COMMAND_DOMAINS));
+        assert!(!is_domain_operation("physics.step", &COMMAND_DOMAINS));
+        assert!(
+            is_domain_operation("debug.stopped", &DOMAINS)
+                && !is_domain_operation("debug.stopped", &COMMAND_DOMAINS),
+            "an event may name a domain no command sits in"
+        );
         assert!(is_snake_case("code_2"));
         assert!(!is_snake_case(""));
         assert!(!is_snake_case("Code"));

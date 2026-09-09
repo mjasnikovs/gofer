@@ -10,7 +10,7 @@
         "id": {"type": "string", "minLength": 1, "maxLength": 128},
         "command": {
             "type": "string",
-            "pattern": "^(session|scene|node|project|editor|resource|script|debug|runtime|logs|files|docs)\\.[a-z][a-z0-9_]*$"
+            "pattern": "^(editor|node|project|resource|runtime|scene|session)\\.[a-z][a-z0-9_]*$"
         },
         "params": {"type": "object"},
         "expectedRevision": {"type": "integer", "minimum": 0},

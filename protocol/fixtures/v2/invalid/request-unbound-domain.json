@@ -1,0 +1,7 @@
+{
+    "protocolVersion": 2,
+    "kind": "request",
+    "id": "req-unbound-domain",
+    "command": "script.open",
+    "params": {"path": "res://player.gd"}
+}

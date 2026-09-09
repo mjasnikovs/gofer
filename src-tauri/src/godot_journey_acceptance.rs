@@ -451,7 +451,7 @@ fn assert_frame(frame: &Value) {
 /// The stand-in renderer: answers whichever prompt is waiting, the way the approval dialog does
 /// when the user clicks through it. The real one learns the identifier from the
 /// `ai-approval-request` event; there is no window here to receive one.
-fn approve_when_asked() -> thread::JoinHandle<usize> {
+pub(crate) fn approve_when_asked() -> thread::JoinHandle<usize> {
     thread::spawn(|| {
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut answered = 0;

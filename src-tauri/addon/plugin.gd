@@ -894,6 +894,10 @@ func _track_dialog() -> void:
 ## deferred — the response leaves when the game answers, the launch completes, or the deadline
 ## `_sweep_runtime_pending` enforces expires.
 func _handle_runtime_request(id: String, command: String, params: Dictionary) -> void:
+    var declared := Params.check_declared(command, params)
+    if declared.has("_gofer_error"):
+        _respond_error_dict(id, declared["_gofer_error"])
+        return
     match command:
         "runtime.get_state":
             _respond_result(id, {

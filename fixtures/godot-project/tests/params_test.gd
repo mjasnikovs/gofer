@@ -172,8 +172,14 @@ func _test_check_declared(params: GDScript, failures: Array[String]) -> void:
         elif not str(error["message"]).contains("path"):
             failures.append("A refusal names the parameter: %s" % str(error))
 
-    if not params.call("check_declared", "scene.not_a_command", {"anything": 1}).is_empty():
-        failures.append("A command the table does not carry is not checked")
+    var unlisted: Dictionary = params.call("check_declared", "scene.not_a_command", {"anything": 1})
+    if unlisted.is_empty():
+        failures.append("A command the table does not carry is not refused")
+    elif unlisted["_gofer_error"]["code"] != "unknown_command":
+        failures.append("A command the table does not carry is refused as unknown_command: %s" % str(unlisted))
+
+    if not params.call("check_declared", "session.heartbeat", {}).is_empty():
+        failures.append("A command that takes nothing has a row and passes")
 
     if params.call("check_declared", "scene.save", {"expectedRevision": 3}).is_empty():
         failures.append("An envelope field sent as a parameter must be refused")

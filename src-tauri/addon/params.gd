@@ -21,36 +21,16 @@ const Protocol := preload("res://addons/gofer/protocol.gd")
 ## `expectedRevision` and `timeoutMs` are absent on purpose. Both are lifted onto the envelope by
 ## the caller, so a handler that looked for them among its parameters would refuse every call that
 ## was actually well formed.
-# GENERATED-BEGIN command-params sha256:c3ccf35531a176a0
+# GENERATED-BEGIN command-params sha256:10a9e6fa13a58567
 const COMMAND_PARAMS: Dictionary = {
     "session.get_state": {"required": [], "optional": []},
-    "session.answer_dialog": {"required": ["button"], "optional": []},
+    "session.cancel": {"required": [], "optional": ["requestId"]},
+    "session.quit": {"required": [], "optional": []},
     "session.undo": {"required": [], "optional": []},
     "session.redo": {"required": [], "optional": []},
-    "scene.list": {"required": [], "optional": []},
-    "scene.open": {"required": ["path"], "optional": []},
-    "scene.create": {"required": ["path", "rootType"], "optional": ["rootName"]},
-    "scene.get_tree": {"required": [], "optional": ["root", "depth", "limit"]},
-    "scene.save": {"required": [], "optional": []},
-    "scene.save_as": {"required": ["path"], "optional": []},
-    "scene.reload": {"required": [], "optional": []},
-    "node.inspect": {"required": ["node"], "optional": ["properties", "scene"]},
-    "node.create": {"required": ["parent", "type", "name"], "optional": ["index", "scene"]},
-    "node.create_nodes": {"required": ["nodes"], "optional": ["scene"]},
-    "node.instantiate": {"required": ["parent", "path"], "optional": ["name", "index", "scene"]},
-    "node.duplicate": {"required": ["node"], "optional": ["name", "scene"]},
-    "node.rename": {"required": ["node", "name"], "optional": ["scene"]},
-    "node.reparent": {"required": ["node", "newParent"], "optional": ["index", "scene"]},
-    "node.change_type": {"required": ["node", "type"], "optional": ["scene"]},
-    "node.delete": {"required": ["node"], "optional": ["scene"]},
-    "node.set_property": {"required": ["node", "property", "value"], "optional": ["scene"]},
-    "node.set_properties": {"required": ["properties"], "optional": ["scene"]},
-    "node.add_to_group": {"required": ["node", "group"], "optional": []},
-    "node.remove_from_group": {"required": ["node", "group"], "optional": []},
-    "node.connect_signal": {"required": ["node", "signal", "method"], "optional": ["target", "binds", "deferred", "oneShot"]},
-    "node.disconnect_signal": {"required": ["node", "signal", "method"], "optional": ["target", "binds"]},
-    "node.set_cells": {"required": ["node", "cells"], "optional": []},
-    "node.get_cells": {"required": ["node"], "optional": ["limit"]},
+    "session.answer_dialog": {"required": ["button"], "optional": []},
+    "session.get_unsaved_scenes": {"required": [], "optional": []},
+    "session.save_all_scenes": {"required": [], "optional": []},
     "project.get_settings": {"required": [], "optional": []},
     "project.search_settings": {"required": ["query"], "optional": []},
     "project.get_setting": {"required": ["name"], "optional": []},
@@ -68,11 +48,37 @@ const COMMAND_PARAMS: Dictionary = {
     "editor.search_settings": {"required": ["query"], "optional": []},
     "editor.get_setting": {"required": ["name"], "optional": []},
     "editor.set_setting": {"required": ["name", "value"], "optional": []},
+    "editor.get_class_icons": {"required": [], "optional": ["classes"]},
+    "scene.list": {"required": [], "optional": []},
+    "scene.open": {"required": ["path"], "optional": []},
+    "scene.create": {"required": ["path", "rootType"], "optional": ["rootName"]},
+    "scene.save": {"required": [], "optional": []},
+    "scene.save_as": {"required": ["path"], "optional": []},
+    "scene.reload": {"required": [], "optional": []},
+    "scene.get_tree": {"required": [], "optional": ["root", "depth", "limit"]},
+    "node.create": {"required": ["parent", "type", "name"], "optional": ["index", "scene"]},
+    "node.create_nodes": {"required": ["nodes"], "optional": ["scene"]},
+    "node.instantiate": {"required": ["parent", "path"], "optional": ["name", "index", "scene"]},
+    "node.duplicate": {"required": ["node"], "optional": ["name", "scene"]},
+    "node.rename": {"required": ["node", "name"], "optional": ["scene"]},
+    "node.reparent": {"required": ["node", "newParent"], "optional": ["index", "scene"]},
+    "node.change_type": {"required": ["node", "type"], "optional": ["scene"]},
+    "node.delete": {"required": ["node"], "optional": ["scene"]},
+    "node.set_property": {"required": ["node", "property", "value"], "optional": ["scene"]},
+    "node.set_properties": {"required": ["properties"], "optional": ["scene"]},
+    "node.add_to_group": {"required": ["node", "group"], "optional": []},
+    "node.remove_from_group": {"required": ["node", "group"], "optional": []},
+    "node.connect_signal": {"required": ["node", "signal", "method"], "optional": ["target", "binds", "deferred", "oneShot"]},
+    "node.disconnect_signal": {"required": ["node", "signal", "method"], "optional": ["target", "binds"]},
+    "node.set_cells": {"required": ["node", "cells"], "optional": []},
+    "node.get_cells": {"required": ["node"], "optional": ["limit"]},
+    "node.inspect": {"required": ["node"], "optional": ["properties", "scene"]},
     "resource.rescan": {"required": [], "optional": ["path"]},
     "resource.create_tileset": {"required": ["path", "texture"], "optional": ["tileSize", "tiles", "solid"]},
     "resource.create_texture": {"required": ["path", "size"], "optional": ["background", "rects"]},
     "resource.create_shape": {"required": ["path", "shapeType"], "optional": ["size", "radius", "height", "points"]},
     "resource.describe_tileset": {"required": ["path"], "optional": []},
+    "session.heartbeat": {"required": [], "optional": []},
     "runtime.run": {"required": [], "optional": ["scene", "playArgs"]},
     "runtime.stop": {"required": [], "optional": []},
     "runtime.restart": {"required": [], "optional": []},
@@ -81,10 +87,10 @@ const COMMAND_PARAMS: Dictionary = {
     "runtime.inspect_node": {"required": ["path"], "optional": ["properties"]},
     "runtime.input": {"required": ["events"], "optional": []},
     "runtime.capture": {"required": [], "optional": ["source"]},
+    "runtime.get_monitors": {"required": [], "optional": ["monitors"]},
     "runtime.wait": {"required": [], "optional": ["frames", "ms"]},
     "runtime.pause": {"required": [], "optional": []},
     "runtime.resume": {"required": [], "optional": []},
-    "runtime.get_monitors": {"required": [], "optional": ["monitors"]},
 }
 # GENERATED-END command-params
 
@@ -271,17 +277,18 @@ static func decode_input_events(raw: Variant) -> Dictionary:
     return {"ok": true, "events": events, "message": ""}
 
 
-## Holds one request to the parameters its command declares, for the commands that declare any.
+## Holds one request to the parameters its command declares.
 ##
-## A command with no entry in `COMMAND_PARAMS` is not checked here — absence is "not declared yet",
-## never "takes nothing" — so adding a command cannot silently start refusing its own parameters.
+## Every answered command has a row, generated from the catalogue, so a command with none is one
+## nothing answers: refused by name rather than waved through to a dispatch table that would refuse
+## it a step later anyway.
 ##
 ## Names only. What a value has to *be* stays with the handler and with `Protocol.decode`, which is
 ## where the engine's own answer lives; this catches the request that named something no handler
 ## reads, which used to reach a handler and be quietly ignored.
 static func check_declared(command: String, params: Dictionary) -> Dictionary:
     if not COMMAND_PARAMS.has(command):
-        return {}
+        return unknown_command_error(command)
     var declared: Dictionary = COMMAND_PARAMS[command]
     var required: Array = declared["required"]
     var accepted: Array = required + (declared["optional"] as Array)

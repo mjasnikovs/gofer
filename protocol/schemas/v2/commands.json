@@ -1,5 +1,6 @@
 {
     "$comment": "The catalogue of every command the addon answers, and the addon method that answers it. Hand-written: this is the specification. `scripts/generate-command-surface.mjs` emits the addon's dispatch table, its runtime routing list and the renderer's command names from it, so a command that is not here is unreachable and unspellable. Which of these mutate the edited scene is request.schema.json's to say, and only its.",
+    "$paramsComment": "A command params.json does not describe — one no AI tool operation reaches — names its parameters here instead, so `Params.check_declared` has a row for it. Every command needs one: a command with no row is refused as unknown, not waved through. A command params.json already describes must not repeat itself here.",
     "$runtimeComment": "The commands the addon hands to the running game rather than answering itself. They are listed apart because they have no handler method: `_handle_runtime_request` routes each one, some to the game over the debugger bridge and some to the editor. Before they were listed here the addon carried them twice — once to decide what to route and once to route it — and neither list was reconciled with anything.",
     "runtimeCommands": [
         "runtime.run",
@@ -22,7 +23,8 @@
         },
         {
             "command": "session.cancel",
-            "handler": "_session_cancel"
+            "handler": "_session_cancel",
+            "params": {"required": [], "optional": ["requestId"]}
         },
         {
             "command": "session.quit",
@@ -129,7 +131,8 @@
         },
         {
             "command": "editor.get_class_icons",
-            "handler": "_editor_class_icons"
+            "handler": "_editor_class_icons",
+            "params": {"required": [], "optional": ["classes"]}
         },
         {
             "command": "scene.list",

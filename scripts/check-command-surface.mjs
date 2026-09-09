@@ -121,6 +121,41 @@ async function schemaCommandPattern() {
     return {path, pattern: new RegExp(pattern, 'u')}
 }
 
+/**
+ * The domains the wire pattern lets through, so it cannot be widened past what anything answers.
+ *
+ * The pattern is the outermost gate: a prefix listed there and bound by nothing is a family of
+ * command names the addon accepts off the wire and then has to refuse itself.
+ */
+async function schemaCommandPrefixes() {
+    const {path, pattern} = await schemaCommandPattern()
+    const group = pattern.source.match(/\^\(([a-z|]+)\)\\\./u)?.[1]
+    if (!group) throw new Error(`${path} no longer names the command domains it accepts`)
+    return {path: `${path} command domains`, names: group.split('|').sort()}
+}
+
+async function rustCommandDomains() {
+    const path = 'src-tauri/src/protocol_v2.rs'
+    const text = await read(path)
+    const declared = text.match(/pub const COMMAND_DOMAINS: \[&str; (\d+)\] = \[/u)
+    if (!declared) throw new Error(`${path} no longer declares COMMAND_DOMAINS`)
+    const names = quoted(slice(text, path, declared[0], '];')).sort()
+    if (names.length !== Number(declared[1]))
+        throw new Error(
+            `${path} declares COMMAND_DOMAINS as ${declared[1]} entries but lists ${String(names.length)}`
+        )
+    return {path: `${path} COMMAND_DOMAINS`, names}
+}
+
+async function addonCommandParams() {
+    const path = 'src-tauri/addon/params.gd'
+    const body = slice(await read(path), path, 'const COMMAND_PARAMS: Dictionary = {', '\n}')
+    return {
+        path: `${path} COMMAND_PARAMS`,
+        names: [...body.matchAll(/^ {4}"([a-z][a-z0-9_]*\.[a-z][a-z0-9_]*)":/gmu)].map(m => m[1])
+    }
+}
+
 async function rustMutating() {
     const path = 'src-tauri/src/protocol_v2.rs'
     const text = await read(path)
@@ -510,6 +545,27 @@ checkAgreement('Godot command', [catalogued, dispatch])
 const runtime = [await catalogueRuntimeCommands(), await addonRuntimeDispatch()]
 for (const surface of runtime) checkForDuplicates(surface)
 checkAgreement('runtime Godot command', runtime)
+
+const declaredParams = await addonCommandParams()
+checkForDuplicates(declaredParams)
+checkAgreement('Godot command parameter row', [
+    {
+        path: `${catalogued.path} and its runtime commands`,
+        names: [...catalogued.names, ...runtime[0].names]
+    },
+    declaredParams
+])
+
+checkAgreement('Godot command domain', [
+    await schemaCommandPrefixes(),
+    await rustCommandDomains(),
+    {
+        path: `${catalogued.path} command domains`,
+        names: [
+            ...new Set([...catalogued.names, ...runtime[0].names].map(name => name.split('.')[0]))
+        ].sort()
+    }
+])
 
 for (const {path, command, error} of await rustCommandFailures()) {
     if (error === 'String')

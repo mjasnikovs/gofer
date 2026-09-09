@@ -12,9 +12,10 @@
 //! tileset. The frame is proven twice: the router hands the worker a PNG, and the request body of
 //! the following model turn carries it as an image the model can actually see.
 //!
-//! One catalog domain is deliberately absent. `godot_docs_search` retrieves through the gofer-rag
+//! `godot_docs_search` is the one domain no turn here drives. It retrieves through the gofer-rag
 //! sidecar against downloaded embedding models, and a suite that has to fetch a model before it
-//! can start is not one anybody runs; its own tests stand in `rag.rs`.
+//! can start is not one anybody runs; its own tests stand in `rag.rs`. What it gets instead is the
+//! route, in [`every_operation_no_turn_has_ever_used_still_answers`], against the fixture worker.
 //!
 //! Gated behind the `godot-acceptance` feature so the fast gate needs no engine.
 
@@ -851,6 +852,17 @@ fn a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits() {
 
     call("godot_debug", json!({"ops": [{"op": "step_in"}]}))
         .expect("step_in answers on a stopped debuggee");
+    let stepped = call(
+        "godot_debug",
+        json!({"ops": [{"op": "await_stop", "timeoutMs": 60000}]}),
+    )
+    .expect("the step lands somewhere");
+    assert!(
+        !stepped["ops"][0]["result"]["stopped"].is_null(),
+        "step_over needs a debuggee that is stopped again: {stepped}"
+    );
+    call("godot_debug", json!({"ops": [{"op": "step_over"}]}))
+        .expect("step_over answers on a stopped debuggee");
 
     call("godot_debug", json!({"ops": [{"op": "continue"}]})).expect("the game runs on");
     let after = call(
@@ -889,6 +901,18 @@ fn every_operation_no_turn_has_ever_used_still_answers() {
     let storage = crate::storage::ProjectStorage::open(data.path(), &session.worktree)
         .expect("open project storage");
     app.manage(crate::storage::StorageSlot::new(Ok(storage)));
+    // SAFETY: the acceptance runner gives each test its own process.
+    unsafe {
+        std::env::set_var("GOFER_RAG_CACHE_DIR", data.path().join("rag-cache"));
+        std::env::set_var(
+            "GOFER_RAG_RETRIEVE_WORKER",
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("fixtures")
+                .join("rag")
+                .join("retrieve-worker.mjs"),
+        );
+    }
 
     let call = |tool: &str, params: Value| {
         ai_tools::dispatch(
@@ -967,6 +991,49 @@ fn every_operation_no_turn_has_ever_used_still_answers() {
     .expect("something to undo");
     call("godot_session", json!({"ops": [{"op": "undo"}]})).expect("undo");
     call("godot_session", json!({"ops": [{"op": "redo"}]})).expect("redo");
+
+    call("godot_session", json!({"ops": [{"op": "status"}]})).expect("status");
+    call("godot_scene", json!({"ops": [{"op": "list"}]})).expect("list the scenes");
+    call(
+        "godot_script",
+        json!({"ops": [{"op": "list", "under": "scripts"}]}),
+    )
+    .expect("list the scripts");
+    call("godot_debug", json!({"ops": [{"op": "status"}]}))
+        .expect("the adapter reports its capabilities");
+    call(
+        "godot_docs_search",
+        json!({"ops": [{"op": "ask", "question": "What does _process do?"}]}),
+    )
+    .expect("ask the manual");
+
+    // Attach takes a game the adapter did not launch itself, and this session has none. What
+    // proves the route is the adapter's own answer about that: an op that never reached Godot
+    // could not have produced it.
+    let attaching = call("godot_debug", json!({"ops": [{"op": "attach"}]}));
+    if let Err(failure) = &attaching {
+        assert_eq!(failure.code, "dap_server_error", "{}", failure.message);
+        assert!(
+            failure.message.contains("not_running"),
+            "the adapter must be the one refusing: {}",
+            failure.message
+        );
+    }
+
+    let _gate = crate::approvals::serialize_gate_tests();
+    crate::approvals::open();
+    let approving = crate::godot_journey_acceptance::approve_when_asked();
+    call(
+        "godot_resource",
+        json!({"ops": [{"op": "move", "from": BROKEN_PATH, "to": "scripts/broken_moved.gd"}]}),
+    )
+    .expect("move a file inside the worktree");
+    assert_eq!(
+        approving.join().expect("the approval responder"),
+        1,
+        "moving a file is gated, so the move must have been approved rather than waved through"
+    );
+    assert!(session.worktree.join("scripts/broken_moved.gd").exists());
 }
 
 /// The first mutation of a session needs no read before it.

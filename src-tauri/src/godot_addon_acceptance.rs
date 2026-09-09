@@ -1000,6 +1000,34 @@ fn the_addon_answers_a_cancellation() {
     );
 }
 
+/// The parameter guard reaches the runtime commands, and every command has a row to be held to.
+///
+/// A `runtime.*` request returns into `_handle_runtime_request` before `_dispatch_command`, which
+/// is where the guard was: all twelve runtime rows in `COMMAND_PARAMS` were dead, and a key no
+/// handler reads went to the game as silence. The second half is the other end of the same gap —
+/// a command with no row used to pass the guard rather than be refused by it.
+#[test]
+fn a_runtime_command_is_held_to_the_names_it_declares() {
+    let session = Session::start();
+
+    let refused = session.error("runtime.get_state", json!({"running": true}), None);
+    assert!(
+        refused.starts_with("unknown_param") && refused.contains("running"),
+        "the refusal must name the parameter: {refused}"
+    );
+    assert_eq!(
+        session.call("runtime.get_state", json!({}))["running"],
+        false,
+        "the command itself still answers"
+    );
+
+    let unlisted = session.error("session.not_a_command", json!({}), None);
+    assert!(
+        unlisted.starts_with("unknown_command"),
+        "a command with no row is refused, not waved through: {unlisted}"
+    );
+}
+
 /// A game whose main scene spins its own thread the moment it loads. The process is up and the
 /// editor is playing it, so the launch is not over; nothing will ever come back from it, so the
 /// launch is not finished either. That is a parked request that no editor state can retract.

@@ -144,7 +144,7 @@ async function catalogue() {
         return {file, source: sources.get(file)}
     }
     return await Promise.all(
-        commands.map(async ({command, handler, module}) => {
+        commands.map(async ({command, handler, module, params}) => {
             const {file, source} = await sourceOf(module)
             const declared = module ? 'static func' : 'func'
             const signature = source.match(
@@ -158,6 +158,7 @@ async function catalogue() {
                 command,
                 handler,
                 module,
+                params,
                 takesParams: signature.trim().length > 0
             }
         })
@@ -471,24 +472,44 @@ function rustScope(scope) {
     return `Sharing::${scope[0].toUpperCase()}${scope.slice(1)}`
 }
 
-function gdCommandParams(operations) {
-    const rows = operations
-        .filter(entry => entry.command)
-        .map(entry => {
-            const carried = (entry.params ?? []).filter(
-                param => param.name !== 'expectedRevision' && param.name !== 'timeoutMs'
-            )
-            const required = carried
-                .filter(param => param.required && !param.hidden)
-                .map(param => param.name)
-            const optional = [
-                ...carried
-                    .filter(param => !param.required || param.hidden)
-                    .map(param => param.name),
-                ...(entry.accepts ?? [])
-            ]
-            const list = names => `[${names.map(name => `"${name}"`).join(', ')}]`
-            return `    "${entry.command}": {"required": ${list(required)}, "optional": ${list(optional)}},\n`
+function declaredByParams(entry) {
+    const carried = (entry.params ?? []).filter(
+        param => param.name !== 'expectedRevision' && param.name !== 'timeoutMs'
+    )
+    return {
+        required: carried.filter(param => param.required && !param.hidden).map(param => param.name),
+        optional: [
+            ...carried.filter(param => !param.required || param.hidden).map(param => param.name),
+            ...(entry.accepts ?? [])
+        ]
+    }
+}
+
+/**
+ * The names every command accepts, one row per command the addon answers.
+ *
+ * Every command gets a row, including the ones no AI tool operation reaches: the guard refuses a
+ * command it has no row for, so a missing row would take a working command off the wire rather
+ * than quietly waive its check.
+ */
+function gdCommandParams(operations, commands, runtime) {
+    const byCommand = new Map(
+        operations.filter(entry => entry.command).map(entry => [entry.command, entry])
+    )
+    const list = names => `[${names.map(name => `"${name}"`).join(', ')}]`
+    const rows = [...commands.map(entry => entry.command), ...runtime]
+        .map(command => {
+            const operation = byCommand.get(command)
+            const own = commands.find(entry => entry.command === command)?.params
+            if (operation && own)
+                throw new Error(
+                    `protocol/schemas/v2/commands.json declares parameters for ${command}, which params.json already describes`
+                )
+            const declared =
+                operation ?
+                    declaredByParams(operation)
+                :   {required: own?.required ?? [], optional: own?.optional ?? []}
+            return `    "${command}": {"required": ${list(declared.required)}, "optional": ${list(declared.optional)}},\n`
         })
         .join('')
     return `const COMMAND_PARAMS: Dictionary = {\n${rows}}\n`
@@ -849,7 +870,9 @@ export async function generateSurfaces() {
         {
             path: 'src-tauri/addon/params.gd',
             comment: '#',
-            regions: [{name: 'command-params', body: gdCommandParams(parameters)}]
+            regions: [
+                {name: 'command-params', body: gdCommandParams(parameters, commands, runtime)}
+            ]
         },
         {
             path: 'src-tauri/src/protocol_v2.rs',
