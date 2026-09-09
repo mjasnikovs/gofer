@@ -28,7 +28,7 @@
             "becomes": {
                 "limit": 50
             },
-            "repairedBy": "router"
+            "repairedBy": "schema"
         },
         {
             "why": "a key that swallowed its own value, concatenated and said twice",
@@ -40,7 +40,7 @@
             "becomes": {
                 "minSeverity": "warning"
             },
-            "repairedBy": "router"
+            "repairedBy": "schema"
         },
         {
             "why": "a key that swallowed a whole JSON value",
@@ -56,7 +56,7 @@
                 "shapeType": "RectangleShape2D",
                 "size": [16, 16]
             },
-            "repairedBy": "router"
+            "repairedBy": "schema"
         },
         {
             "why": "the same pair torn twice, the second one saying nothing new",
@@ -72,7 +72,7 @@
                 "shapeType": "RectangleShape2D",
                 "size": [640, 16]
             },
-            "repairedBy": "router"
+            "repairedBy": "schema"
         },
         {
             "why": "a torn key whose tail is a value with the tear's trailing comma behind it",
@@ -86,7 +86,7 @@
                 "limit": 40,
                 "source": "editor"
             },
-            "repairedBy": "router"
+            "repairedBy": "schema"
         },
         {
             "why": "a torn key whose tail is a value with the tear's trailing brackets behind it",
@@ -100,7 +100,7 @@
                 "limit": 60,
                 "source": "editor"
             },
-            "repairedBy": "router"
+            "repairedBy": "schema"
         },
         {
             "why": "wreckage over a call that is already complete without it",
@@ -115,7 +115,7 @@
                 "parent": "/Main",
                 "path": "res://scenes/brick.tscn"
             },
-            "repairedBy": "router"
+            "repairedBy": "schema"
         },
         {
             "why": "two wrong keys that read as one parameter and hold the same value",
@@ -132,7 +132,7 @@
                 "shapeType": "RectangleShape2D",
                 "size": [16, 16]
             },
-            "repairedBy": "router"
+            "repairedBy": "schema"
         },
         {
             "why": "a list handed over as the JSON text of itself",
@@ -275,7 +275,7 @@
                 ],
                 "expectedRevision": 3
             },
-            "repairedBy": "router"
+            "repairedBy": "schema"
         }
     ]
 }

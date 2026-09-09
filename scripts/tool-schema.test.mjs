@@ -70,7 +70,7 @@ test('every recorded ops shape validates against the advertised schema', async (
     assert.ok(checked > 50, 'the fixture lost its cases')
 })
 
-test('the entry schema types every parameter and leaves the rest to the router', () => {
+test('the entry schema types every parameter and pins it to its own operation', () => {
     const domain = [
         {
             op: 'save',
@@ -102,19 +102,24 @@ test('the entry schema types every parameter and leaves the rest to the router',
             call: async () => ({})
         }
     )
-    const entry = tool.parameters.properties.ops.items
+    const [save, diagnostics] = tool.parameters.properties.ops.items.oneOf
 
-    assert.deepEqual(entry.properties.text, {type: 'string'})
-    assert.deepEqual(entry.properties.timeoutMs, {type: 'integer'})
-    assert.deepEqual(entry.properties.expectedHash, {
+    assert.deepEqual(save.properties.text, {type: 'string'})
+    assert.deepEqual(save.properties.expectedHash, {
         type: 'string',
         pattern: '^[0-9a-f]{64}$'
     })
-    assert.deepEqual(entry.properties.path, {anyOf: [{type: 'string'}, {type: 'array'}]})
+    assert.deepEqual(save.properties.path, {type: 'string'})
+    assert.deepEqual(save.properties.op.const, 'save')
+    assert.deepEqual(save.required, ['op', 'path', 'text'])
+    assert.equal(save.additionalProperties, false)
 
-    assert.deepEqual(entry.required, ['op'])
-    assert.deepEqual(entry.properties.op.enum, ['save', 'diagnostics'])
-    assert.equal(entry.additionalProperties, true)
+    assert.deepEqual(diagnostics.properties.timeoutMs, {type: 'integer'})
+    assert.deepEqual(diagnostics.properties.path, {anyOf: [{type: 'string'}, {type: 'array'}]})
+    assert.deepEqual(diagnostics.required, ['op', 'path'])
+
+    // save's own shape for `path`, not the union of both operations' shapes
+    assert.equal(save.properties.timeoutMs, undefined)
 })
 
 test('the signature is a leading space and a shape, or nothing at all', () => {
@@ -140,4 +145,55 @@ test('the signature is a leading space and a shape, or nothing at all', () => {
     )
     assert.match(tool.description, /- save \{path\?: text\}: Saves it\./u)
     assert.match(tool.description, /- reload: Reloads it\./u)
+})
+
+test('the entry schema refuses an operation missing a parameter the router requires', async () => {
+    const tools = createGodotTools(await declaredDomains(), {call: async () => ({})})
+    const validate = new Ajv({strict: false, allErrors: true})
+    const admitted = []
+    for (const domain of await declaredDomains()) {
+        const tool = tools.find(candidate => candidate.name === domain.name)
+        const check = validate.compile(tool.parameters)
+        for (const operation of domain.operations) {
+            const required = (operation.params ?? []).filter(param => param.required)
+            if (required.length === 0) continue
+            if (check({ops: [{op: operation.op}]})) admitted.push(`${domain.name}.${operation.op}`)
+        }
+    }
+    assert.deepEqual(
+        admitted,
+        [],
+        `these operations advertise their parameters as optional, so a bare {"op": …} is a legal call the router then refuses: ${admitted.join(', ')}`
+    )
+})
+
+test('the entry schema refuses a key that belongs to another operation', async () => {
+    const tools = createGodotTools(await declaredDomains(), {call: async () => ({})})
+    const validate = new Ajv({strict: false, allErrors: true})
+    const admitted = []
+    for (const domain of await declaredDomains()) {
+        const tool = tools.find(candidate => candidate.name === domain.name)
+        const check = validate.compile(tool.parameters)
+        for (const operation of domain.operations) {
+            const mine = new Set((operation.params ?? []).map(param => param.name))
+            const theirs = domain.operations
+                .filter(other => other.op !== operation.op)
+                .flatMap(other => (other.params ?? []).map(param => param.name))
+                .find(name => !mine.has(name))
+            if (!theirs) continue
+            const entry = Object.fromEntries([
+                ['op', operation.op],
+                ...(operation.params ?? [])
+                    .filter(param => param.required)
+                    .map(param => [param.name, 'x']),
+                [theirs, 'x']
+            ])
+            if (check({ops: [entry]})) admitted.push(`${domain.name}.${operation.op}+${theirs}`)
+        }
+    }
+    assert.deepEqual(
+        admitted,
+        [],
+        `these operations admit a parameter that is not theirs: ${admitted.slice(0, 8).join(', ')} (${admitted.length} total)`
+    )
 })

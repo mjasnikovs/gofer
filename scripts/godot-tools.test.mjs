@@ -17,10 +17,10 @@ test('domain tools carry the router catalog and forward every call', async () =>
         tools.map(tool => tool.name),
         ['godot_scene', 'godot_runtime', 'godot_resource', 'godot_docs_search']
     )
-    assert.deepEqual(tools[0].parameters.properties.ops.items.properties.op.enum, [
-        'get_tree',
-        'save'
-    ])
+    assert.deepEqual(
+        tools[0].parameters.properties.ops.items.oneOf.map(branch => branch.properties.op.const),
+        ['get_tree', 'save']
+    )
     assert.match(tools[0].description, /get_tree: Returns the edited scene hierarchy\./u)
     const result = await tools[0].execute(
         'call-1',

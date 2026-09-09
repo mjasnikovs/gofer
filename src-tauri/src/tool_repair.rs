@@ -4544,7 +4544,9 @@ mod tests {
     ///
     /// Both halves of every row are asserted, here and there:
     ///
-    /// - `router` and `both`: this engine turns `wrote` into `becomes`.
+    /// - `router`, `schema` and `both`: this engine turns `wrote` into `becomes`. A `schema` row
+    ///   no longer reaches it from a provider that honours the generated schema, which closed each
+    ///   operation's entry; the repair is kept and asserted so the shape stays understood.
     /// - `worker`: this engine leaves `wrote` alone, because the entry never arrives — the
     ///   generated schema for a nested entry and for a tagged value is closed, so the agent loop
     ///   refuses it first, and the worker is the only layer that can answer it.
@@ -4570,7 +4572,7 @@ mod tests {
             let why = row["why"].as_str().expect("a reason");
             let owner = row["repairedBy"].as_str().expect("an engine");
             assert!(
-                matches!(owner, "both" | "router" | "worker"),
+                matches!(owner, "both" | "router" | "schema" | "worker"),
                 "{why}: {owner} is not an engine"
             );
             assert!(

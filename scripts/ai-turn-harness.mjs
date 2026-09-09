@@ -112,12 +112,24 @@ export const catalog = [
     {
         name: 'godot_resource',
         description: 'Project resources.',
-        operations: [{op: 'delete', summary: 'Deletes a resource. Asks the user first.'}]
+        operations: [
+            {
+                op: 'delete',
+                summary: 'Deletes a resource. Asks the user first.',
+                params: [{name: 'path', kind: 'text', required: true, entry: []}]
+            }
+        ]
     },
     {
         name: 'godot_docs_search',
         description: 'The Godot documentation on this machine.',
-        operations: [{op: 'search', summary: 'Retrieves ranked passages: {question}.'}]
+        operations: [
+            {
+                op: 'search',
+                summary: 'Retrieves ranked passages: {question}.',
+                params: [{name: 'question', kind: 'text', required: true, entry: []}]
+            }
+        ]
     }
 ]
 

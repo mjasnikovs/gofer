@@ -133,6 +133,14 @@ test("the line between the two engines is the schema's, not a column in the fixt
             'router',
             `${row.why}: the schema refuses this, so the router never sees it to repair it`
         )
+        continue
+    }
+    for (const row of fixture.repairs.filter(one => one.repairedBy === 'schema')) {
+        const tool = tools.find(one => one.name === row.tool)
+        assert.ok(
+            !schemaAccepts(tool, {ops: [{op: row.op, ...row.wrote}]}),
+            `${row.why}: the schema admits this again, so the router has to own it once more`
+        )
     }
 })
 
@@ -1191,14 +1199,14 @@ test('every repair in the shared corpus is made by the engine that owns it', asy
             `${row.tool} has no ${row.op} operation`
         )
         assert.ok(
-            ['both', 'router', 'worker'].includes(row.repairedBy),
+            ['both', 'router', 'schema', 'worker'].includes(row.repairedBy),
             `${row.why}: ${row.repairedBy} is not an engine`
         )
         const {op, ...ran} = normalizeToolCalls(operations, {
             ops: [{op: row.op, ...row.wrote}]
         }).ops[0]
         assert.equal(op, row.op, row.why)
-        const wanted = row.repairedBy === 'router' ? row.wrote : row.becomes
+        const wanted = ['router', 'schema'].includes(row.repairedBy) ? row.wrote : row.becomes
         assert.deepEqual(ran, wanted, `${row.tool} ${row.op}: ${row.why}`)
     }
 })
@@ -1217,6 +1225,8 @@ test('what the worker leaves for the router still passes the schema', async () =
     )
 
     for (const row of corpus.repairs) {
+        // A shape the schema refuses outright is written by neither engine's rules.
+        if (row.repairedBy === 'schema') continue
         const tool = tools.get(row.tool)
         assert.ok(tool, `${row.tool} is not a tool`)
         const validate = ajv.compile(tool.parameters)

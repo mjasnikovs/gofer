@@ -61,41 +61,22 @@ export function jsonSchemaOfParams(params) {
     }
 }
 
+// One branch per op rather than every op's parameters merged into one open object: the merged
+// shape made a bare {op} and any key at all legal, so a constrained sampler wrote keys that
+// swallowed their value ("nameUnit1") and the router had to repair what it should never receive.
 export function jsonSchemaOfEntry(operations) {
-    const byName = new Map()
-    const described = new Map()
-    for (const operation of operations) {
-        if (!Array.isArray(operation.params)) continue
-        for (const param of operation.params) {
-            const shapes = byName.get(param.name) ?? []
-            const shape = jsonSchemaOfParam(param)
-            const {anyOf, description, ...rest} = shape
-            for (const one of anyOf ?? [rest]) {
-                const already = shapes.some(seen => JSON.stringify(seen) === JSON.stringify(one))
-                if (!already) shapes.push(one)
-            }
-            byName.set(param.name, shapes)
-            if (description) described.set(param.name, description)
-        }
-    }
-    const properties = Object.fromEntries(
-        [...byName].map(([name, shapes]) => {
-            const merged = shapes.length === 1 ? shapes[0] : {anyOf: shapes}
-            const description = described.get(name)
-            return [name, description ? {...merged, description} : merged]
-        })
-    )
     return {
-        type: 'object',
-        properties: {
-            op: {
-                type: 'string',
-                enum: operations.map(operation => operation.op),
-                description: 'The operation this entry runs.'
-            },
-            ...properties
-        },
-        required: ['op'],
-        additionalProperties: true
+        oneOf: operations.map(operation => {
+            const body = jsonSchemaOfParams(operation.params ?? [])
+            return {
+                type: 'object',
+                properties: {
+                    op: {const: operation.op, description: operation.summary},
+                    ...body.properties
+                },
+                required: ['op', ...body.required],
+                additionalProperties: false
+            }
+        })
     }
 }
