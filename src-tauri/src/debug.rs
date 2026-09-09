@@ -490,7 +490,7 @@ fn saying_what_has_not_been_reached(error: DapError, asked: Option<u64>) -> DapE
         format!(
             " The breakpoints set are {}. A breakpoint fires when its line runs, so a line inside \
              a function the game only reaches on a key press, a signal or a collision needs \
-             that to happen before any wait can return — drive it with godot_runtime input, \
+             that to happen before any wait can return — drive it with runtime.input, \
              or watch a line that runs every frame, and wait again.",
             armed.join(", ")
         )
@@ -1255,7 +1255,7 @@ mod tests {
             "the breakpoint is named with its line: {named:?}"
         );
         assert!(
-            named.message.contains("godot_runtime input"),
+            named.message.contains("runtime.input"),
             "and what reaches a line the game does not run by itself: {named:?}"
         );
 

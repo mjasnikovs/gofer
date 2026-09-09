@@ -357,7 +357,7 @@ const WEB_SEARCH_DESCRIPTION =
     + 'Then call web_fetch on the result you want to read. This returns snippets, not pages.\n'
     + '\n'
     + 'Do not reach for it when:\n'
-    + '- the question is about Godot itself — use godot_docs_search, which holds the real 4.7 docs\n'
+    + '- the question is about Godot itself — use docs_search.search, which holds the real 4.7 docs\n'
     + '- the question is about this project’s own files — use the subagent tool'
 
 export const WEB_SEARCH_PROBE_ANSWER = 'web-search-reachable'

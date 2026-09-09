@@ -442,7 +442,7 @@ test('runs the Pi agent tool loop and streams tool lifecycle events', async cont
 test('a refused tool call reaches the model as an error result', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
-    const server = startToolCallingServer('godot_scene', {op: 'save', params: {}})
+    const server = startToolCallingServer('godot', {op: 'scene.save', params: {}})
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
     context.after(() => server.close())
     const port = server.address().port
@@ -547,14 +547,14 @@ test('the system prompt reaches the model as it arrived, and this turn’s own d
     })
 })
 
-test('parallel domain calls are answered out of order without crossing results', async context => {
+test('two calls to the one editor tool never cross their results', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
     const mock = startScriptedServer([
         {
             calls: [
-                {name: 'godot_docs_search', args: {op: 'search', question: 'signals'}},
-                {name: 'godot_docs_search', args: {op: 'search', question: 'tweens'}}
+                {name: 'godot', args: {op: 'docs_search.search', question: 'signals'}},
+                {name: 'godot', args: {op: 'docs_search.search', question: 'tweens'}}
             ]
         },
         {text: 'Both answered'}
@@ -564,14 +564,12 @@ test('parallel domain calls are answered out of order without crossing results',
     const host = createToolHost(call => {
         if (isProbe(call)) return host.deliver(probeResult(call))
         held.push(call)
-        if (held.length < 2) return
-        for (const request of [...held].reverse())
-            host.deliver({
-                type: 'tool-result',
-                id: request.id,
-                ok: true,
-                result: {answered: request.params.ops[0].question}
-            })
+        host.deliver({
+            type: 'tool-result',
+            id: call.id,
+            ok: true,
+            result: {answered: call.params.ops[0].question}
+        })
     })
     const events = []
 
@@ -604,8 +602,8 @@ test('two editor calls in one message do not overlap', async context => {
     const mock = startScriptedServer([
         {
             calls: [
-                {name: 'godot_runtime', args: {op: 'capture', params: {}}},
-                {name: 'godot_scene', args: {op: 'save', params: {}}}
+                {name: 'godot', args: {op: 'runtime.capture', params: {}}},
+                {name: 'godot', args: {op: 'scene.save', params: {}}}
             ]
         },
         {text: 'Stopped, then saved'}
@@ -636,7 +634,7 @@ test('two editor calls in one message do not overlap', async context => {
 
     assert.equal(completion.text, 'Stopped, then saved')
     assert.equal(overlapped, false, 'two editor calls were in flight at once')
-    assert.deepEqual(order, ['capture', 'save'])
+    assert.deepEqual(order, ['runtime.capture', 'scene.save'])
     assert.equal(host.pendingCount, 0)
 })
 
@@ -644,7 +642,7 @@ test('aborting a turn cancels the domain tool call it is waiting on', async cont
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
     const mock = startScriptedServer([
-        {calls: [{name: 'godot_scene', args: {op: 'get_tree', params: {}}}]}
+        {calls: [{name: 'godot', args: {op: 'scene.get_tree', params: {}}}]}
     ])
     const url = await baseUrl(context, mock.server)
     let notifyCalled
@@ -679,7 +677,7 @@ test('a denied approval reaches the model as approval_denied without failing the
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
     const mock = startScriptedServer([
-        {calls: [{name: 'godot_resource', args: {op: 'delete', params: {path: 'main.tscn'}}}]},
+        {calls: [{name: 'godot', args: {op: 'resource.delete', params: {path: 'main.tscn'}}}]},
         {text: 'I did not delete it'}
     ])
     const url = await baseUrl(context, mock.server)
@@ -721,7 +719,7 @@ test('a captured frame reaches the model as an image and not as base64 in the to
     context.after(workspace.remove)
     const data = 'iVBORw0KGgoAAAANSUhEUg=='
     const mock = startScriptedServer([
-        {calls: [{name: 'godot_runtime', args: {op: 'capture', params: {}}}]},
+        {calls: [{name: 'godot', args: {op: 'runtime.capture', params: {}}}]},
         {text: 'The label changed'}
     ])
     const url = await baseUrl(context, mock.server)
@@ -2603,19 +2601,19 @@ test('an operation refused for naming no parameters is gone from the next reques
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
     const mock = startScriptedServer([
-        {calls: [{name: 'godot_scene', args: {ops: [{op: 'get_tree'}]}}]},
-        {calls: [{name: 'godot_scene', args: {ops: [{op: 'save'}]}}]},
+        {calls: [{name: 'godot', args: {ops: [{op: 'scene.get_tree'}]}}]},
+        {calls: [{name: 'godot', args: {ops: [{op: 'scene.save'}]}}]},
         {text: 'Saved'}
     ])
     const url = await baseUrl(context, mock.server)
     const host = createToolHost(call => {
         if (isProbe(call)) return host.deliver(probeResult(call))
-        if (call.params.ops[0].op === 'get_tree')
+        if (call.params.ops[0].op === 'scene.get_tree')
             return host.deliver({
                 type: 'tool-result',
                 id: call.id,
                 ok: false,
-                error: {code: 'missing_param', message: 'godot_scene get_tree requires `path`.'}
+                error: {code: 'missing_param', message: 'scene.get_tree requires `path`.'}
             })
         host.deliver({type: 'tool-result', id: call.id, ok: true, result: {saved: true}})
     })

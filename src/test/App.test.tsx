@@ -726,8 +726,8 @@ describe('Workspace', () => {
                     {
                         type: 'tool-start',
                         id: 'tool-1',
-                        name: 'godot_session',
-                        target: 'start',
+                        name: 'godot',
+                        target: 'session.start',
                         startedAt: 1
                     },
                     {
@@ -757,7 +757,7 @@ describe('Workspace', () => {
         )
 
         await flush()
-        expect(screen.getByText('godot_session')).toBeInTheDocument()
+        expect(screen.getByText('godot')).toBeInTheDocument()
         expect(
             screen.getByRole('status', {name: 'Working'}),
             'a turn between steps looks finished'
@@ -790,8 +790,8 @@ describe('Workspace', () => {
                     event: {
                         type: 'tool-start',
                         id: 'tool-1',
-                        name: 'godot_scene',
-                        target: 'create',
+                        name: 'godot',
+                        target: 'scene.create',
                         startedAt: 1
                     }
                 })
@@ -808,7 +808,7 @@ describe('Workspace', () => {
         )
 
         await flush()
-        expect(screen.getByText('godot_scene')).toBeInTheDocument()
+        expect(screen.getByText('godot')).toBeInTheDocument()
         expect(
             screen.queryByRole('status', {name: 'Working'}),
             'a running call is indicated twice'

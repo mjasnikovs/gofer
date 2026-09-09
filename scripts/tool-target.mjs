@@ -18,7 +18,7 @@ function flatten(value) {
 export function toolTarget(name, args) {
     const given = args ?? {}
     if (name === 'bash') return given.command
-    if (name.startsWith('godot_')) return godotTarget(given)
+    if (name === 'godot') return godotTarget(given)
     if (name === 'web_search') return given.query
     if (name === 'web_fetch') return given.url
     if (name === 'ask_user') {

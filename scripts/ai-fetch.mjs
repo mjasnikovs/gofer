@@ -238,7 +238,7 @@ const WEB_FETCH_DESCRIPTION =
     + '- a library, API or tool outside this project has to be configured\n'
     + '\n'
     + 'Do not reach for it when:\n'
-    + '- the question is about Godot itself — use godot_docs_search\n'
+    + '- the question is about Godot itself — use docs_search.search\n'
     + '- the question is about this project’s own files — use the subagent tool\n'
     + '- you have no URL — use web_search first\n'
     + '\n'

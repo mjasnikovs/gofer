@@ -275,7 +275,7 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
         "a mutation during play must be refused as such: {playing}"
     );
     assert!(
-        playing.contains("godot_runtime stop"),
+        playing.contains("runtime.stop"),
         "the refusal has to name the call that clears it: {playing}"
     );
 

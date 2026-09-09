@@ -1,13 +1,16 @@
 //! The AI tool router.
 //!
-//! Ten compact domain tools stand in front of the handlers the renderer already calls. A tool call
-//! is `{tool, params: {op, ...}}`, and this module is the only place that turns it into a real
-//! operation: an addon RPC command, a script-intelligence request, a debug-adapter request, a page
-//! of session logs, or a documentation retrieval. There is no second implementation of any of them
-//! — the agent and the UI reach identical code, so a scene the agent edits goes through the same
-//! undo stack, the same revision check, and the same worktree binding as one the user edits.
+//! One `godot` tool stands in front of the handlers the renderer already calls. A tool call is
+//! `{tool: "godot", params: {ops: [{op: "node.create", ...}]}}`, and this module is the only place
+//! that turns it into a real operation: an addon RPC command, a script-intelligence request, a
+//! debug-adapter request, a page of session logs, or a documentation retrieval. The dotted `op`
+//! names the domain and the operation inside it, and a domain name with a bare `op` is the same
+//! call — the verify points, the acceptance suites and the recorded fixtures take that door. There
+//! is no second implementation of any of them — the agent and the UI reach identical code, so a
+//! scene the agent edits goes through the same undo stack, the same revision check, and the same
+//! worktree binding as one the user edits.
 //!
-//! The catalog below is also the contract the Node worker receives at startup: the ten tools, and
+//! The catalog below is also the contract the Node worker receives at startup: the ten domains, and
 //! under each of them the [`Operation`] rows [`crate::tool_params`] declares — the summary, the
 //! signature, the parameters and the narrowing the model is shown. It is the same list this router
 //! dispatches against, so a tool the model can call always exists here, and one it cannot call
@@ -119,8 +122,9 @@ impl ToolDomain {
     }
 }
 
-/// The ten domain tools. Compact on purpose: one tool per domain with an `op`, rather than a
-/// hundred flat tools that would fill the model's context with names it will never call.
+/// The ten domains. A grouping rather than a tool each: the model is given one `godot` tool whose
+/// dotted `op` names the domain, because a hundred flat tools fill its context with names it will
+/// never call and cost a round trip apiece.
 pub const CATALOG: &[ToolDomain] = &[
     ToolDomain {
         name: "godot_session",
@@ -142,7 +146,7 @@ pub const CATALOG: &[ToolDomain] = &[
                       supplies from the last answer that carried one, and every mutation's own \
                       answer carries the next. So mutate, then mutate again: there is no revision to \
                       pass and no tree to re-read between them. Paths are the scene's own, like \
-                      /Level1 or /Level1/Ground. Nothing here writes the file: godot_scene save \
+                      /Level1 or /Level1/Ground. Nothing here writes the file: scene.save \
                       does.",
         operations: tool_params::GODOT_NODE_OPERATIONS,
     },
@@ -182,7 +186,8 @@ pub const CATALOG: &[ToolDomain] = &[
         name: "godot_runtime",
         description: "The running game: its live scene tree, input, performance, and screenshots. \
                       Distinct from the edited scene, and named differently: every path here \
-                      starts at /root, where godot_node's start at the edited scene's own root.",
+                      starts at /root, where the node.* operations' start at the edited scene's \
+                      own root.",
         operations: tool_params::GODOT_RUNTIME_OPERATIONS,
     },
     ToolDomain {
@@ -231,7 +236,20 @@ pub(crate) const PROBE_KEY: &str = "probe";
 /// to the model while nothing behind it can answer, which is what ten live sweeps found.
 ///
 /// A domain added to the catalog without a probe fails here rather than defaulting to reachable.
+///
+/// The one `godot` tool is every domain at once, so it is reachable only when all of them are, and
+/// the first that is not is what the model is told about — by name, since `godot` is not the thing
+/// that failed.
 pub(crate) fn probe(domain: &str) -> Result<Value, ToolFailure> {
+    if domain == GODOT_TOOL {
+        for one in CATALOG {
+            probe(one.name).map_err(|mut failure| {
+                failure.message = format!("{}: {}", one.name, failure.message);
+                failure
+            })?;
+        }
+        return Ok(json!({"tool": domain, "reachable": true}));
+    }
     match domain {
         "godot_session" | "godot_scene" | "godot_node" | "godot_project" | "godot_resource"
         | "godot_script" | "godot_debug" | "godot_runtime" | "godot_logs" => {
@@ -335,19 +353,17 @@ fn route<R: Runtime>(
     if request.tool == crate::remember::REMEMBER_TOOL {
         return crate::remember::remember(app, &request.params);
     }
-    let domain = CATALOG
-        .iter()
-        .find(|domain| domain.name == request.tool)
-        .ok_or_else(|| {
-            ToolFailure::new(
-                "unknown_tool",
-                format!("There is no '{}' tool", request.tool),
-            )
-        })?;
-    if request.params.get(PROBE_KEY).and_then(Value::as_bool) == Some(true) {
-        return probe(domain.name);
+    let within = CATALOG.iter().find(|domain| domain.name == request.tool);
+    if within.is_none() && request.tool != GODOT_TOOL {
+        return Err(ToolFailure::new(
+            "unknown_tool",
+            format!("There is no '{}' tool", request.tool),
+        ));
     }
-    let mut entries = requested_operations(domain, &request.params)?;
+    if request.params.get(PROBE_KEY).and_then(Value::as_bool) == Some(true) {
+        return probe(&request.tool);
+    }
+    let mut entries = requested_operations(&request.tool, within, &request.params)?;
 
     for entry in &mut entries {
         entry.operation.repair(&mut entry.params);
@@ -358,11 +374,11 @@ fn route<R: Runtime>(
         entry
             .operation
             .check(&entry.params)
-            .map_err(|failure| the_whole_file(domain.name, entry.op(), failure))
+            .map_err(|failure| the_whole_file(entry.domain.name, entry.operation.op, failure))
             .map_err(|failure| entry.blamed(index, entries.len(), failure))?;
 
-        if domain.name == "godot_runtime" {
-            refuse_a_second_game(entry.op(), crate::debug::holds_a_game())
+        if entry.domain.name == "godot_runtime" {
+            refuse_a_second_game(entry.operation.op, crate::debug::holds_a_game())
                 .map_err(|failure| entry.blamed(index, entries.len(), failure))?;
         }
 
@@ -376,27 +392,17 @@ fn route<R: Runtime>(
             ));
         }
     }
-    refuse_a_list_that_holds_a_lone_operation(domain, &entries)?;
+    refuse_a_list_that_holds_a_lone_operation(&entries)?;
 
-    let mut gated: Vec<approvals::GatedCall> = Vec::new();
-    for entry in &entries {
-        let Some(reason) = entry.operation.gate() else {
-            continue;
-        };
-        reject_outside_paths(app, entry.operation, &entry.params)?;
-        gated.push(approvals::GatedCall {
-            op: entry.op().to_owned(),
-            reason,
-            params: entry.params.clone(),
-        });
+    for (domain, gated) in gated_per_domain(app, &entries)? {
+        approvals::require(app, domain.name, &gated)?;
     }
-    approvals::require(app, domain.name, &gated)?;
 
-    let step = |operation: &'static Operation, params: Value| {
+    let step = |entry: &Requested, params: Value| {
         starting_the_session_if_there_is_none(
-            domain,
+            entry.domain,
             params,
-            |params| run_one(app, domain, operation, params),
+            |params| run_one(app, entry.domain, entry.operation, params),
             || {
                 godot_session_api::start_session(app, StartGodotSessionRequest {})
                     .map(|_| ())
@@ -405,6 +411,36 @@ fn route<R: Runtime>(
         )
     };
     run_in_order(entries, step)
+}
+
+/// The gated entries of a call, grouped by the domain whose name the dialog names, in list order.
+///
+/// One prompt per domain rather than one per call: a `godot` list may cross domains, and "Approve
+/// godot_resource delete?" is a sentence about a domain rather than about the tool the model wrote.
+fn gated_per_domain<R: Runtime>(
+    app: &AppHandle<R>,
+    entries: &[Requested],
+) -> Result<Vec<(&'static ToolDomain, Vec<approvals::GatedCall>)>, ToolFailure> {
+    let mut grouped: Vec<(&'static ToolDomain, Vec<approvals::GatedCall>)> = Vec::new();
+    for entry in entries {
+        let Some(reason) = entry.operation.gate() else {
+            continue;
+        };
+        reject_outside_paths(app, entry.operation, &entry.params)?;
+        let call = approvals::GatedCall {
+            op: entry.operation.op.to_owned(),
+            reason,
+            params: entry.params.clone(),
+        };
+        match grouped
+            .iter_mut()
+            .find(|(domain, _)| domain.name == entry.domain.name)
+        {
+            Some((_, calls)) => calls.push(call),
+            None => grouped.push((entry.domain, vec![call])),
+        }
+    }
+    Ok(grouped)
 }
 
 /// Tells the editor's filesystem about GDScript this call just wrote.
@@ -501,6 +537,9 @@ fn starting_the_session_if_there_is_none(
 /// not a call it can make. Both have the same next move, so both open the same door.
 const IS_A_MISSING_SESSION: [&str; 2] = ["session_not_active", "connect_failed"];
 
+/// The name of the one tool the model is given, whose every entry names its domain in its `op`.
+pub(crate) const GODOT_TOOL: &str = "godot";
+
 /// One entry of the `ops` list: the operation, and the parameters written beside it.
 ///
 /// The operation is the catalogue's own row, resolved once as the entry is read. Everything that
@@ -508,14 +547,31 @@ const IS_A_MISSING_SESSION: [&str; 2] = ["session_not_active", "connect_failed"]
 /// asked of that row rather than a seventh lookup by the same two strings.
 #[derive(Clone, Debug)]
 struct Requested {
+    domain: &'static ToolDomain,
     operation: &'static Operation,
+    /// The op as the call spelled it: `scene.open` on a `godot` call, `open` on a domain one.
+    /// Echoed back rather than normalised, so every sentence the model reads names what it wrote.
+    spelled: String,
     params: Value,
 }
 
 impl Requested {
-    /// The operation's name, which is the row's.
-    fn op(&self) -> &'static str {
-        self.operation.op
+    /// The operation's name, as the call spelled it.
+    fn op(&self) -> &str {
+        &self.spelled
+    }
+
+    /// The operation named the way this same call could write it again.
+    fn named(&self) -> String {
+        if self.spelled.contains('.') {
+            return self.spelled.clone();
+        }
+        format!("{}.{}", self.domain.name, self.spelled)
+    }
+
+    /// The same catalogue row, whichever of the two ways each entry spelled it.
+    fn is_the_same_operation_as(&self, other: &Requested) -> bool {
+        self.domain.name == other.domain.name && self.operation.op == other.operation.op
     }
 
     /// The same failure, told where in the list it happened.
@@ -544,41 +600,47 @@ impl Requested {
 /// calls of its own. One shape is what makes the batch reachable without making the model choose
 /// between two shapes on every call.
 fn requested_operations(
-    domain: &ToolDomain,
+    tool: &str,
+    within: Option<&'static ToolDomain>,
     params: &Value,
 ) -> Result<Vec<Requested>, ToolFailure> {
     let Some(listed) = params.get("ops").and_then(Value::as_array) else {
         return Err(ToolFailure::new(
             "missing_ops",
             format!(
-                "{} takes an `ops` list: {{\"ops\": [{{\"op\": \"…\", …}}]}}, with each \
-                 operation's parameters beside its `op`. One operation is a list of one.",
-                domain.name
+                "{tool} takes an `ops` list: {{\"ops\": [{{\"op\": \"…\", …}}]}}, with each \
+                 operation's parameters beside its `op`. One operation is a list of one."
             ),
         ));
     };
     if listed.is_empty() {
         return Err(ToolFailure::new(
             "empty_ops",
-            format!("{} was called with an empty `ops` list", domain.name),
+            format!("{tool} was called with an empty `ops` list"),
         ));
     }
     listed
         .iter()
         .enumerate()
-        .map(|(index, entry)| requested_operation(domain, index, entry))
+        .map(|(index, entry)| requested_operation(tool, within, index, entry))
         .collect()
 }
 
+/// Resolves one entry, inside the domain a domain call named or across the catalogue.
+///
+/// The two spellings are the same call: `godot_node` with `{"op": "create"}` and `godot` with
+/// `{"op": "node.create"}` reach the same row, and everything after this point asks the row rather
+/// than the name the call used.
 fn requested_operation(
-    domain: &ToolDomain,
+    tool: &str,
+    within: Option<&'static ToolDomain>,
     index: usize,
     entry: &Value,
 ) -> Result<Requested, ToolFailure> {
     if !entry.is_object() {
         return Err(ToolFailure::new(
             "invalid_params",
-            format!("{} `ops[{index}]` is not an object", domain.name),
+            format!("{tool} `ops[{index}]` is not an object"),
         ));
     }
     let op = entry
@@ -587,24 +649,49 @@ fn requested_operation(
         .ok_or_else(|| {
             ToolFailure::new(
                 "missing_op",
-                format!(
-                    "{} `ops[{index}]` needs an `op` naming the operation",
-                    domain.name
-                ),
+                format!("{tool} `ops[{index}]` needs an `op` naming the operation"),
             )
         })?
         .to_owned();
-    let Some(operation) = domain.operation(&op) else {
-        return Err(ToolFailure::new(
-            "unknown_operation",
-            format!("{} has no '{op}' operation", domain.name),
-        ));
+    let (domain, operation) = match within {
+        Some(domain) => (
+            domain,
+            domain.operation(&op).ok_or_else(|| {
+                ToolFailure::new(
+                    "unknown_operation",
+                    format!("{} has no '{op}' operation", domain.name),
+                )
+            })?,
+        ),
+        None => whatever_the_dotted_name_points_at(&op).ok_or_else(|| {
+            ToolFailure::new(
+                "unknown_operation",
+                format!("{tool} has no '{op}' operation"),
+            )
+        })?,
     };
     let mut params = entry.clone();
     if let Some(object) = params.as_object_mut() {
         object.remove("op");
     }
-    Ok(Requested { operation, params })
+    Ok(Requested {
+        domain,
+        operation,
+        spelled: op,
+        params,
+    })
+}
+
+/// The catalogue row a `<short>.<op>` name points at, where `<short>` is the domain without its
+/// `godot_` prefix.
+fn whatever_the_dotted_name_points_at(
+    op: &str,
+) -> Option<(&'static ToolDomain, &'static Operation)> {
+    let (short, name) = op.split_once('.')?;
+    let domain = CATALOG
+        .iter()
+        .find(|domain| domain.name.strip_prefix("godot_") == Some(short))?;
+    Some((domain, domain.operation(name)?))
 }
 
 /// Refuses a list that asks an operation to share more of itself than it can.
@@ -621,10 +708,7 @@ fn requested_operation(
 /// `[open, get_tree]`, `[capture, get_state]`, `[status, threads, stack_trace]` — ordinary two-step
 /// requests the router was already able to run. The old rule refused a list holding any lone
 /// operation, and told the model "a second one is the first one again" about two different ones.
-fn refuse_a_list_that_holds_a_lone_operation(
-    domain: &ToolDomain,
-    entries: &[Requested],
-) -> Result<(), ToolFailure> {
+fn refuse_a_list_that_holds_a_lone_operation(entries: &[Requested]) -> Result<(), ToolFailure> {
     if entries.len() < 2 {
         return Ok(());
     }
@@ -637,10 +721,9 @@ fn refuse_a_list_that_holds_a_lone_operation(
                 return Err(ToolFailure {
                     code: "must_be_alone".to_owned(),
                     message: format!(
-                        "{}.{} has to be the only entry of its call, and `ops[{index}]` is one of \
+                        "{} has to be the only entry of its call, and `ops[{index}]` is one of \
                          {}. {reason} Send it as a list of one, and the rest as their own call.",
-                        domain.name,
-                        entry.op(),
+                        entry.named(),
                         entries.len()
                     ),
                     retryable: false,
@@ -651,16 +734,15 @@ fn refuse_a_list_that_holds_a_lone_operation(
                 if let Some(again) = entries
                     .iter()
                     .skip(index + 1)
-                    .position(|later| later.op() == entry.op())
+                    .position(|later| later.is_the_same_operation_as(entry))
                 {
                     let again = index + 1 + again;
                     return Err(ToolFailure {
                         code: "op_repeated".to_owned(),
                         message: format!(
-                            "{}.{} is in this call twice, at `ops[{index}]` and `ops[{again}]`. \
+                            "{} is in this call twice, at `ops[{index}]` and `ops[{again}]`. \
                              {reason} Drop the second one; the rest of the list is fine.",
-                            domain.name,
-                            entry.op()
+                            entry.named()
                         ),
                         retryable: false,
                         details: json!({"op": entry.op(), "opIndex": again, "firstIndex": index}),
@@ -688,7 +770,7 @@ fn refuse_a_list_that_holds_a_lone_operation(
 /// in directly, proving any of them meant driving a real editor through a whole batch.
 fn run_in_order(
     entries: Vec<Requested>,
-    mut step: impl FnMut(&'static Operation, Value) -> Result<Value, ToolFailure>,
+    mut step: impl FnMut(&Requested, Value) -> Result<Value, ToolFailure>,
 ) -> Result<Value, ToolFailure> {
     let mut answered: Vec<Value> = Vec::with_capacity(entries.len());
     let mut stopped: Option<ToolFailure> = None;
@@ -704,7 +786,7 @@ fn run_in_order(
             continue;
         }
         let params = expecting_what_the_last_entry_produced(&entry, revision);
-        match step(entry.operation, params) {
+        match step(&entry, params) {
             Ok(answer) => {
                 worked = true;
                 revision = answer.get("revision").and_then(Value::as_i64).or(revision);
@@ -835,7 +917,7 @@ fn session_domain<R: Runtime>(app: &AppHandle<R>, op: &str) -> Result<Value, Too
 fn the_editor_never_came_up() -> ToolFailure {
     ToolFailure::new(
         "session_start_failed",
-        "The editor was started and stopped before it could answer. Read godot_logs for what it \
+        "The editor was started and stopped before it could answer. Read logs.read for what it \
          printed on the way up, then start it again."
             .to_owned(),
     )
@@ -864,7 +946,7 @@ fn the_editor_once_it_can_answer<R: Runtime>(
                 "session_slow_start",
                 format!(
                     "The editor has been {state:?} for {} seconds and has not answered yet. It is \
-                     still coming up rather than gone: read godot_session status again rather than \
+                     still coming up rather than gone: read session.status again rather than \
                      starting a second one.",
                     SESSION_START_TIMEOUT.as_secs()
                 ),
@@ -1344,9 +1426,9 @@ fn require_script_path(params: &Value) -> Result<(), ToolFailure> {
     Err(ToolFailure::new(
         "unsupported_file",
         format!(
-            "godot_script works on GDScript, and {path} is not a .gd file. Build and save a scene \
-             with godot_scene and godot_node — a scene written as text is not the scene the editor \
-             has open."
+            "The script.* operations work on GDScript, and {path} is not a .gd file. Build and \
+             save a scene with the scene.* and node.* operations — a scene written as text is not \
+             the scene the editor has open."
         ),
     ))
 }
@@ -1451,7 +1533,7 @@ fn the_whole_file(tool: &str, op: &str, failure: ToolFailure) -> ToolFailure {
     }
     let mut failure = failure;
     failure.message = format!(
-        "{} If this call keeps arriving in a shape it cannot use, godot_script save writes the \
+        "{} If this call keeps arriving in a shape it cannot use, script.save writes the \
          whole file as one string and needs no anchors at all.",
         failure.message.trim_end()
     );
@@ -1489,7 +1571,7 @@ fn script_domain<R: Runtime>(
                                 "not_found",
                                 format!(
                                     "{} There is nothing to open yet: write the script with \
-                                     godot_script save, which creates the file, tells the language \
+                                     script.save, which creates the file, tells the language \
                                      server about it, and leaves it open.",
                                     error.message
                                 ),
@@ -1601,9 +1683,9 @@ fn refuse_a_second_game(op: &str, debugger_holds_a_game: bool) -> Result<(), Too
     }
     Err(ToolFailure {
         code: "already_running".to_owned(),
-        message: "The debugger is already running this game. Read it where it is with godot_debug \
-                  — stack_trace, scopes, variables — or end it with godot_debug terminate. \
-                  godot_runtime run would start a second one beside it."
+        message: "The debugger is already running this game. Read it where it is with \
+                  debug.stack_trace, debug.scopes and debug.variables, or end it with \
+                  debug.terminate. runtime.run would start a second one beside it."
             .to_owned(),
         retryable: false,
         details: json!({"op": op}),
@@ -1990,9 +2072,11 @@ mod tests {
     /// One entry of a `godot_scene` call, resolved the way the router resolves one.
     fn requested(op: &str, params: Value) -> Requested {
         Requested {
+            domain: scene_domain(),
             operation: scene_domain()
                 .operation(op)
                 .unwrap_or_else(|| panic!("godot_scene offers {op}")),
+            spelled: op.to_owned(),
             params,
         }
     }
@@ -2006,9 +2090,9 @@ mod tests {
                 requested("reload", json!({})),
                 requested("save_as", json!({"path": "b.tscn"})),
             ],
-            |operation, _| {
-                ran.borrow_mut().push(operation.op.to_owned());
-                if operation.op == "reload" {
+            |entry, _| {
+                ran.borrow_mut().push(entry.op().to_owned());
+                if entry.op() == "reload" {
                     return Err(ToolFailure::new(
                         "scene_locked",
                         "the scene would not reload",
@@ -2048,10 +2132,10 @@ mod tests {
                 requested("reload", json!({})),
                 requested("save_as", json!({"path": "b.tscn"})),
             ],
-            |operation, params| {
+            |entry, params| {
                 seen.borrow_mut()
-                    .push((operation.op.to_owned(), params["expectedRevision"].clone()));
-                Ok(json!({"revision": if operation.op == "save" { 7 } else { 9 }}))
+                    .push((entry.op().to_owned(), params["expectedRevision"].clone()));
+                Ok(json!({"revision": if entry.op() == "save" { 7 } else { 9 }}))
             },
         )
         .expect("every entry worked");
@@ -2129,7 +2213,7 @@ mod tests {
         .expect_err("a scene written as text must be refused");
         assert_eq!(failure.code, "unsupported_file");
         assert!(
-            failure.message.contains("godot_scene"),
+            failure.message.contains("scene.*"),
             "the refusal must name the tool that owns a scene: {}",
             failure.message
         );
@@ -2562,6 +2646,127 @@ mod tests {
         assert_eq!(failure.code, "unknown_tool");
     }
 
+    /// The one tool the model is given: each entry names its domain in a dotted `op`, one list may
+    /// cross domains, and the answer echoes back what the call wrote.
+    #[test]
+    fn a_dotted_list_spanning_domains_is_answered_in_the_order_it_was_written() {
+        let app = unattended_app();
+        let answer = dispatch(
+            app.handle(),
+            calls(
+                GODOT_TOOL,
+                &[
+                    ("session.status", json!({})),
+                    ("logs.read", json!({"limit": 5})),
+                ],
+            ),
+        )
+        .expect("neither operation needs an editor");
+
+        let ops = answer["ops"].as_array().expect("the entries");
+        assert_eq!(ops.len(), 2, "{answer}");
+        assert_eq!(ops[0]["op"], json!("session.status"));
+        assert_eq!(ops[1]["op"], json!("logs.read"));
+        assert!(ops[0]["result"].is_object(), "{answer}");
+        assert!(ops[1]["result"].is_object(), "{answer}");
+    }
+
+    /// A dotted name the catalogue does not offer is refused as an operation rather than as a tool,
+    /// and the refusal names it the way the call spelled it — including the domain prefix a model
+    /// writes when it reaches for the old ten-tool spelling.
+    #[test]
+    fn a_dotted_op_the_catalogue_does_not_offer_is_named_in_the_refusal() {
+        let app = unattended_app();
+        for op in [
+            "scene.detonate",
+            "godot_node.create",
+            "nowhere.open",
+            "create",
+        ] {
+            let failure = dispatch(app.handle(), call(GODOT_TOOL, op, json!({})))
+                .expect_err("the catalogue has no such operation");
+            assert_eq!(failure.code, "unknown_operation", "{op}");
+            assert!(failure.message.contains(op), "{}", failure.message);
+        }
+
+        let failure = dispatch(app.handle(), call("godot_nonexistent", "status", json!({})))
+            .expect_err("a tool that is neither godot nor a domain");
+        assert_eq!(failure.code, "unknown_tool");
+    }
+
+    /// The lone-operation rule is about the list the router received, so on a `godot` call it spans
+    /// domains — which is what the model is told, and what the debugger needs to be true.
+    #[test]
+    fn the_lone_operation_rule_spans_domains_on_a_godot_call() {
+        let app = unattended_app();
+        let failure = dispatch(
+            app.handle(),
+            calls(
+                GODOT_TOOL,
+                &[
+                    ("scene.open", json!({"path": "res://a.tscn"})),
+                    ("debug.continue", json!({})),
+                ],
+            ),
+        )
+        .expect_err("the debugger shares no call, whatever domain sits beside it");
+        assert_eq!(failure.code, "must_be_alone");
+        assert_eq!(failure.details["op"], json!("debug.continue"));
+        assert!(
+            failure.message.starts_with("debug.continue has to be"),
+            "{}",
+            failure.message
+        );
+    }
+
+    /// The blame prefix names the entry the way the call wrote it, so the model can correct the
+    /// line it sent rather than translate a spelling back.
+    #[test]
+    fn a_multi_entry_godot_call_is_blamed_by_the_dotted_op() {
+        let app = unattended_app();
+        let failure = dispatch(
+            app.handle(),
+            calls(
+                GODOT_TOOL,
+                &[
+                    (
+                        "node.create",
+                        json!({"parent": "/L", "type": "Node2D", "name": "A"}),
+                    ),
+                    ("node.create", json!({"parent": "/L", "name": "B"})),
+                ],
+            ),
+        )
+        .expect_err("an entry with no type cannot be run");
+        assert_eq!(failure.code, "missing_param");
+        assert!(
+            failure.message.starts_with("`ops[1]` (node.create):"),
+            "{}",
+            failure.message
+        );
+        assert_eq!(failure.details["opIndex"], json!(1));
+    }
+
+    /// `godot` is every domain at once, so its probe is only reachable when all of them are, and a
+    /// failure names the domain rather than the tool.
+    #[test]
+    fn the_godot_probe_reaches_every_domain_the_catalogue_has() {
+        match probe(GODOT_TOOL) {
+            Ok(answer) => {
+                assert_eq!(answer["tool"], json!(GODOT_TOOL));
+                assert_eq!(answer["reachable"], json!(true));
+            }
+            Err(failure) => {
+                assert_eq!(failure.code, "docs_unavailable");
+                assert!(
+                    failure.message.starts_with("godot_docs_search: "),
+                    "{}",
+                    failure.message
+                );
+            }
+        }
+    }
+
     /// Issue #5. An editor operation asked with no session started one and answered, instead of
     /// refusing with a code the model can do nothing about.
     #[test]
@@ -2969,13 +3174,15 @@ mod tests {
         let entries: Vec<Requested> = ops
             .iter()
             .map(|op| Requested {
+                domain,
                 operation: domain
                     .operation(op)
                     .unwrap_or_else(|| panic!("{tool} offers {op}")),
+                spelled: (*op).to_owned(),
                 params: json!({}),
             })
             .collect();
-        refuse_a_list_that_holds_a_lone_operation(domain, &entries)
+        refuse_a_list_that_holds_a_lone_operation(&entries)
     }
 
     /// The two narrowings, each refused in its own words, and neither one costing a list that is
@@ -3134,12 +3341,9 @@ mod tests {
             let refused = super::refuse_a_second_game(op, true)
                 .expect_err("a second game must be refused while the debugger holds one");
             assert_eq!(refused.code, "already_running");
+            assert!(refused.message.contains("debug.terminate"), "{refused:?}");
             assert!(
-                refused.message.contains("godot_debug terminate"),
-                "{refused:?}"
-            );
-            assert!(
-                refused.message.contains("stack_trace"),
+                refused.message.contains("debug.stack_trace"),
                 "and says the game can be read where it is: {refused:?}"
             );
             assert!(super::refuse_a_second_game(op, false).is_ok());
@@ -3731,6 +3935,26 @@ mod tests {
         let names: std::collections::HashSet<&str> =
             CATALOG.iter().map(|domain| domain.name).collect();
         assert_eq!(names.len(), CATALOG.len(), "tool names must be unique");
+
+        let mut dotted = std::collections::HashSet::new();
+        for domain in CATALOG {
+            let short = domain
+                .name
+                .strip_prefix("godot_")
+                .unwrap_or_else(|| panic!("{} has to be named godot_<short>", domain.name));
+            for operation in domain.operations {
+                let name = format!("{short}.{}", operation.op);
+                assert_eq!(
+                    whatever_the_dotted_name_points_at(&name).map(|(_, row)| row.op),
+                    Some(operation.op),
+                    "{name} has to resolve back to its own row"
+                );
+                assert!(
+                    dotted.insert(name.clone()),
+                    "{name} is not unique across the catalogue"
+                );
+            }
+        }
     }
 
     /// Whether prose is naming a parameter rather than using an English word that happens to match.
@@ -3895,15 +4119,12 @@ mod tests {
         let torn = the_whole_file(
             "godot_script",
             "edit",
-            ToolFailure::new(
-                "missing_param",
-                "godot_script edit `files[0]` requires `path`.",
-            ),
+            ToolFailure::new("missing_param", "script.edit `files[0]` requires `path`."),
         );
         assert_eq!(torn.code, "missing_param");
         assert!(torn.message.contains("requires `path`"), "{}", torn.message);
         assert!(
-            torn.message.contains("godot_script save"),
+            torn.message.contains("script.save"),
             "the refusal offered no way out: {}",
             torn.message
         );
@@ -3915,7 +4136,7 @@ mod tests {
                 ToolFailure::new(code, "something else went wrong"),
             );
             assert!(
-                !other.message.contains("godot_script save"),
+                !other.message.contains("script.save"),
                 "{code} must not be answered with save: {}",
                 other.message
             );
@@ -3924,17 +4145,17 @@ mod tests {
         let elsewhere = the_whole_file(
             "godot_node",
             "create",
-            ToolFailure::new("missing_param", "godot_node create requires `parent`."),
+            ToolFailure::new("missing_param", "node.create requires `parent`."),
         );
         assert!(
-            !elsewhere.message.contains("godot_script save"),
+            !elsewhere.message.contains("script.save"),
             "{}",
             elsewhere.message
         );
         let other_op = the_whole_file(
             "godot_script",
             "save",
-            ToolFailure::new("missing_param", "godot_script save requires `path`."),
+            ToolFailure::new("missing_param", "script.save requires `path`."),
         );
         assert!(
             !other_op.message.contains("needs no anchors"),
@@ -3960,7 +4181,7 @@ mod tests {
             refused.message
         );
         assert!(
-            refused.message.contains("godot_script save"),
+            refused.message.contains("script.save"),
             "{}",
             refused.message
         );

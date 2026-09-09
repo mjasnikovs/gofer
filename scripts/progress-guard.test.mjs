@@ -73,10 +73,10 @@ test('stepping a debugger is not a loop, however identical the calls read', asyn
     const guard = createProgressGuard()
     let line = 0
     const debugger_ = guard.decorate(
-        answering('godot_debug', () => `stopped at line ${String((line += 1))}`)
+        answering('godot', () => `stopped at line ${String((line += 1))}`)
     )
 
-    const outcomes = await repeat(debugger_, {ops: [{op: 'step_over'}]}, SAME_CALL_LIMIT * 3)
+    const outcomes = await repeat(debugger_, {ops: [{op: 'debug.step_over'}]}, SAME_CALL_LIMIT * 3)
 
     assert.ok(
         outcomes.every(outcome => outcome.ok),
@@ -102,11 +102,11 @@ test('paging a file to its end is not a loop, though the offsets fold to one cal
 
 test('an ack between two pieces of work never counts', async () => {
     const guard = createProgressGuard()
-    const stop = guard.decorate(answering('godot_runtime', () => '{"op":"stopped"}'))
+    const stop = guard.decorate(answering('godot', () => '{"op":"stopped"}'))
     const read = guard.decorate(answering('read'))
 
     for (let index = 0; index < 40; index += 1) {
-        assert.ok((await call(stop, {ops: [{op: 'stop'}]})).ok)
+        assert.ok((await call(stop, {ops: [{op: 'runtime.stop'}]})).ok)
         assert.ok((await call(read, {path: `${word(index)}.gd`})).ok)
     }
     assert.equal(guard.verdict(), undefined)
@@ -243,16 +243,16 @@ test('the recorded runaway trips at its 85th call, and the recorded legitimate s
     assert.equal(tripped, 85)
 
     const legitimate = createProgressGuard()
-    const undo = legitimate.decorate(answering('godot_session', () => '{"undoDepth":0}'))
-    const edit = legitimate.decorate(answering('godot_script'))
-    const cont = legitimate.decorate(answering('godot_debug', () => '{"op":"continued"}'))
+    const undo = legitimate.decorate(answering('godot', () => '{"undoDepth":0}'))
+    const edit = legitimate.decorate(answering('godot'))
+    const cont = legitimate.decorate(answering('godot', () => '{"op":"continued"}'))
     const read = legitimate.decorate(answering('read'))
     for (let round = 0; round < 30; round += 1) {
         for (let depth = 0; depth < 4; depth += 1)
-            assert.ok((await call(undo, {ops: [{op: 'undo'}]})).ok)
+            assert.ok((await call(undo, {ops: [{op: 'session.undo'}]})).ok)
         for (let index = 0; index < 3; index += 1)
-            assert.ok((await call(edit, {ops: [{op: 'edit', line: round * 10 + index}]})).ok)
-        assert.ok((await call(cont, {ops: [{op: 'continue'}]})).ok)
+            assert.ok((await call(edit, {ops: [{op: 'script.edit', line: round * 10 + index}]})).ok)
+        assert.ok((await call(cont, {ops: [{op: 'debug.continue'}]})).ok)
         assert.ok((await call(read, {path: `${word(round)}.tscn`})).ok)
         for (let index = 0; index < 4; index += 1)
             assert.ok((await call(read, {path: `${word(round)}.tscn`, offset: index})).ok)

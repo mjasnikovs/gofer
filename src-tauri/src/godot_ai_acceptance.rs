@@ -162,83 +162,83 @@ fn next_turn(index: usize, results: &[Value]) -> ModelTurn {
     };
     match index {
         0 => tool(
-            "godot_scene",
-            json!({"op": "open", "params": {"path": SCENE_PATH}}),
+            "godot",
+            json!({"op": "scene.open", "params": {"path": SCENE_PATH}}),
         ),
         1 => tool(
-            "godot_node",
-            json!({"op": "create", "params": {
+            "godot",
+            json!({"op": "node.create", "params": {
                 "parent": "/AiFixture",
                 "name": "AiMarker",
                 "type": "Marker2D",
             }}),
         ),
-        2 => tool("godot_scene", json!({"op": "get_tree", "params": {}})),
-        3 => tool("godot_scene", json!({"op": "save", "params": {}})),
+        2 => tool("godot", json!({"op": "scene.get_tree", "params": {}})),
+        3 => tool("godot", json!({"op": "scene.save", "params": {}})),
         4 => tool(
-            "godot_script",
-            json!({"op": "open", "params": {"path": BROKEN_PATH}}),
+            "godot",
+            json!({"op": "script.open", "params": {"path": BROKEN_PATH}}),
         ),
         5 => tool(
-            "godot_script",
-            json!({"op": "diagnostics", "params": {"path": BROKEN_PATH, "timeoutMs": 30000}}),
+            "godot",
+            json!({"op": "script.diagnostics", "params": {"path": BROKEN_PATH, "timeoutMs": 30000}}),
         ),
         6 => tool(
-            "godot_script",
-            json!({"op": "save", "params": {"path": BROKEN_PATH, "text": FIXED_SCRIPT}}),
+            "godot",
+            json!({"op": "script.save", "params": {"path": BROKEN_PATH, "text": FIXED_SCRIPT}}),
         ),
         7 => tool(
-            "godot_script",
-            json!({"op": "diagnostics", "params": {"path": BROKEN_PATH, "timeoutMs": 30000}}),
+            "godot",
+            json!({"op": "script.diagnostics", "params": {"path": BROKEN_PATH, "timeoutMs": 30000}}),
         ),
         8 => tool(
-            "godot_debug",
-            json!({"op": "launch", "params": {
+            "godot",
+            json!({"op": "debug.launch", "params": {
                 "playArgs": ["--headless"],
                 "breakpoints": [{"path": PROBE_PATH, "lines": [ASKED_LINE]}],
             }}),
         ),
         9 => tool(
-            "godot_debug",
-            json!({"op": "await_stop", "params": {"timeoutMs": 60000}}),
+            "godot",
+            json!({"op": "debug.await_stop", "params": {"timeoutMs": 60000}}),
         ),
-        10 => tool("godot_debug", json!({"op": "stack_trace", "params": {}})),
+        10 => tool("godot", json!({"op": "debug.stack_trace", "params": {}})),
         11 => tool(
-            "godot_debug",
-            json!({"op": "scopes", "params": {"frameId": result(10)["frames"][0]["id"]}}),
+            "godot",
+            json!({"op": "debug.scopes", "params": {"frameId": result(10)["frames"][0]["id"]}}),
         ),
         12 => tool(
-            "godot_debug",
-            json!({"op": "variables", "params": {
+            "godot",
+            json!({"op": "debug.variables", "params": {
                 "variablesReference": result(11)["scopes"][0]["variablesReference"],
             }}),
         ),
         13 => tool(
-            "godot_debug",
-            json!({"op": "set_breakpoints", "params": {"path": PROBE_PATH, "lines": []}}),
+            "godot",
+            json!({"op": "debug.set_breakpoints", "params": {"path": PROBE_PATH, "lines": []}}),
         ),
-        14 => tool("godot_debug", json!({"op": "continue", "params": {}})),
-        15 => tool("godot_debug", json!({"op": "terminate", "params": {}})),
-        16 => tool("godot_runtime", json!({"op": "run", "params": {}})),
-        17 => tool("godot_runtime", json!({"op": "capture", "params": {}})),
-        18 => tool("godot_runtime", json!({"op": "stop", "params": {}})),
+        14 => tool("godot", json!({"op": "debug.continue", "params": {}})),
+        15 => tool("godot", json!({"op": "debug.terminate", "params": {}})),
+        16 => tool("godot", json!({"op": "runtime.run", "params": {}})),
+        17 => tool("godot", json!({"op": "runtime.capture", "params": {}})),
+        18 => tool("godot", json!({"op": "runtime.stop", "params": {}})),
         19 => tool(
-            "godot_logs",
-            json!({"op": "read", "params": {"limit": 200}}),
+            "godot",
+            json!({"op": "logs.read", "params": {"limit": 200}}),
         ),
-        20 => tool("godot_resource", json!({"op": "rescan", "params": {}})),
-        21 => tool("godot_project", json!({"op": "get_settings", "params": {}})),
+        20 => tool("godot", json!({"op": "resource.rescan", "params": {}})),
+        21 => tool("godot", json!({"op": "project.get_settings", "params": {}})),
         22 => tool(
-            "godot_project",
-            json!({"op": "search_editor_settings", "params": {"query": "font_size"}}),
+            "godot",
+            json!({"op": "project.search_editor_settings", "params": {"query": "font_size"}}),
         ),
         23 => tool(
-            "godot_resource",
-            json!({"op": "list", "params": {"hashes": true}}),
+            "godot",
+            json!({"op": "resource.list", "params": {"hashes": true}}),
         ),
         24 => tool(
-            "godot_resource",
-            json!({"op": "create_tileset", "params": {
+            "godot",
+            json!({"op": "resource.create_tileset", "params": {
                 "path": TILESET_PATH,
                 "texture": ATLAS_PATH,
                 "tileSize": 16,
@@ -246,14 +246,14 @@ fn next_turn(index: usize, results: &[Value]) -> ModelTurn {
             }}),
         ),
         25 => tool(
-            "godot_resource",
-            json!({"op": "describe_tileset", "params": {"path": TILESET_PATH}}),
+            "godot",
+            json!({"op": "resource.describe_tileset", "params": {"path": TILESET_PATH}}),
         ),
         26 => tools(
-            "godot_node",
+            "godot",
             &[
-                json!({"op": "inspect", "params": {"node": "/AiFixture"}}),
-                json!({"op": "inspect", "params": {"node": "/AiFixture/AiMarker"}}),
+                json!({"op": "node.inspect", "params": {"node": "/AiFixture"}}),
+                json!({"op": "node.inspect", "params": {"node": "/AiFixture/AiMarker"}}),
             ],
         ),
         _ => ModelTurn::Text(
@@ -826,7 +826,7 @@ fn a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits() {
 
     assert_eq!(refused.code, "game_halted", "{}", refused.message);
     assert!(
-        refused.message.contains("godot_debug continue"),
+        refused.message.contains("debug.continue"),
         "{}",
         refused.message
     );

@@ -70,19 +70,19 @@ test('refuses to let the raw file tools write what the editor owns', async conte
         const tool = confineTool(fakeTool(name), current.path)
         await assert.rejects(
             tool.execute('1', {path: 'scenes/level.tscn', text: '[gd_scene]'}),
-            /godot_scene/u
+            /scene\.create/u
         )
         await assert.rejects(
             tool.execute('2', {path: 'res://scenes/level.scn', text: 'x'}),
-            /godot_scene/u
+            /scene\.create/u
         )
         await assert.rejects(
             tool.execute('3', {path: 'project.godot', text: 'x'}),
-            /godot_project/u
+            /project\.set_setting/u
         )
         await assert.rejects(
             tool.execute('4', {path: 'scripts/player.gd', text: 'extends Node'}),
-            /godot_script edit/u
+            /script\.edit/u
         )
         assert.deepEqual(await tool.execute('5', {path: 'notes/plan.md', text: 'x'}), {
             path: 'notes/plan.md',
@@ -363,7 +363,10 @@ test('refuses a shell command that names what the editor owns', async context =>
         'echo run/main_scene >> project.godot',
         'cat scenes/level_1.tscn'
     ])
-        await assert.rejects(tool.execute('1', {command}), /godot_scene|godot_project/u)
+        await assert.rejects(
+            tool.execute('1', {command}),
+            /scene\.create|project\.set_setting|scene, node and project operations/u
+        )
 
     assert.deepEqual(
         await tool.execute('2', {command: 'cat scripts/player.gd'}),
@@ -378,7 +381,7 @@ test('refuses a shell command whose whole job is to wait', async context => {
     const tool = confineTool(fakeTool('bash'), current.path)
 
     for (const command of ['sleep 5', 'sleep 0.5', 'sleep 2 && ls scripts', 'ls; sleep 1'])
-        await assert.rejects(tool.execute('1', {command}), /godot_runtime wait/u)
+        await assert.rejects(tool.execute('1', {command}), /runtime\.wait/u)
 
     for (const command of [
         'timeout 5 ./run.sh',
@@ -408,7 +411,10 @@ test('lets git read a scene it can only ever read', async context => {
         'git apply patch.diff && cat scenes/level_1.tscn',
         'git status | tee scenes/level_1.tscn'
     ])
-        await assert.rejects(tool.execute('2', {command}), /godot_scene|godot_project/u)
+        await assert.rejects(
+            tool.execute('2', {command}),
+            /scene\.create|project\.set_setting|scene, node and project operations/u
+        )
 
     for (const command of [
         'git show HEAD:project.godot > project.godot',
@@ -416,7 +422,10 @@ test('lets git read a scene it can only ever read', async context => {
         'git log >> scenes/level_1.tscn',
         'git status\nsed -i "s/a/b/" scenes/level_1.tscn'
     ])
-        await assert.rejects(tool.execute('3', {command}), /godot_scene|godot_project/u)
+        await assert.rejects(
+            tool.execute('3', {command}),
+            /scene\.create|project\.set_setting|scene, node and project operations/u
+        )
 
     for (const command of [
         'git diff --stat && git diff -- main.tscn | head -80',
@@ -430,7 +439,10 @@ test('lets git read a scene it can only ever read', async context => {
         'git status && head -20 project.godot',
         'head -20 scenes/level_1.tscn'
     ])
-        await assert.rejects(tool.execute('5', {command}), /godot_scene|godot_project/u)
+        await assert.rejects(
+            tool.execute('5', {command}),
+            /scene\.create|project\.set_setting|scene, node and project operations/u
+        )
 
     await assert.rejects(tool.execute('6', {command: 'git diff -- /etc/passwd'}), /absolute/u)
 
@@ -456,7 +468,10 @@ test('lets git read a scene it can only ever read', async context => {
         'find . -name "*.tscn" | tee scenes.txt',
         'find . -name "*.tscn" | xargs cat'
     ])
-        await assert.rejects(tool.execute('8', {command}), /godot_scene|godot_project/u)
+        await assert.rejects(
+            tool.execute('8', {command}),
+            /scene\.create|project\.set_setting|scene, node and project operations/u
+        )
 })
 
 function editing(workspacePath) {

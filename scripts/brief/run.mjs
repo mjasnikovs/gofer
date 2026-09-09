@@ -40,9 +40,7 @@ const PHASE_WORK = {
 const stored = value => (typeof value === 'string' ? value : JSON.stringify(value))
 
 function everyPhaseTool(canSearch) {
-    return canSearch ?
-            ['read', 'bash', 'godot_docs_search', 'godot_script', 'web_search']
-        :   ['read', 'bash', 'godot_docs_search', 'godot_script']
+    return canSearch ? ['read', 'bash', 'godot', 'web_search'] : ['read', 'bash', 'godot']
 }
 
 export function searchConfigured(settings, braveApiKey) {

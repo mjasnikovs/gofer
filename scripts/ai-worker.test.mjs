@@ -40,7 +40,7 @@ test('worker stdin framing reports malformed JSON and exits nonzero', () => {
 test('the worker asks the backend for domain tools over the duplex channel', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
-    const server = startToolCallingServer('godot_scene', {op: 'get_tree', params: {}})
+    const server = startToolCallingServer('godot', {op: 'scene.get_tree', params: {}})
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
     context.after(() => server.close())
     const port = server.address().port
@@ -81,15 +81,15 @@ test('the worker asks the backend for domain tools over the duplex channel', asy
     assert.equal(code, 0)
     assert.deepEqual(
         requests.filter(isProbe).map(request => request.tool),
-        ['ask_user', 'remember', ...catalog.map(domain => domain.name)]
+        ['ask_user', 'remember', 'godot']
     )
     assert.deepEqual(
         withoutProbes(requests).map(request => ({tool: request.tool, params: request.params})),
-        [{tool: 'godot_scene', params: {ops: [{op: 'get_tree'}]}}]
+        [{tool: 'godot', params: {ops: [{op: 'scene.get_tree'}]}}]
     )
     const end = events.find(event => event.type === 'tool-end')
-    assert.equal(events.find(event => event.type === 'tool-start').name, 'godot_scene')
-    assert.equal(events.find(event => event.type === 'tool-start').target, 'get_tree')
+    assert.equal(events.find(event => event.type === 'tool-start').name, 'godot')
+    assert.equal(events.find(event => event.type === 'tool-start').target, 'scene.get_tree')
     assert.equal(end.isError, false)
     assert.equal(JSON.parse(end.output).root, 'Main')
     assert.equal(events.find(event => event.type === 'done').text, 'Scene inspected')
@@ -98,7 +98,7 @@ test('the worker asks the backend for domain tools over the duplex channel', asy
 test('a cancel line on the channel stops the turn the worker is running', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
-    const server = startToolCallingServer('godot_scene', {op: 'get_tree', params: {}})
+    const server = startToolCallingServer('godot', {op: 'scene.get_tree', params: {}})
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
     context.after(() => server.close())
     const port = server.address().port
@@ -150,7 +150,7 @@ test('a tool call left unanswered is settled when the backend closes the channel
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
     const mock = startScriptedServer([
-        {calls: [{name: 'godot_scene', args: {op: 'get_tree', params: {}}}]},
+        {calls: [{name: 'godot', args: {op: 'scene.get_tree', params: {}}}]},
         {text: 'The scene could not be read'}
     ])
     const url = await baseUrl(context, mock.server)
@@ -203,7 +203,7 @@ test('a dead tool fails worker startup loudly rather than quietly', async contex
             const call = JSON.parse(line.slice(TOOL_PREFIX.length))
             worker.stdin.write(
                 `${JSON.stringify(
-                    call.tool === 'godot_docs_search' ?
+                    call.tool === 'godot' ?
                         {
                             type: 'tool-result',
                             id: call.id,
@@ -228,7 +228,7 @@ test('a dead tool fails worker startup loudly rather than quietly', async contex
     )
 
     assert.equal(await finished, 1)
-    assert.match(errors, /godot_docs_search: docs_unavailable: the models are missing/u)
+    assert.match(errors, /godot: docs_unavailable: the models are missing/u)
     assert.equal(mock.bodies.length, 0)
     assert.deepEqual(
         events.filter(event => event.type === 'done'),

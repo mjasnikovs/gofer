@@ -105,7 +105,7 @@ const fullCall = id => ({
             type: 'toolCall',
             id,
             name: 'godot',
-            arguments: {ops: [{op: 'set_property', node: 'Player', name: 'speed', value: 3}]}
+            arguments: {ops: [{op: 'node.set_property', node: 'Player', name: 'speed', value: 3}]}
         }
     ]
 })
@@ -113,7 +113,7 @@ const failed = id => ({
     role: 'toolResult',
     toolCallId: id,
     isError: true,
-    content: [{type: 'text', text: 'missing_param: godot_node set_property requires `node`.'}]
+    content: [{type: 'text', text: 'missing_param: node.set_property requires `node`.'}]
 })
 const succeeded = id => ({role: 'toolResult', toolCallId: id, isError: false, content: []})
 const refusedForAnotherReason = id => ({
@@ -187,7 +187,7 @@ test('the refusal that says it has heard this call before goes too', () => {
         role: 'toolResult',
         toolCallId: 'c1',
         isError: true,
-        content: [{type: 'text', text: 'godot_node has now refused this exact call 3 times, …'}]
+        content: [{type: 'text', text: 'godot has now refused this exact call 3 times, …'}]
     }
     assert.deepEqual(withoutEmptyToolCalls([emptyCall('c1'), worn]), [])
 })

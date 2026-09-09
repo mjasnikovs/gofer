@@ -6,6 +6,10 @@ import {createGodotTools} from './godot-tools.mjs'
 import {signatureOf} from './tool-schema.mjs'
 import {declaredDomains} from './declared-domains.mjs'
 
+const dotted = (tool, op) => `${tool.replace(/^godot_/u, '')}.${op}`
+
+const branches = tool => tool.parameters.properties.ops.items.oneOf
+
 test('an exclusive operation and a once-only operation are advertised apart', () => {
     const session = [
         {
@@ -27,7 +31,7 @@ test('an exclusive operation and a once-only operation are advertised apart', ()
             alone: {scope: 'exclusive', why: 'One debuggee, driven in order.'}
         }
     ]
-    const [owned, driven] = createGodotTools(
+    const [godot] = createGodotTools(
         [
             {name: 'godot_session', description: 'd', operations: session},
             {name: 'godot_debug', description: 'd', operations: debug}
@@ -35,35 +39,34 @@ test('an exclusive operation and a once-only operation are advertised apart', ()
         {call: async () => ({})}
     )
 
-    assert.equal(owned.parameters.properties.ops.maxItems, undefined)
-    assert.equal(driven.parameters.properties.ops.maxItems, undefined)
+    assert.equal(godot.parameters.properties.ops.maxItems, undefined)
 
-    assert.match(owned.parameters.properties.ops.description, /may not appear twice: status, undo/u)
-    assert.doesNotMatch(owned.parameters.properties.ops.description, /only entry of their call/u)
-    assert.match(owned.description, /not twice in one call: It takes no parameters\./u)
-
+    // Both narrowings span every domain, because the list the router applies them to does.
     assert.match(
-        driven.parameters.properties.ops.description,
-        /only entry of their call: continue/u
+        godot.parameters.properties.ops.description,
+        /may not appear twice: session\.status, session\.undo/u
     )
-    assert.doesNotMatch(driven.parameters.properties.ops.description, /may not appear twice/u)
-    assert.match(driven.description, /only entry of its call: One debuggee, driven in order\./u)
+    assert.match(
+        godot.parameters.properties.ops.description,
+        /only entry of their call: debug\.continue/u
+    )
+    assert.match(godot.description, /not twice in one call: It takes no parameters\./u)
+    assert.match(godot.description, /only entry of its call: One debuggee, driven in order\./u)
 })
 
 test('every recorded ops shape validates against the advertised schema', async () => {
     const recorded = JSON.parse(
         await readFile(new URL('../fixtures/recorded-tool-calls.json', import.meta.url), 'utf8')
     )
-    const tools = createGodotTools(await declaredDomains(), {call: async () => ({})})
+    const [godot] = createGodotTools(await declaredDomains(), {call: async () => ({})})
     const validate = new Ajv({strict: false, allErrors: true})
+    const check = validate.compile(godot.parameters)
     let checked = 0
     for (const recordedCase of recorded.cases) {
-        const tool = tools.find(candidate => candidate.name === recordedCase.tool)
-        assert.ok(tool, `${recordedCase.tool} is recorded and is not advertised`)
-        const check = validate.compile(tool.parameters)
+        const ops = recordedCase.ops.map(one => ({...one, op: dotted(recordedCase.tool, one.op)}))
         assert.ok(
-            check({ops: recordedCase.ops}),
-            `${recordedCase.tool} ${JSON.stringify(recordedCase.ops.map(op => op.op))}: ${validate.errorsText(check.errors)}`
+            check({ops}),
+            `${recordedCase.tool} ${JSON.stringify(ops.map(one => one.op))}: ${validate.errorsText(check.errors)}`
         )
         checked += 1
     }
@@ -103,7 +106,7 @@ test('the entry schema types every parameter and pins it to its own operation', 
             call: async () => ({})
         }
     )
-    const [save, diagnostics] = tool.parameters.properties.ops.items.oneOf
+    const [save, diagnostics] = branches(tool)
 
     assert.deepEqual(save.properties.text, {type: 'string'})
     assert.deepEqual(save.properties.expectedHash, {
@@ -111,7 +114,7 @@ test('the entry schema types every parameter and pins it to its own operation', 
         pattern: '^[0-9a-f]{64}$'
     })
     assert.deepEqual(save.properties.path, {type: 'string'})
-    assert.deepEqual(save.properties.op, {const: 'save'})
+    assert.deepEqual(save.properties.op, {const: 'script.save'})
     assert.deepEqual(save.required, ['op', 'path', 'text'])
     assert.equal(save.additionalProperties, false)
     assert.equal(save.properties.expectedRevision, undefined)
@@ -119,6 +122,7 @@ test('the entry schema types every parameter and pins it to its own operation', 
     assert.deepEqual(diagnostics.properties.timeoutMs, {type: 'integer'})
     assert.deepEqual(diagnostics.properties.path, {anyOf: [{type: 'string'}, {type: 'array'}]})
     assert.deepEqual(diagnostics.required, ['op', 'path'])
+    assert.deepEqual(diagnostics.properties.op, {const: 'script.diagnostics'})
 
     // save's own shape for `path`, not the union of both operations' shapes
     assert.equal(save.properties.timeoutMs, undefined)
@@ -145,21 +149,23 @@ test('the signature is a leading space and a shape, or nothing at all', () => {
         ],
         {call: async () => ({})}
     )
-    assert.match(tool.description, /- save \{path\?: text\}: Saves it\./u)
-    assert.match(tool.description, /- reload: Reloads it\./u)
+    assert.match(tool.description, /# scene — The edited scene\./u)
+    assert.match(tool.description, /- scene\.save \{path\?: text\}: Saves it\./u)
+    assert.match(tool.description, /- scene\.reload: Reloads it\./u)
 })
 
 test('the entry schema refuses an operation missing a parameter the router requires', async () => {
-    const tools = createGodotTools(await declaredDomains(), {call: async () => ({})})
+    const domains = await declaredDomains()
+    const [godot] = createGodotTools(domains, {call: async () => ({})})
     const validate = new Ajv({strict: false, allErrors: true})
+    const check = validate.compile(godot.parameters)
     const admitted = []
-    for (const domain of await declaredDomains()) {
-        const tool = tools.find(candidate => candidate.name === domain.name)
-        const check = validate.compile(tool.parameters)
+    for (const domain of domains) {
         for (const operation of domain.operations) {
             const required = (operation.params ?? []).filter(param => param.required)
             if (required.length === 0) continue
-            if (check({ops: [{op: operation.op}]})) admitted.push(`${domain.name}.${operation.op}`)
+            const op = dotted(domain.name, operation.op)
+            if (check({ops: [{op}]})) admitted.push(op)
         }
     }
     assert.deepEqual(
@@ -170,12 +176,12 @@ test('the entry schema refuses an operation missing a parameter the router requi
 })
 
 test('the entry schema refuses a key that belongs to another operation', async () => {
-    const tools = createGodotTools(await declaredDomains(), {call: async () => ({})})
+    const domains = await declaredDomains()
+    const [godot] = createGodotTools(domains, {call: async () => ({})})
     const validate = new Ajv({strict: false, allErrors: true})
+    const check = validate.compile(godot.parameters)
     const admitted = []
-    for (const domain of await declaredDomains()) {
-        const tool = tools.find(candidate => candidate.name === domain.name)
-        const check = validate.compile(tool.parameters)
+    for (const domain of domains) {
         for (const operation of domain.operations) {
             const mine = new Set((operation.params ?? []).map(param => param.name))
             const theirs = domain.operations
@@ -184,13 +190,13 @@ test('the entry schema refuses a key that belongs to another operation', async (
                 .find(name => !mine.has(name))
             if (!theirs) continue
             const entry = Object.fromEntries([
-                ['op', operation.op],
+                ['op', dotted(domain.name, operation.op)],
                 ...(operation.params ?? [])
                     .filter(param => param.required)
                     .map(param => [param.name, 'x']),
                 [theirs, 'x']
             ])
-            if (check({ops: [entry]})) admitted.push(`${domain.name}.${operation.op}+${theirs}`)
+            if (check({ops: [entry]})) admitted.push(`${entry.op}+${theirs}`)
         }
     }
     assert.deepEqual(
@@ -202,15 +208,15 @@ test('the entry schema refuses a key that belongs to another operation', async (
 
 test('the schema offers no key the router fills in, and repeats no summary', async () => {
     const domains = await declaredDomains()
-    const tools = createGodotTools(domains, {call: async () => ({})})
+    const [godot] = createGodotTools(domains, {call: async () => ({})})
+    const walked = branches(godot)
     let hidden = 0
+    let index = 0
     for (const domain of domains) {
-        const tool = tools.find(candidate => candidate.name === domain.name)
-        for (const [operation, branch] of domain.operations.map((operation, index) => [
-            operation,
-            tool.parameters.properties.ops.items.oneOf[index]
-        ])) {
-            assert.deepEqual(branch.properties.op, {const: operation.op})
+        for (const operation of domain.operations) {
+            const branch = walked[index]
+            index += 1
+            assert.deepEqual(branch.properties.op, {const: dotted(domain.name, operation.op)})
             for (const param of (operation.params ?? []).filter(param => param.hidden)) {
                 assert.equal(
                     branch.properties[param.name],
@@ -222,4 +228,20 @@ test('the schema offers no key the router fills in, and repeats no summary', asy
         }
     }
     assert.ok(hidden > 30, 'the catalogue lost its hidden parameters')
+})
+
+test('one branch per operation of every domain, each pinned to a name no other branch has', async () => {
+    const domains = await declaredDomains()
+    const [godot] = createGodotTools(domains, {call: async () => ({})})
+    const consts = branches(godot).map(branch => branch.properties.op.const)
+
+    assert.equal(
+        consts.length,
+        domains.reduce((total, domain) => total + domain.operations.length, 0)
+    )
+    assert.equal(new Set(consts).size, consts.length)
+    assert.ok(
+        consts.every(name => /^[a-z_]+\.[a-z_]+$/u.test(name)),
+        `these are not dotted operation names: ${consts.filter(name => !name.includes('.')).join(', ')}`
+    )
 })

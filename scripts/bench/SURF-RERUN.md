@@ -43,3 +43,17 @@ SCRATCH=$S ROWS=surf-rows node surf-rescore.mjs
 SCRATCH=$S ARMS=S1,S4b SEEDS=10 OUT=surf-rows-b node surf-run.mjs
 SCRATCH=$S ROWS=surf-rows-b node
 surf-report.mjs
+
+# ---------------------------------------------------------------- after a step that moves the surface
+
+S1 stays the shipped list, verbatim. S2 is what the worker builds now, with the prompt it ships. The
+sign of the paired S2-S1 gap (tokens down, success not down) must not change.
+
+```sh
+GOFER_DUMP_CATALOG=/dev/null GOFER_DUMP_PROMPT=$S/surf-prompt-S2.txt \
+  cargo test --manifest-path src-tauri/Cargo.toml --features godot-acceptance --lib -- dump_catalog_and_prompt
+SCRATCH=$S node surf-build.mjs            # S1 and surf-map.json
+SCRATCH=$S ARM=S2 node surf-built.mjs     # overwrites surf-tools-S2.json with the built surface
+SCRATCH=$S ARMS=S1,S2 SEEDS=10 OUT=surf-rows-step node surf-run.mjs
+SCRATCH=$S ROWS=surf-rows-step node surf-report.mjs
+```

@@ -24,7 +24,7 @@ test('a declared tool that cannot answer stops the turn before the model is aske
     const url = await baseUrl(context, mock.server)
     const host = createToolHost(call =>
         host.deliver(
-            call.tool === 'godot_docs_search' ?
+            call.tool === 'godot' ?
                 {
                     type: 'tool-result',
                     id: call.id,
@@ -50,9 +50,9 @@ test('a declared tool that cannot answer stops the turn before the model is aske
         error => {
             assert.match(
                 error.message,
-                /godot_docs_search: docs_unavailable: the retrieve worker was not found/u
+                /godot: docs_unavailable: the retrieve worker was not found/u
             )
-            assert.doesNotMatch(error.message, /godot_scene/u)
+            assert.match(error.message, /about a tool it cannot use/u)
             return true
         }
     )
@@ -99,7 +99,7 @@ test('read and bash are provable without a write tool to set them up', async con
 
 test('a tool that never answers its probe is given up on, and one the turn outlived is not', async () => {
     const silent = {
-        name: 'godot_scene',
+        name: 'godot',
         execute: () => new Promise(() => undefined)
     }
     const workspace = await temporaryWorkspace()
@@ -111,12 +111,12 @@ test('a tool that never answers its probe is given up on, and one the turn outli
             workspacePath: workspace.path,
             timeoutMs: 20
         }),
-        /godot_scene: it did not answer within 0\.02 seconds/u
+        /godot: it did not answer within 0\.02 seconds/u
     )
 
     await assert.rejects(
         probeTools({tools: [silent], workspacePath: workspace.path}),
-        /godot_scene: there is no channel to answer it/u
+        /godot: there is no channel to answer it/u
     )
 
     await assert.rejects(
@@ -126,7 +126,7 @@ test('a tool that never answers its probe is given up on, and one the turn outli
             workspacePath: workspace.path,
             signal: AbortSignal.abort()
         }),
-        /godot_scene: the turn was stopped/u
+        /godot: the turn was stopped/u
     )
 
     await workspace.remove()

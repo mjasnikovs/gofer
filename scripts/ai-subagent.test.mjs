@@ -196,7 +196,7 @@ test('widening what a child MAY hold does not widen what the subagent tool DOES 
     context.after(workspace.remove)
 
     assert.ok(CHILD_TOOL_NAMES.includes('web_search'))
-    assert.ok(CHILD_TOOL_NAMES.includes('godot_docs_search'))
+    assert.ok(CHILD_TOOL_NAMES.includes('godot'))
     assert.ok(!SUBAGENT_TOOL_NAMES.includes('web_search'))
 
     const {env, tools} = createChildTools(workspace.path)
@@ -215,16 +215,33 @@ test('a reaching tool asked for without what answers it is refused by name', asy
     context.after(workspace.remove)
 
     assert.throws(
-        () => createChildTools(workspace.path, {toolNames: ['godot_docs_search']}),
+        () => createChildTools(workspace.path, {toolNames: ['godot']}),
         /without the tool host that answers it/u
     )
     assert.throws(
         () =>
             createChildTools(workspace.path, {
-                toolNames: ['godot_docs_search'],
+                toolNames: ['godot'],
                 deps: {host: {call: async () => ({})}, domains: []}
             }),
-        /did not offer that domain/u
+        /did not offer godot_docs_search or godot_script/u
+    )
+    assert.throws(
+        () =>
+            createChildTools(workspace.path, {
+                toolNames: ['godot'],
+                deps: {
+                    host: {call: async () => ({})},
+                    domains: [
+                        {
+                            name: 'godot_script',
+                            description: 'the language server',
+                            operations: [{op: 'save', summary: 'write a script'}]
+                        }
+                    ]
+                }
+            }),
+        /none of the godot_script operations it may hold/u
     )
 })
 
@@ -674,8 +691,7 @@ test('every tool a child may hold is named, not just the two that were', () => {
     const ARGS = {
         read: {path: 'a.gd'},
         bash: {command: 'ls'},
-        godot_docs_search: {ops: [{op: 'ask'}]},
-        godot_script: {ops: [{op: 'workspace_symbols'}]},
+        godot: {ops: [{op: 'docs_search.ask'}, {op: 'script.workspace_symbols'}]},
         web_search: {query: 'godot 4 signals'},
         ask_user: {
             question: 'which menu?',
@@ -1188,15 +1204,15 @@ test('the three copies of the shipped bounds say the same numbers', async () => 
 
 test('the child is told about every tool it holds, and about none it does not', () => {
     assert.match(childSystemPrompt(), /You can read files and run shell commands\./u)
-    assert.doesNotMatch(childSystemPrompt(), /godot_script|web_search/u)
+    assert.doesNotMatch(childSystemPrompt(), /docs_search|web_search/u)
 
-    const researching = childSystemPrompt(['read', 'bash', 'godot_docs_search', 'godot_script'])
-    assert.match(researching, /godot_docs_search/u)
-    assert.match(researching, /godot_script/u)
+    const researching = childSystemPrompt(['read', 'bash', 'godot'])
+    assert.match(researching, /docs_search\.search/u)
+    assert.match(researching, /script\.references/u)
     assert.match(researching, /no write tool and no edit tool/u)
 })
 
-test('a child holding godot_script gets the operations that only ask, and not one that writes', async context => {
+test('a child holding godot gets the script operations that only ask, and not one that writes', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
     const domains = [
@@ -1213,20 +1229,20 @@ test('a child holding godot_script gets the operations that only ask, and not on
     ]
 
     const {env, tools} = createChildTools(workspace.path, {
-        toolNames: ['godot_script'],
+        toolNames: ['godot'],
         deps: {domains, host: {call: () => Promise.resolve({})}}
     })
     context.after(() => env.cleanup())
 
     const [script] = tools
-    assert.equal(script.name, 'godot_script')
-    assert.match(script.description, /workspace_symbols/u)
-    assert.match(script.description, /hover/u)
-    assert.doesNotMatch(script.description, /\bedit\b/u)
-    assert.doesNotMatch(script.description, /\bsave\b/u)
+    assert.equal(script.name, 'godot')
+    assert.match(script.description, /script\.workspace_symbols/u)
+    assert.match(script.description, /script\.hover/u)
+    assert.doesNotMatch(script.description, /script\.edit/u)
+    assert.doesNotMatch(script.description, /script\.save/u)
 })
 
-test('the godot_script a child holds does not carry the catalogue line telling it to write', async context => {
+test('the script domain a child holds does not carry the catalogue line telling it to write', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
     const domains = [
@@ -1243,7 +1259,7 @@ test('the godot_script a child holds does not carry the catalogue line telling i
     ]
 
     const {env, tools} = createChildTools(workspace.path, {
-        toolNames: ['godot_script'],
+        toolNames: ['godot'],
         deps: {domains, host: {call: () => Promise.resolve({})}}
     })
     context.after(() => env.cleanup())

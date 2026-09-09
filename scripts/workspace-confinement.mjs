@@ -9,23 +9,23 @@ const EDITOR_OWNED = [
     {
         matches: path => ['.tscn', '.scn'].includes(extname(path)),
         instead:
-            'Scenes belong to the running editor. Build this one with godot_scene create, '
-            + 'godot_node create and godot_node set_property, then godot_scene save. A .tscn '
+            'Scenes belong to the running editor. Build this one with scene.create, '
+            + 'node.create and node.set_property, then scene.save. A .tscn '
             + 'written as text makes the editor stop and ask which copy to keep.'
     },
     {
         matches: path => basename(path) === 'project.godot',
         instead:
-            'project.godot belongs to the running editor. Use godot_project set_setting, '
-            + 'set_input_action, set_autoload or set_plugin_enabled, which write it through the '
-            + 'editor and keep its own copy in step.'
+            'project.godot belongs to the running editor. Use project.set_setting, '
+            + 'project.set_input_action, project.set_autoload or project.set_plugin_enabled, '
+            + 'which write it through the editor and keep its own copy in step.'
     },
     {
         matches: path => extname(path) === '.gd',
         instead:
-            'GDScript belongs to the language server. Change this one with godot_script edit, '
+            'GDScript belongs to the language server. Change this one with script.edit, '
             + 'which anchors on the text you are replacing and answers with the diagnostics for '
-            + 'what it wrote, or create it with godot_script save. A .gd written as text leaves '
+            + 'what it wrote, or create it with script.save. A .gd written as text leaves '
             + 'Godot running the old code.'
     },
     {
@@ -248,7 +248,7 @@ export function validateBashCommand(command, temporaryRoot = tmpdir()) {
         throw new Error(
             'Shell commands cannot sleep. Sleeping here stops this process while the game carries '
                 + 'on unobserved, and costs a whole request to do nothing. Let the game advance '
-                + 'with godot_runtime wait, which renders the frames before it answers — '
+                + 'with runtime.wait, which renders the frames before it answers — '
                 + '{"op": "wait", "frames": 30} or {"op": "wait", "ms": 500}.'
         )
     if (namesTheSkillsDirectory(command))
@@ -260,8 +260,8 @@ export function validateBashCommand(command, temporaryRoot = tmpdir()) {
     if (EDITOR_OWNED_IN_SHELL.test(withoutASearchGlob(command)) && !readsOnlyThroughGit(command))
         throw new Error(
             'Shell commands cannot name a scene or project.godot. Read one with the read tool, '
-                + 'and change it with godot_scene, godot_node and godot_project, which write it '
-                + 'through the editor that has it open.'
+                + "and change it with the godot tool's scene, node and project operations, which "
+                + 'write it through the editor that has it open.'
         )
 }
 

@@ -40,17 +40,17 @@ describe('ChatConversation', () => {
         render(
             conversation({
                 id: 'call-1',
-                name: 'godot_scene',
+                name: 'godot',
                 status: 'running',
                 startedAt: STARTED_AT,
-                target: 'scenes/player.tscn'
+                target: 'scene.open'
             })
         )
 
-        expect(await screen.findByText('scenes/player.tscn · 3s')).toBeTruthy()
+        expect(await screen.findByText('scene.open · 3s')).toBeTruthy()
 
         await vi.advanceTimersByTimeAsync(21_000)
-        expect(await screen.findByText('scenes/player.tscn · 24s')).toBeTruthy()
+        expect(await screen.findByText('scene.open · 24s')).toBeTruthy()
     })
 
     it('colours a GDScript fence, and leaves an unknown language alone', () => {
@@ -138,17 +138,41 @@ describe('ChatConversation', () => {
         render(
             conversation({
                 id: 'call-1',
-                name: 'godot_scene',
+                name: 'godot',
                 status: 'complete',
                 startedAt: STARTED_AT,
                 endedAt: STARTED_AT + 250,
-                target: 'scenes/player.tscn'
+                target: 'scene.open'
             })
         )
 
         expect(await screen.findByText('250ms')).toBeTruthy()
-        expect(await screen.findByText('scenes/player.tscn')).toBeTruthy()
-        expect(screen.queryByText('scenes/player.tscn · 90s')).toBeNull()
+        expect(await screen.findByText('scene.open')).toBeTruthy()
+        expect(screen.queryByText('scene.open · 90s')).toBeNull()
+    })
+
+    it('names one row per operation an answered call ran, not the tool', () => {
+        render(
+            conversation({
+                id: 'call-1',
+                name: 'godot',
+                status: 'complete',
+                startedAt: STARTED_AT,
+                endedAt: STARTED_AT + 40,
+                target: 'node.create, scene.save',
+                output: JSON.stringify({
+                    ops: [
+                        {op: 'node.create', result: {path: '/Level1/Player'}},
+                        {op: 'scene.save', result: {saved: true}}
+                    ]
+                })
+            })
+        )
+
+        const rows = screen.getAllByRole('button').map(row => row.textContent)
+        expect(rows).toContain('node.create')
+        expect(rows).toContain('scene.save')
+        expect(rows).not.toContain('godot')
     })
 })
 

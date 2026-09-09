@@ -21,14 +21,7 @@ import {withoutEmptyToolCalls} from './ai-transcript.mjs'
 
 export const SUBAGENT_TOOL_NAME = 'subagent'
 
-export const CHILD_TOOL_NAMES = [
-    'read',
-    'bash',
-    'godot_docs_search',
-    'godot_script',
-    'web_search',
-    'ask_user'
-]
+export const CHILD_TOOL_NAMES = ['read', 'bash', 'godot', 'web_search', 'ask_user']
 
 export const SUBAGENT_TOOL_NAMES = ['read', 'bash']
 
@@ -68,15 +61,16 @@ const MAX_REPORTED_STEPS = 12
 /// What each tool a child may hold is called in the sentence that lists them.
 ///
 /// The sentence used to name read and bash whatever the child was given. A brief worker holding
-/// godot_docs_search and godot_script was told it had neither, and reached for grep instead of the
-/// language server that was sitting in its tool list.
+/// the godot tool was told it had neither documentation nor language server, and reached for grep
+/// instead of the one that was sitting in its tool list.
 const CHILD_TOOL_SENTENCES = {
     read: 'read files',
     bash: 'run shell commands',
-    godot_docs_search: 'search the Godot documentation with godot_docs_search',
-    godot_script:
-        'ask the language server about GDScript with godot_script — where a symbol is '
-        + 'defined, who calls it, and its exact signature',
+    godot:
+        'search the Godot documentation with the godot tool, as docs_search.search, and ask the '
+        + 'language server about GDScript with its read-only script operations — '
+        + 'script.definition, script.references, script.hover and their siblings — for where a '
+        + 'symbol is defined, who calls it, and its exact signature',
     web_search: 'search the web with web_search',
     ask_user: 'talk to the user with ask_user'
 }
@@ -133,7 +127,7 @@ const SUBAGENT_DESCRIPTION =
     + 'Do not reach for it when:\n'
     + '- you already know the file and want its contents — call read\n'
     + '- anything has to change — the sub-agent cannot write, edit, or drive the editor\n'
-    + '- the question is about the running editor or the scene tree — use the godot_ tools\n'
+    + '- the question is about the running editor or the scene tree — use the godot tool\n'
     + '\n'
     + 'Ask one self-contained question per call. The sub-agent shares your checkout but none of '
     + 'your conversation, so name the files, symbols and terms it should start from. Several '
@@ -241,8 +235,8 @@ function underCommandClock(tool, {timeoutMs, timers}) {
 
 const CONFINED_CHILD_TOOLS = {read: createReadTool, bash: createBashTool}
 
-/// The godot_script operations that only ask a question. A child holds these and nothing else of
-/// that domain, because a research agent that could call `edit` or `save` would no longer be one.
+/// The script operations that only ask a question. A child holds these and nothing else of that
+/// domain, because a research agent that could call `edit` or `save` would no longer be one.
 const ASKS_THE_LANGUAGE_SERVER = new Set([
     'list',
     'open',
@@ -259,45 +253,55 @@ const ASKS_THE_LANGUAGE_SERVER = new Set([
     'workspace_symbols'
 ])
 
-/// The catalogue's own godot_script description tells the model to write GDScript with this tool
+/// The catalogue's own script description tells the model to write GDScript with these operations
 /// rather than the file tools. A research child holds no operation that writes, so it has to be
-/// told what it actually has, or it spends turns being refused by `save`.
+/// told what it actually has, or it spends turns being refused by `script.save`.
 const READS_THE_LANGUAGE_SERVER =
     "GDScript intelligence through Godot's language server, read-only: it answers questions about "
     + 'a script and cannot change or create one. Positions are {line, character}, zero-based. Open '
     + 'a script before querying it. Paths may be named either way, `scripts/mario.gd` or '
     + 'res://scripts/mario.gd.'
 
-function childGodotTool(name, {domains, host}, keep, description) {
+/// The domains behind a child's one `godot` tool, and the slice of each it may hold.
+const CHILD_GODOT_DOMAINS = [
+    {name: 'godot_docs_search'},
+    {name: 'godot_script', keep: ASKS_THE_LANGUAGE_SERVER, description: READS_THE_LANGUAGE_SERVER}
+]
+
+function childGodotDomain(wanted, found) {
+    const operations =
+        wanted.keep ? found.operations.filter(one => wanted.keep.has(one.op)) : found.operations
+    if (operations.length === 0) {
+        throw new Error(
+            `A child was asked for godot, and none of the ${wanted.name} operations it may hold `
+                + 'are in the catalogue the backend offered.'
+        )
+    }
+    return {...found, operations, ...(wanted.description ? {description: wanted.description} : {})}
+}
+
+function childGodotTool({domains, host}) {
     if (!host || !Array.isArray(domains)) {
         throw new Error(
-            `A child was asked for ${name} without the tool host that answers it. `
+            'A child was asked for godot without the tool host that answers it. '
                 + 'Pass `host` and `domains` to createChildTools.'
         )
     }
-    const found = domains.find(domain => domain.name === name)
-    if (!found) {
+    const held = CHILD_GODOT_DOMAINS.flatMap(wanted => {
+        const found = domains.find(domain => domain.name === wanted.name)
+        return found ? [childGodotDomain(wanted, found)] : []
+    })
+    if (held.length === 0) {
         throw new Error(
-            `A child was asked for ${name}, but the backend did not offer that domain for this turn.`
+            'A child was asked for godot, but the backend did not offer '
+                + `${CHILD_GODOT_DOMAINS.map(one => one.name).join(' or ')} for this turn.`
         )
     }
-    const operations = keep ? found.operations.filter(one => keep.has(one.op)) : found.operations
-    if (operations.length === 0) {
-        throw new Error(
-            `A child was asked for ${name}, and none of the operations it may hold are in the `
-                + 'catalogue the backend offered.'
-        )
-    }
-    return createGodotTools(
-        [{...found, operations, ...(description ? {description} : {})}],
-        host
-    )[0]
+    return createGodotTools(held, host)[0]
 }
 
 const REACHING_CHILD_TOOLS = {
-    godot_docs_search: deps => childGodotTool('godot_docs_search', deps),
-    godot_script: deps =>
-        childGodotTool('godot_script', deps, ASKS_THE_LANGUAGE_SERVER, READS_THE_LANGUAGE_SERVER),
+    godot: deps => childGodotTool(deps),
     web_search: ({searchProvider = 'exa', braveApiKey}) =>
         createWebSearchTool({provider: searchProvider, apiKey: braveApiKey}),
     ask_user: ({host, ownerCallId, agreed, model}) => {

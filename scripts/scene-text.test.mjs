@@ -21,7 +21,7 @@ test('a tilemap line is replaced by its shape, and the scene around it is not', 
     assert.ok(elided.length < 1000, `elided to ${String(elided.length)} characters`)
     assert.match(
         elided,
-        /PackedByteArray\(<\d+ characters elided; read the cells with godot_node get_cells>\)/u
+        /PackedByteArray\(<\d+ characters elided; read the cells with node\.get_cells>\)/u
     )
     for (const kept of [
         '[gd_scene format=4 uid="uid://ci0257e7da2eh"]',

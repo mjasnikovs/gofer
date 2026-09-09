@@ -201,8 +201,8 @@ func _node_not_found(parameter: String, path: String) -> Dictionary:
     if get_tree().root.get_node_or_null(NodePath(spelled)) == null:
         return _failure("node_not_found", plain)
     var corrected := (
-        "%s. The running tree names it '%s': every path here starts at /root, while godot_node"
-        + " names the edited scene, which is a different tree in a different process."
+        "%s. The running tree names it '%s': every path here starts at /root, while the node.*"
+        + " operations name the edited scene, which is a different tree in a different process."
         + " Send \"%s\": \"%s\"."
     )
     return _failure("node_not_found", corrected % [plain, spelled, parameter, spelled])

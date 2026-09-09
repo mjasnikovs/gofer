@@ -340,7 +340,7 @@ impl Operation {
         let Some(object) = params.as_object() else {
             return Ok(());
         };
-        let call = format!("{} {}", self.tool, self.op);
+        let call = crate::tool_repair::dotted(self.tool, self.op);
         crate::tool_repair::check_set(&call, self.op, "", self.params, object)
     }
 }
@@ -469,7 +469,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:1009d2bfd46b3c99
+// GENERATED-BEGIN operations sha256:5afc9fffb4f11f9b
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -1239,7 +1239,7 @@ pub const GODOT_RESOURCE_OPERATIONS: &[Operation] = &[
     op(
         "godot_resource",
         "describe_tileset",
-        "Reports what a saved TileSet holds. Answers with its tile size, its sources, and every tile they define with whether it is solid — which is where the [column, row] pairs godot_node set_cells takes come from.",
+        "Reports what a saved TileSet holds. Answers with its tile size, its sources, and every tile they define with whether it is solid — which is where the [column, row] pairs node.set_cells takes come from.",
         Answers::Addon("resource.describe_tileset"),
         &[need("path", Text)],
     ),
@@ -1833,7 +1833,7 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
         &[
             noted(
                 need("path", Text),
-                "The node to read, by its path in the running tree: every one of those starts at /root. godot_node calls this same thing `node`, and this is the one operation in this catalogue where `path` names a node rather than a file.",
+                "The node to read, by its path in the running tree: every one of those starts at /root. The node.* operations call this same thing `node`, and this is the one operation in this catalogue where `path` names a node rather than a file.",
             ),
             opt("properties", List),
         ],

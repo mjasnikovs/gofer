@@ -13,7 +13,12 @@ const ONLY = process.env.ONLY?.split(',')
 const TURNS = 3
 
 const catalog = JSON.parse(await readFile(`${S}/catalog.json`, 'utf8'))
-const prompt = await readFile(`${S}/prompt.txt`, 'utf8')
+const shared = await readFile(`${S}/prompt.txt`, 'utf8')
+// An arm that ships its own system prompt is measured with it: surf-prompt-<arm>.txt beside the
+// tools, else the shared one.
+const prompts = {}
+for (const arm of NAMES)
+    prompts[arm] = await readFile(`${S}/surf-prompt-${arm}.txt`, 'utf8').catch(() => shared)
 const tools = {}
 for (const arm of NAMES)
     tools[arm] = JSON.parse(await readFile(`${S}/surf-tools-${arm}.json`, 'utf8'))
@@ -98,7 +103,7 @@ async function ask(arm, seed, messages) {
 
 async function trial(armName, task, seed) {
     const arm = ARMS[armName]
-    const messages = conversation(task, prompt, arm)
+    const messages = conversation(task, prompts[armName], arm)
     const row = {
         arm: armName,
         task: task.id,

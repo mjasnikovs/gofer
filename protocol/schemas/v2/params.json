@@ -1331,7 +1331,7 @@
         {
             "tool": "godot_resource",
             "op": "describe_tileset",
-            "summary": "Reports what a saved TileSet holds. Answers with its tile size, its sources, and every tile they define with whether it is solid — which is where the [column, row] pairs godot_node set_cells takes come from.",
+            "summary": "Reports what a saved TileSet holds. Answers with its tile size, its sources, and every tile they define with whether it is solid — which is where the [column, row] pairs node.set_cells takes come from.",
             "params": [
                 {
                     "name": "path",
@@ -2316,7 +2316,7 @@
                     "name": "path",
                     "kind": "text",
                     "required": true,
-                    "note": "The node to read, by its path in the running tree: every one of those starts at /root. godot_node calls this same thing `node`, and this is the one operation in this catalogue where `path` names a node rather than a file."
+                    "note": "The node to read, by its path in the running tree: every one of those starts at /root. The node.* operations call this same thing `node`, and this is the one operation in this catalogue where `path` names a node rather than a file."
                 },
                 {
                     "name": "properties",

@@ -125,7 +125,7 @@ type AnsweredOperation = Readonly<{
 }>
 
 function answeredOperations(tool: ToolActivity): AnsweredOperation[] | undefined {
-    if (!tool.output || !tool.name.startsWith('godot_')) return undefined
+    if (!tool.output || tool.name !== 'godot') return undefined
     try {
         const parsed: unknown = JSON.parse(tool.output)
         if (parsed === null || typeof parsed !== 'object') return undefined

@@ -143,25 +143,14 @@ test('only the APIS worker reaches past the worktree, and only when search is co
     const withSearch = scriptedWorker([ok('a'), ok('b'), ok('c'), ok('d')])
     await research(REFINED, {runWorker: withSearch.run, canSearch: true})
     const tools = Object.fromEntries(withSearch.calls.map(call => [call.label, call.toolNames]))
-    assert.deepEqual(tools['worker:apis'], [
-        'read',
-        'bash',
-        'godot_docs_search',
-        'godot_script',
-        'web_search'
-    ])
+    assert.deepEqual(tools['worker:apis'], ['read', 'bash', 'godot', 'web_search'])
     assert.deepEqual(tools['worker:files'], ['read', 'bash'])
     assert.deepEqual(tools['worker:context'], ['read', 'bash'])
     assert.deepEqual(tools['worker:tooling'], ['read', 'bash'])
 
     const offline = scriptedWorker([ok('a'), ok('b'), ok('c'), ok('d')])
     await research(REFINED, {runWorker: offline.run, canSearch: false})
-    assert.deepEqual(offline.calls[1].toolNames, [
-        'read',
-        'bash',
-        'godot_docs_search',
-        'godot_script'
-    ])
+    assert.deepEqual(offline.calls[1].toolNames, ['read', 'bash', 'godot'])
 })
 
 test('the APIS worker is handed the finished FILES map', async () => {

@@ -81,7 +81,7 @@ static func _out_of_time(call: Dictionary, playing: bool, launching: bool) -> Di
         var slow := _refusal(
             call,
             "runtime_slow_start",
-            "The game is running and its helper has not answered yet. Read godot_runtime get_state rather than running it again; stopping it now would throw away a game that is still starting"
+            "The game is running and its helper has not answered yet. Read runtime.get_state rather than running it again; stopping it now would throw away a game that is still starting"
         )
         slow["details"] = {"running": true}
         return slow
@@ -89,7 +89,7 @@ static func _out_of_time(call: Dictionary, playing: bool, launching: bool) -> Di
         return _refusal(
             call,
             "runtime_timeout",
-            "The game did not answer in time. This call cannot answer until the game draws a frame, and a game can be alive and drawing nothing - godot_runtime inspect_node and get_tree need no frame, so ask one of those: the tree itself means the game is alive and not drawing, and a runtime_broke means the debugger is holding it. If the debugger is holding it, godot_debug stack_trace says where it is stopped"
+            "The game did not answer in time. This call cannot answer until the game draws a frame, and a game can be alive and drawing nothing - runtime.inspect_node and runtime.get_tree need no frame, so ask one of those: the tree itself means the game is alive and not drawing, and a runtime_broke means the debugger is holding it. If the debugger is holding it, debug.stack_trace says where it is stopped"
         )
     return _refusal(call, "runtime_timeout", "The game did not answer in time")
 

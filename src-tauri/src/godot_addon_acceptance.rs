@@ -407,13 +407,13 @@ fn the_addon_refuses_stale_revisions_and_malformed_values() {
     let the_runtime_spelling = refused("/root/refusals/Sprite");
     assert!(
         the_runtime_spelling.contains("/refusals/Sprite")
-            && the_runtime_spelling.contains("godot_runtime"),
+            && the_runtime_spelling.contains("runtime.*"),
         "a /root/ path that is in the scene must be answered with the name it has here: \
          {the_runtime_spelling}"
     );
     let the_runtime_root = refused("/root");
     assert!(
-        the_runtime_root.contains("/refusals") && the_runtime_root.contains("godot_runtime"),
+        the_runtime_root.contains("/refusals") && the_runtime_root.contains("runtime.*"),
         "/root on its own is the running game's root, and the answer must name this scene's: \
          {the_runtime_root}"
     );
@@ -2946,7 +2946,7 @@ fn a_path_that_stops_matching_names_what_it_reached_and_what_is_under_it() {
         None,
     );
     assert!(
-        elsewhere.contains("godot_runtime") && !elsewhere.contains("is there and holds"),
+        elsewhere.contains("runtime.*") && !elsewhere.contains("is there and holds"),
         "the tree-confusion sentence still answers on its own: {elsewhere}"
     );
 }

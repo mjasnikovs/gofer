@@ -66,7 +66,7 @@ const ATLAS_LEGEND =
     + 'shaft, (0,1) flag pole, (1,1) the ball on top of it, (2,1) the flag, (3,1) castle brick, '
     + '(4,1) and (5,1) the halves of a bush, (6,1) and (7,1) the halves of a cloud'
 const AGENT_LIMIT_MS = 900_000
-const DOCS_TOOL = 'godot_docs_search'
+const DOCS_OP = 'docs_search.search'
 const COMPACTION_WINDOW = 48_000
 const CONFIGURED_WINDOW = '120064'
 const REFUSAL = [
@@ -154,10 +154,41 @@ async function untilTurnSettled(mark: number, limitMs = AGENT_LIMIT_MS): Promise
     }
 }
 
-async function toolCallsFor(name: string, mark: number, limitMs = 30_000) {
+function answeredOps(output: string | undefined): readonly string[] {
+    if (output === undefined) return []
+    try {
+        const {ops} = JSON.parse(output) as {ops?: readonly {op?: string}[]}
+        return (ops ?? []).flatMap(entry => (entry.op === undefined ? [] : [entry.op]))
+    } catch {
+        return []
+    }
+}
+
+// A recorded call keeps the target the stream drew and the answer, never the arguments it was made
+// with. Both name the ops: the target elides past three distinct ones, the answer never does.
+function opsOf(call: StoredToolCall): readonly string[] {
+    if (call.name !== 'godot') return []
+    const drawn = (call.target ?? '').split(',').map(entry => entry.trim().replace(/ ×\d+$/u, ''))
+    return [...new Set([...drawn, ...answeredOps(call.output)])].filter(op => op.includes('.'))
+}
+
+function calledOps(mark: number): readonly string[] {
+    return toolCallsSince(mark).flatMap(call => {
+        const ops = opsOf(call)
+        return ops.length > 0 ? ops : [call.name]
+    })
+}
+
+// `op` is one dotted operation (`docs_search.search`) or a whole domain (`scene`).
+function ranOp(call: StoredToolCall, op: string) {
+    const wanted = (ran: string) => (op.includes('.') ? ran === op : ran.startsWith(`${op}.`))
+    return opsOf(call).some(wanted)
+}
+
+async function godotCallsFor(op: string, mark: number, limitMs = 30_000) {
     const deadline = Date.now() + limitMs
     for (;;) {
-        const calls = toolCallsSince(mark).filter(call => call.name === name)
+        const calls = toolCallsSince(mark).filter(call => ranOp(call, op))
         if (calls.length > 0 || Date.now() >= deadline) return calls
         await browser.pause(500)
     }
@@ -1341,13 +1372,13 @@ describe('the live workspace', () => {
         it('answers a documentation question with at least one docs-RAG call', async () => {
             const asked = Date.now()
             const question =
-                'Use your godot_docs_search tool to look up what CharacterBody2D.move_and_slide '
+                'Use your docs_search.search tool to look up what CharacterBody2D.move_and_slide '
                 + 'does, and answer from the documentation you find.'
             let turn = asked
             await sendChat(question, AGENT_LIMIT_MS)
             for (let attempt = 0; attempt < 3; attempt++) {
                 await untilTurnSettled(turn)
-                const calls = await toolCallsFor(DOCS_TOOL, asked)
+                const calls = await godotCallsFor(DOCS_OP, asked)
                 if (calls.length > 0) {
                     const failed = calls.filter(call => call.status === 'error')
                     expect(failed.map(call => call.output ?? '')).toEqual([])
@@ -1362,7 +1393,7 @@ describe('the live workspace', () => {
             }
             throw new Error(
                 'the documentation question made 0 docs-RAG calls; the agent called '
-                    + JSON.stringify(toolCallsSince(asked).map(call => call.name))
+                    + JSON.stringify(calledOps(asked))
             )
         })
     })
@@ -1400,11 +1431,10 @@ describe('the live workspace', () => {
             const mark = Date.now()
             await sendChat('List every node in the main scene using your Godot tools.')
             await untilTurnSettled(mark)
-            const calls = await toolCallsFor('godot_scene', mark)
+            const calls = await godotCallsFor('scene', mark)
             if (calls.length === 0)
                 throw new Error(
-                    'the turn made 0 godot_scene calls; it called '
-                        + JSON.stringify(toolCallsSince(mark).map(call => call.name))
+                    'the turn made 0 scene.* calls; it called ' + JSON.stringify(calledOps(mark))
                 )
             expect(calls.some(call => call.status === 'complete')).toBe(true)
         })
@@ -1479,8 +1509,8 @@ describe('the live workspace', () => {
 
         it('asks before deleting a file, and takes no for an answer', async () => {
             await sendChat(
-                'Delete scripts/scratch.gd from the project using your godot_resource tool’s '
-                    + 'delete operation.'
+                'Delete scripts/scratch.gd from the project using your resource.delete '
+                    + 'operation.'
             )
             await expectText(['Approve godot_resource delete?'], {limitMs: 300_000})
             expect(await dialogText()).toContain('scripts/scratch.gd')
@@ -1491,8 +1521,8 @@ describe('the live workspace', () => {
 
         it('deletes the file once the user approves it', async () => {
             await sendChat(
-                'Try again: delete scripts/scratch.gd using your godot_resource tool’s delete '
-                    + 'operation. I will approve it this time.'
+                'Try again: delete scripts/scratch.gd using your resource.delete operation. '
+                    + 'I will approve it this time.'
             )
             await expectText(['Approve godot_resource delete?'], {limitMs: 300_000})
             await clickButton('Approve')
@@ -1510,15 +1540,15 @@ describe('the live workspace', () => {
                 'You are building a side-scrolling platformer in this Godot project. It ships '
                     + `16x16 pixel art at ${ATLAS}: eight tiles across and two down, which are `
                     + `${ATLAS_LEGEND}. `
-                    + `Cut that atlas into a tileset at ${TILESET} with your godot_resource `
-                    + 'create_tileset tool, making the tiles a player has to stand on or bump into '
-                    + 'solid and leaving the scenery alone. '
+                    + `Cut that atlas into a tileset at ${TILESET} with your `
+                    + 'resource.create_tileset tool, making the tiles a player has to stand on '
+                    + 'or bump into solid and leaving the scenery alone. '
                     + `Then create the scene ${LEVEL_SCENE_RESOURCE} with a Node2D root named `
                     + 'Level1, add a TileMapLayer named Terrain under it, set its tile_set property '
                     + 'to that tileset, and paint the ground of Super Mario Bros World 1-1 with '
-                    + 'your godot_node set_cells tool: two rows of ground running the length of the '
-                    + 'level, with a couple of gaps to fall down. Save the scene with godot_scene '
-                    + 'save — never by writing .tscn or .tres text yourself.',
+                    + 'your node.set_cells tool: two rows of ground running the length of the '
+                    + 'level, with a couple of gaps to fall down. Save the scene with '
+                    + 'scene.save — never by writing .tscn or .tres text yourself.',
                 async () => {
                     if (!existsSync(join(bound, LEVEL_SCENE))) return false
                     const scene = readFileSync(join(bound, LEVEL_SCENE), 'utf8')
@@ -1535,8 +1565,8 @@ describe('the live workspace', () => {
                 },
                 `${LEVEL_SCENE_RESOURCE} must hold a Node2D root named Level1 with a TileMapLayer `
                     + `named Terrain under it, that layer’s tile_set must be ${TILESET} built with `
-                    + 'godot_resource create_tileset, some of that tileset’s tiles must be solid, '
-                    + 'and the ground must be painted onto the layer with godot_node set_cells.'
+                    + 'resource.create_tileset, some of that tileset’s tiles must be solid, '
+                    + 'and the ground must be painted onto the layer with node.set_cells.'
             )
         })
 
@@ -1554,7 +1584,7 @@ describe('the live workspace', () => {
 
         it('gives the level a player that walks and jumps', async () => {
             await askUntil(
-                'Add the player to that level, using your godot_node tools on the open scene: a '
+                'Add the player to that level, using your node tools on the open scene: a '
                     + 'CharacterBody2D named Player with a collision shape and something visible, '
                     + 'standing on the ground near the left edge. '
                     + 'Write its script at res://scripts/mario.gd so it walks left and right, '
@@ -1589,13 +1619,13 @@ describe('the live workspace', () => {
 
         it('fills the level in with the things World 1-1 is made of', async () => {
             await askUntil(
-                'Finish World 1-1 on that same Terrain layer, with your godot_node set_cells tool '
+                'Finish World 1-1 on that same Terrain layer, with your node.set_cells tool '
                     + 'and the tiles the tileset already has: brick and question blocks floating '
                     + 'above the ground, at least two pipes standing on it — each pipe is its two '
                     + 'mouth tiles with its two shaft tiles under them, as many rows tall as you '
                     + 'want it — and the flag pole at the far right end of the level, with the ball '
                     + 'on top and the flag beside it. Put a bush and a cloud in as scenery. Save '
-                    + 'the scene with godot_scene save and confirm it still opens.',
+                    + 'the scene with scene.save and confirm it still opens.',
                 async () => {
                     await openLevelInEditor()
                     const painted = await godotCall<PaintedCells>('node.get_cells', {
@@ -1610,8 +1640,8 @@ describe('the live workspace', () => {
                     return painted.cells >= 120 && (painted.usedRect[2] ?? 0) >= 40
                 },
                 'the Terrain layer still needs pipe tiles, brick or question blocks, and the flag '
-                    + 'at the end, painted with godot_node set_cells and saved into the scene. '
-                    + 'Call godot_scene save as you go: the scene is reopened from disk to check '
+                    + 'at the end, painted with node.set_cells and saved into the scene. '
+                    + 'Call scene.save as you go: the scene is reopened from disk to check '
                     + 'it, so cells you painted but never saved are gone.'
             )
         })
@@ -1623,8 +1653,8 @@ describe('the live workspace', () => {
                     + 'and something visible. Write res://scripts/coin.gd with a method that '
                     + 'prints "coin collected" and frees the coin, and attach it to each one. Then '
                     + 'wire each coin up in the scene itself: connect its body_entered signal to '
-                    + 'that method with your godot_node connect_signal tool, targeting the coin, '
-                    + 'and put every coin in the group "coins" with godot_node add_to_group. Save '
+                    + 'that method with your node.connect_signal tool, targeting the coin, '
+                    + 'and put every coin in the group "coins" with node.add_to_group. Save '
                     + 'the scene.',
                 async () => {
                     if (!existsSync(join(bound, 'scripts/coin.gd'))) return false
@@ -1686,7 +1716,7 @@ describe('the live workspace', () => {
                     + 'CharacterBody2D root named Goomba, a collision shape and something visible, '
                     + 'and write res://scripts/goomba.gd so it walks back and forth along the '
                     + 'ground under gravity. Save that scene. Then open the level again and put at '
-                    + 'least three of them on the ground with your godot_node instantiate tool — '
+                    + 'least three of them on the ground with your node.instantiate tool — '
                     + 'instances of that scene, never rebuilt node by node. Save the level.',
                 async () => {
                     if (!existsSync(join(bound, 'scenes/goomba.tscn'))) return false
@@ -1697,7 +1727,7 @@ describe('the live workspace', () => {
                     return explorerShows(['Goomba'])
                 },
                 'the level needs at least three instances of res://scenes/goomba.tscn, placed with '
-                    + 'godot_node instantiate rather than rebuilt, and the level saved afterwards.'
+                    + 'node.instantiate rather than rebuilt, and the level saved afterwards.'
             )
         })
 

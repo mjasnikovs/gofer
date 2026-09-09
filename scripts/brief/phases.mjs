@@ -81,9 +81,7 @@ export const RESEARCH_WORKERS = [
         section: 'APIS',
         label: 'apis',
         toolNames: deps =>
-            deps.canSearch ?
-                ['read', 'bash', 'godot_docs_search', 'godot_script', 'web_search']
-            :   ['read', 'bash', 'godot_docs_search', 'godot_script'],
+            deps.canSearch ? ['read', 'bash', 'godot', 'web_search'] : ['read', 'bash', 'godot'],
         build: (refined, deps, done) =>
             apisPrompt(refined, {
                 inventory: deps.inventory,

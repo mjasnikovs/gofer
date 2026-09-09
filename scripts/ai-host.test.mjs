@@ -12,13 +12,13 @@ test('the tool host correlates results, failures, cancellation, and closure', as
     const sent = []
     const host = createToolHost(call => sent.push(call))
 
-    const answered = host.call('godot_scene', {op: 'get_tree'})
+    const answered = host.call('godot', {op: 'scene.get_tree'})
     assert.equal(sent.length, 1)
-    assert.equal(sent[0].tool, 'godot_scene')
+    assert.equal(sent[0].tool, 'godot')
     host.deliver({type: 'tool-result', id: sent[0].id, ok: true, result: {revision: 3}})
     assert.deepEqual(await answered, {revision: 3})
 
-    const refused = host.call('godot_scene', {op: 'save'})
+    const refused = host.call('godot', {op: 'scene.save'})
     host.deliver({
         type: 'tool-result',
         id: sent[1].id,
@@ -32,7 +32,7 @@ test('the tool host correlates results, failures, cancellation, and closure', as
     host.deliver({type: 'ignored'})
 
     const controller = new AbortController()
-    const cancelled = host.call('godot_scene', {op: 'get_tree'}, controller.signal)
+    const cancelled = host.call('godot', {op: 'scene.get_tree'}, controller.signal)
     controller.abort()
     await assert.rejects(cancelled, /cancelled/u)
     assert.equal(host.pendingCount, 0)
@@ -40,15 +40,15 @@ test('the tool host correlates results, failures, cancellation, and closure', as
     const failing = createToolHost(() => {
         throw new Error('the channel is closed')
     })
-    await assert.rejects(failing.call('godot_scene', {op: 'get_tree'}), /channel is closed/u)
+    await assert.rejects(failing.call('godot', {op: 'scene.get_tree'}), /channel is closed/u)
     assert.equal(failing.pendingCount, 0)
 
-    const pending = host.call('godot_scene', {op: 'get_tree'})
+    const pending = host.call('godot', {op: 'scene.get_tree'})
     host.close('the backend closed the tool channel')
     await assert.rejects(pending, /backend closed/u)
-    await assert.rejects(host.call('godot_scene', {op: 'get_tree'}), /backend closed/u)
+    await assert.rejects(host.call('godot', {op: 'scene.get_tree'}), /backend closed/u)
     await assert.rejects(
-        host.call('godot_scene', {op: 'get_tree'}, AbortSignal.abort()),
+        host.call('godot', {op: 'scene.get_tree'}, AbortSignal.abort()),
         /backend closed/u
     )
 })
@@ -71,7 +71,7 @@ test('two hosts reading one stream never answer each other', async () => {
     const tools = createToolHost(call => toolCalls.push(call))
     const credentials = createToolHost(call => credentialCalls.push(call), 'credential')
 
-    const tool = tools.call('godot_scene', {op: 'get_tree'})
+    const tool = tools.call('godot', {op: 'scene.get_tree'})
     const stored = credentials.call('store', {credential: {type: 'oauth'}})
     assert.notEqual(toolCalls[0].id, credentialCalls[0].id)
 

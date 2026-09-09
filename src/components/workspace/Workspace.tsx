@@ -97,7 +97,7 @@ function conflictPrompt(conflicts: readonly string[]): string {
         ...conflicts.map(path => `- ${path}`),
         '',
         'Read each one, keep what both sides were trying to do, and remove every marker. Write a',
-        'scene through the scene tools and a script through godot_script, not as raw text. When',
+        'scene through the scene tools and a script through script.edit, not as raw text. When',
         'nothing is left holding both versions, say so and stop — I will merge from there.'
     ].join('\n')
 }

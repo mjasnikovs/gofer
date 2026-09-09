@@ -158,14 +158,14 @@ test('a tool answering with an image is stripped for a model that cannot see', a
 
 test('says so when the same call keeps meeting the same refusal', async () => {
     const refusing = {
-        name: 'godot_node',
+        name: 'godot',
         execute: () => Promise.reject(new Error('missing_param: requires `parent`'))
     }
     const guarded = withoutRepeatingARefusal(refusing)
     const said = []
     for (let attempt = 0; attempt < 4; attempt += 1)
         await guarded
-            .execute('id', {ops: [{op: 'create'}]})
+            .execute('id', {ops: [{op: 'node.create'}]})
             .catch(error => said.push(error.message))
     assert.equal(said[0], 'missing_param: requires `parent`')
     assert.equal(said[1], 'missing_param: requires `parent`')
@@ -175,19 +175,21 @@ test('says so when the same call keeps meeting the same refusal', async () => {
 
     let answer = 'first'
     const varying = {
-        name: 'godot_runtime',
+        name: 'godot',
         execute: () => Promise.reject(new Error(answer))
     }
     const patient = withoutRepeatingARefusal(varying)
     const heard = []
     for (const next of ['first', 'second', 'third', 'fourth']) {
         answer = next
-        await patient.execute('id', {ops: [{op: 'wait'}]}).catch(error => heard.push(error.message))
+        await patient
+            .execute('id', {ops: [{op: 'runtime.wait'}]})
+            .catch(error => heard.push(error.message))
     }
     assert.deepEqual(heard, ['first', 'second', 'third', 'fourth'])
 
     const reordered = withoutRepeatingARefusal({
-        name: 'godot_node',
+        name: 'godot',
         execute: () => Promise.reject(new Error('missing_param: requires `parent`'))
     })
     const shuffled = []

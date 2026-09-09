@@ -12,7 +12,7 @@ export function elidePackedLiterals(text) {
     if (typeof text !== 'string') return text
     return text.replace(PACKED_LITERAL, (whole, kind, body, close) =>
         body.length > ELIDE_OVER ?
-            `Packed${kind}Array(<${String(body.length)} characters elided; read the cells with godot_node get_cells>${close}`
+            `Packed${kind}Array(<${String(body.length)} characters elided; read the cells with node.get_cells>${close}`
         :   whole
     )
 }

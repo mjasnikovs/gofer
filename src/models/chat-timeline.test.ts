@@ -113,10 +113,10 @@ describe('applyStreamEvent', () => {
     it('keeps text and tool calls in the order they arrived', () => {
         const message = replay([
             {type: 'text-delta', delta: 'Let me look.'},
-            {type: 'tool-start', id: 'a', name: 'godot_script', target: 'open', startedAt: 1},
+            {type: 'tool-start', id: 'a', name: 'godot', target: 'script.open', startedAt: 1},
             {type: 'tool-end', id: 'a', output: 'ok', isError: false, endedAt: 2},
             {type: 'text-delta', delta: 'Now the tileset.'},
-            {type: 'tool-start', id: 'b', name: 'godot_scene', target: 'save', startedAt: 3}
+            {type: 'tool-start', id: 'b', name: 'godot', target: 'scene.save', startedAt: 3}
         ])
         expect(messageParts(message)).toEqual([
             {kind: 'text', text: 'Let me look.'},
@@ -214,7 +214,7 @@ describe('applyStreamEvent', () => {
     it('keeps everything the agent said, not only its last step', () => {
         const message = replay([
             {type: 'text-delta', delta: 'Let me inspect the scene.'},
-            {type: 'tool-start', id: 'a', name: 'godot_scene', startedAt: 1},
+            {type: 'tool-start', id: 'a', name: 'godot', startedAt: 1},
             {type: 'tool-end', id: 'a', output: 'ok', isError: false, endedAt: 2},
             {type: 'text-delta', delta: 'Scene inspected.'},
             {
@@ -235,7 +235,7 @@ describe('applyStreamEvent', () => {
     it('marks a completion the model was stopped mid-way as stopped, not as complete', () => {
         const message = replay([
             {type: 'text-delta', delta: 'Half an ans'},
-            {type: 'tool-start', id: 'a', name: 'godot_scene', startedAt: 1},
+            {type: 'tool-start', id: 'a', name: 'godot', startedAt: 1},
             {type: 'aborted'},
             {
                 type: 'done',
@@ -254,7 +254,7 @@ describe('applyStreamEvent', () => {
 
     it('settles the calls a stopped turn left running, on the completion as well', () => {
         const message = replay([
-            {type: 'tool-start', id: 'a', name: 'godot_scene', startedAt: 1},
+            {type: 'tool-start', id: 'a', name: 'godot', startedAt: 1},
             {
                 type: 'done',
                 text: '',
@@ -301,7 +301,7 @@ describe('applyStreamEvent', () => {
 
     it('charges an ask to the one call it issued', () => {
         const message = replay([
-            {type: 'tool-start', id: 'a', name: 'godot_node', startedAt: 1},
+            {type: 'tool-start', id: 'a', name: 'godot', startedAt: 1},
             {type: 'tool-end', id: 'a', output: 'ok', isError: false, endedAt: 2},
             {type: 'tool-cost', ids: ['a'], tokens: 1967}
         ])
@@ -310,8 +310,8 @@ describe('applyStreamEvent', () => {
 
     it('splits an ask between its calls and leaves other calls untouched', () => {
         const message = replay([
-            {type: 'tool-start', id: 'a', name: 'godot_node', startedAt: 1},
-            {type: 'tool-start', id: 'b', name: 'godot_node', startedAt: 1},
+            {type: 'tool-start', id: 'a', name: 'godot', startedAt: 1},
+            {type: 'tool-start', id: 'b', name: 'godot', startedAt: 1},
             {type: 'tool-start', id: 'c', name: 'bash', startedAt: 1},
             {type: 'tool-cost', ids: ['a', 'b'], tokens: 101}
         ])
@@ -510,7 +510,7 @@ describe('retryPlan', () => {
         thinking: 'Thinking about it.',
         tools: [
             {id: 'a', name: 'bash', status: 'complete', startedAt: 1, endedAt: 2},
-            {id: 'b', name: 'godot_scene', status: 'error', startedAt: 3, endedAt: 4}
+            {id: 'b', name: 'godot', status: 'error', startedAt: 3, endedAt: 4}
         ],
         parts: [
             {kind: 'thinking', text: 'Thinking about it.'},

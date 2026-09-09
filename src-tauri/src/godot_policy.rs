@@ -162,7 +162,7 @@ pub(crate) fn enforcement_refusal(
                  Every `{WARNING_SETTING_PREFIX}` write is refused, `enable` and \
                  `directory_rules` included.\n\
                  Fix the code: declare the type, or cast the access to the type you expect. Look \
-                 the type up with godot_docs_search — do not guess it.\n\
+                 the type up with docs_search.search — do not guess it.\n\
                  Only the user can turn this rule off."
             ))
         }
@@ -188,7 +188,7 @@ pub(crate) fn enforcement_refusal(
                      Do NOT annotate around the rule. The annotation hides the code from the \
                      warning, it does not fix it.\n\
                      Fix the code: declare the type, or cast the access to the type you expect, \
-                     then write it again. Look the type up with godot_docs_search — do not guess \
+                     then write it again. Look the type up with docs_search.search — do not guess \
                      it.\n\
                      Only the user can turn this rule off."
                 )
@@ -445,7 +445,7 @@ mod tests {
             );
             let message = refusal(&enforcing(), &call).expect("the annotation is refused");
             assert!(
-                message.contains("godot_docs_search"),
+                message.contains("docs_search.search"),
                 "the fix names the docs to verify against"
             );
             assert_eq!(refusal(&relaxed(), &call), None);
@@ -477,7 +477,7 @@ mod tests {
         ]))
         .expect("the annotation this edit writes is refused");
         assert!(
-            introduced.contains("godot_docs_search"),
+            introduced.contains("docs_search.search"),
             "the fix names the docs to verify against"
         );
         assert_eq!(
@@ -514,7 +514,7 @@ mod tests {
         };
         let message = plan("@warning_ignore(\"unsafe_cast\")\nvar x = 1\n")
             .expect("a plan carrying the annotation is refused");
-        assert!(message.contains("godot_docs_search"));
+        assert!(message.contains("docs_search.search"));
         assert_eq!(
             plan("var x: int = 1\n"),
             None,

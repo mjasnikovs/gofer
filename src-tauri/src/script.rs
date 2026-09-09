@@ -1226,7 +1226,7 @@ fn a_plan_with_something_in_it(
                 "The language server planned no edits for renaming to {new_name} at line {} \
                  character {} of {path}. Every rename touches at least the declaration, so this is \
                  the server declining rather than a rename with nothing in it — the position may \
-                 not be on a symbol it renames. godot_script edit changes the text directly and \
+                 not be on a symbol it renames. script.edit changes the text directly and \
                  always works.",
                 position.line, position.character
             ),
@@ -1888,7 +1888,7 @@ mod tests {
             refused.message
         );
         assert!(
-            refused.message.contains("godot_script edit"),
+            refused.message.contains("script.edit"),
             "and the route that always works: {}",
             refused.message
         );

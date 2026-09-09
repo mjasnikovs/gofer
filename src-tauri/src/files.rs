@@ -158,7 +158,7 @@ impl FileError {
         let message = match (expected, actual) {
             (None, Some(_)) => format!(
                 "{path} exists and this agent has not been shown what it holds. Nothing was \
-                 written. Open it with `godot_script open` — a plain `read` does not record what \
+                 written. Open it with `script.open` — a plain `read` does not record what \
                  it showed you — then save."
             ),
             (Some(_), None) => format!(
@@ -1143,7 +1143,7 @@ mod tests {
             omitted.message
         );
         assert!(
-            omitted.message.contains("godot_script open"),
+            omitted.message.contains("script.open"),
             "the way out has to be in the sentence: {}",
             omitted.message
         );

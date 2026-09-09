@@ -745,7 +745,7 @@ func _check_mutation_prerequisites(expected_revision: Variant) -> Dictionary:
         return {
             "_gofer_error": {
                 "code": "session_playing",
-                "message": "The project is running and the scene cannot be mutated. Stop it with godot_runtime stop, then send this again; the edited scene and the running game are separate, so stopping loses nothing the editor holds",
+                "message": "The project is running and the scene cannot be mutated. Stop it with runtime.stop, then send this again; the edited scene and the running game are separate, so stopping loses nothing the editor holds",
                 "retryable": true,
                 "readiness": "ready",
                 "details": {}
@@ -972,7 +972,7 @@ func _runtime_launch(id: String, restart: bool, scene: String, args: PackedStrin
         _respond_error(
             id,
             "scene_not_found",
-            "No scene at '%s'. godot_scene list names every scene this project has" % scene,
+            "No scene at '%s'. scene.list names every scene this project has" % scene,
             false,
             {"scene": scene}
         )
@@ -1089,7 +1089,7 @@ func _runtime_forward(id: String, op: String, params: Dictionary) -> void:
             _respond_error(id, "runtime_not_running", "No game with the Gofer runtime helper is running", true)
         return
     if _runtime_broke and RuntimeQueue.PROCESS_AWAITING_OPS.has(op):
-        _respond_error(id, "runtime_broke", "The game is paused in the debugger, so it runs no frames and this call would wait forever. get_tree, inspect_node and get_monitors all answer while it is paused. godot_debug continue lets it go, and godot_debug stack_trace says where it is stopped. If it stopped while starting, what stopped it is in the session output - read that, fix it, and run again", true)
+        _respond_error(id, "runtime_broke", "The game is paused in the debugger, so it runs no frames and this call would wait forever. get_tree, inspect_node and get_monitors all answer while it is paused. debug.continue lets it go, and debug.stack_trace says where it is stopped. If it stopped while starting, what stopped it is in the session output - read that, fix it, and run again", true)
         return
     _runtime_pending.append({
         "id": id,
@@ -3367,7 +3367,7 @@ func _node_change_type(params: Dictionary) -> Dictionary:
                 "script_incompatible",
                 "%s carries a script that extends %s, and a %s is not one. Change what the "
                 % [node_path_str, base, node_type]
-                + "script extends first, with godot_script edit, then change the type.",
+                + "script extends first, with script.edit, then change the type.",
                 {"node": node_path_str, "type": node_type, "extends": base}
             )
         replacement.set_script(script)
@@ -4286,13 +4286,13 @@ func _node_not_found_error(raw: String) -> Dictionary:
     var root_path: String = "/" + String(root.name) if root != null else ""
     if path.begins_with("/root/") and _find_node(path.substr(5)) != null:
         message = (
-            "%s. It is there as %s: a path that starts at /root is how godot_runtime names the"
-            + " running game, which is a different tree in a different process."
+            "%s. It is there as %s: a path that starts at /root is how the runtime.* operations"
+            + " name the running game, which is a different tree in a different process."
         ) % [message, path.substr(5)]
     elif (path == "/root" or path == "/root/") and not root_path.is_empty():
         message = (
-            "%s. /root is how godot_runtime names the running game's root, which is a different"
-            + " tree in a different process; this scene's root is %s."
+            "%s. /root is how the runtime.* operations name the running game's root, which is a"
+            + " different tree in a different process; this scene's root is %s."
         ) % [message, root_path]
     elif path.begins_with("res://") and not root_path.is_empty():
         message = (

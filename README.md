@@ -96,15 +96,16 @@ compatibility, and uses `local` as the harmless placeholder API key when no cred
 
 ## AI tool router
 
-The agent reaches Godot through ten compact domain tools — `godot_session`, `godot_scene`,
-`godot_node`, `godot_project`, `godot_resource`, `godot_script`, `godot_debug`, `godot_runtime`,
-`godot_logs`, and `godot_docs_search` — each taking an `op` plus that operation's parameters. The
-worker implements none of them: it forwards every call to `src-tauri/src/ai_tools.rs`, which routes
-it to the same handler the renderer's own command calls, so a scene the agent edits goes through the
-same undo stack, revision check, and task binding as one the user edits. The catalog in that module
-generates the tool descriptions the model sees and validates the operations it may call, so the two
-cannot drift apart. Captured frames come back as real images rather than base64 text, and every
-failure keeps its structured code — `revision_conflict` stays `revision_conflict`.
+The agent reaches Godot through one `godot` tool taking a list of operations, each naming itself
+with a dotted `<domain>.<op>` — `session.start`, `scene.open`, `node.create_nodes`, `project.*`,
+`resource.*`, `script.edit`, `debug.launch`, `runtime.input`, `logs.read`, `docs_search.search` —
+plus that operation's parameters. The worker implements none of them: it forwards every call to
+`src-tauri/src/ai_tools.rs`, which routes it to the same handler the renderer's own command calls,
+so a scene the agent edits goes through the same undo stack, revision check, and task binding as one
+the user edits. The catalog in that module generates the tool descriptions the model sees and
+validates the operations it may call, so the two cannot drift apart. Captured frames come back as
+real images rather than base64 text, and every failure keeps its structured code —
+`revision_conflict` stays `revision_conflict`.
 
 Beside those the agent has the ordinary file and shell tools, confined to the project. Scenes and
 `project.godot` are excluded from all three: the editor holds them open, so a `.tscn` written as

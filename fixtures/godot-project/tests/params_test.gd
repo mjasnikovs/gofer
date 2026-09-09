@@ -560,7 +560,7 @@ func _test_node_decisions(params: GDScript, failures: Array[String]) -> void:
     var loud: String = params.call(
         "why_the_editor_cannot_see_it", child, ["Score"] as Array[String]
     )
-    if not loud.contains("Score") or not loud.contains("godot_session"):
+    if not loud.contains("Score") or not loud.contains("session.stop"):
         failures.append("a registered autoload is named, with what to do about it")
 
     root.free()

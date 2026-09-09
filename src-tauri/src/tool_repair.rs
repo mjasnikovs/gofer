@@ -30,6 +30,15 @@ use serde_json::{Value, json};
 /// of the entry before anything — this check, the policy, the approval, the addon — sees one.
 const UNIVERSAL: &[&str] = &["timeoutMs"];
 
+/// How a call is spelled to the model: the domain without its `godot_` prefix, a dot, the op.
+///
+/// The catalogue names the domain `godot_node` and the router still answers to that, but the one
+/// tool the model is given takes `node.create` — so a refusal naming the domain would be telling
+/// it to write a call the schema refuses.
+pub(crate) fn dotted(tool: &str, op: &str) -> String {
+    format!("{}.{op}", tool.strip_prefix("godot_").unwrap_or(tool))
+}
+
 /// [`Operation::check`], for a caller holding two strings — the drift checks, and the tests that
 /// state the pair they are about. The router resolves the operation once and asks the row, which
 /// is why this door is read only by tests.
@@ -43,7 +52,7 @@ pub fn check(domain: &str, op: &str, params: &Value) -> Result<(), ToolFailure> 
 ///
 /// The wording is the whole point of the nesting. `missing field oldText` is what serde says about
 /// the same call, and a model cannot act on it: it names no operation, no parameter and no
-/// position. `godot_script edit \`files[0].edits[1]\` requires \`oldText\`` names all three.
+/// position. `script.edit \`files[0].edits[1]\` requires \`oldText\`` names all three.
 pub(crate) fn check_set(
     call: &str,
     op: &str,
@@ -228,14 +237,14 @@ pub(crate) fn check_set(
 /// list of operations, so the caller can simply ask for both. The refusal listed `input`'s
 /// parameters and left the word it had actually written unexplained.
 ///
-/// The tool is read off the call's own name, which `check_set` is given as "godot_runtime input".
+/// The tool is read off the call's own name, which `check_set` is given as "runtime.input".
 fn an_operation_of_this_tool(call: &str, key: &str) -> bool {
-    let Some((tool, op)) = call.split_once(' ') else {
+    let Some((short, op)) = call.split_once('.') else {
         return false;
     };
     crate::ai_tools::CATALOG
         .iter()
-        .filter(|domain| domain.name == tool)
+        .filter(|domain| domain.name.strip_prefix("godot_") == Some(short))
         .any(|domain| {
             domain
                 .operations
@@ -286,7 +295,7 @@ fn the_operation_these_keys_belong_to(
         .iter()
         .flat_map(|domain| {
             domain.operations.iter().filter_map(|operation| {
-                let named = format!("{} {}", domain.name, operation.op);
+                let named = dotted(domain.name, operation.op);
                 let visible = || operation.params.iter().filter(|param| !param.hidden);
                 let holds_all = visible()
                     .filter(|param| param.required)
@@ -317,7 +326,7 @@ fn as_much_of_the_key_as_is_evidence(key: &str) -> String {
 
 /// The keys an object did arrive with, so a missing one is a difference rather than an absence.
 ///
-/// `godot_script edit \`files[0]\` requires \`path\`` is the second commonest refusal in the recorded
+/// `script.edit \`files[0]\` requires \`path\`` is the second commonest refusal in the recorded
 /// live turns and the only frequent one that says nothing about what was sent — an `unknown_param`
 /// carries the value that arrived, and this carried the shape that was wanted and no more. Three
 /// separate turns hit it, in three separate sessions, and none of the traces can say what shape
@@ -700,9 +709,7 @@ pub(crate) fn repair_call(tool: &str, op: &str, spec: &'static [Param], params: 
     }
     if params
         .as_object()
-        .and_then(|object| {
-            the_operation_these_keys_belong_to(&format!("{tool} {op}"), spec, object)
-        })
+        .and_then(|object| the_operation_these_keys_belong_to(&dotted(tool, op), spec, object))
         .is_some()
     {
         return;
@@ -962,7 +969,7 @@ fn drop_the_wreckage_a_complete_call_can_spare(
 
 /// One entry of a required list, written without the list around it.
 ///
-/// `godot_script edit` takes `files`, a list of `{path, edits}`. A caller changing one file has one
+/// `script.edit` takes `files`, a list of `{path, edits}`. A caller changing one file has one
 /// entry to write, and two recorded turns wrote just the entry:
 ///
 /// ```text
@@ -2156,7 +2163,7 @@ mod tests {
 
         let refused = message("godot_scene", "create", misplaced);
         assert!(
-            refused.contains("godot_node create's parameter list exactly"),
+            refused.contains("node.create's parameter list exactly"),
             "the refusal names the operation these parameters are: {refused}"
         );
 
@@ -2290,7 +2297,7 @@ mod tests {
                 seen += 1;
                 assert_eq!(
                     the_operation_these_keys_belong_to(
-                        &format!("{} {}", domain.name, operation.op),
+                        &dotted(domain.name, operation.op),
                         params,
                         least.as_object().expect("an object")
                     ),
@@ -2442,7 +2449,7 @@ mod tests {
             assert_eq!(held, call, "a misplaced call is left as written: {call}");
             let said = message("godot_scene", "create", held);
             assert!(
-                said.contains("godot_node create's parameter list exactly"),
+                said.contains("node.create's parameter list exactly"),
                 "with or without the router's own key: {said}"
             );
         }
@@ -2467,12 +2474,12 @@ mod tests {
                 let Some(object) = least.as_object() else {
                     continue;
                 };
-                let named = format!("{} {}", domain.name, operation.op);
+                let named = dotted(domain.name, operation.op);
                 let mut fitting: Vec<(&str, &str)> = CATALOG
                     .iter()
                     .flat_map(|other| other.operations.iter().map(move |op| (other.name, op.op)))
                     .filter(|(tool, op)| {
-                        let sent = format!("{tool} {op}");
+                        let sent = dotted(tool, op);
                         sent != named
                             && params_of(tool, op).is_some_and(|spec| {
                                 the_operation_these_keys_belong_to(&sent, spec, object).as_deref()
@@ -2505,7 +2512,7 @@ mod tests {
                     );
                 }
                 assert_eq!(
-                    the_operation_these_keys_belong_to(&format!("{tool} {op}"), spec, &carried)
+                    the_operation_these_keys_belong_to(&dotted(tool, op), spec, &carried)
                         .as_deref(),
                     Some(named.as_str()),
                     "{tool} {op} stopped naming {named} once the router's own keys were in the call"

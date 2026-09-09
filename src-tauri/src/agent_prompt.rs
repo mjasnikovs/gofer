@@ -43,33 +43,33 @@ Guidelines:
 /// data of every model this ships against, and the failure that produces is not an error message —
 /// it is a confident Godot 3 name, written into a script, found minutes later by a scene that will
 /// not load. The date is what turns "search the docs" from advice into arithmetic the model can do.
-const GODOT_PROMPT: &str = r#"Godot engine (a Gofer-managed editor, reached through the godot_* tools):
+const GODOT_PROMPT: &str = r#"Godot engine (a Gofer-managed editor, reached through the godot tool):
 {engine}
-- Search godot_docs_search before writing any Godot class, method, signal, property or constant, every time, including when the name feels obvious
-- What Gofer already knows about this project — the editor session, anything it has learned before, the files it tracks — is written at the end of the message that started this turn; read it there rather than asking for any of it, and if the session says offline, start it with godot_session start before any other godot_ tool
-- Every godot_ tool takes an ops list, so put everything you want from that tool now into one call: three inspections is one call of three entries, not three calls
+- Search docs_search.search before writing any Godot class, method, signal, property or constant, every time, including when the name feels obvious
+- What Gofer already knows about this project — the editor session, anything it has learned before, the files it tracks — is written at the end of the message that started this turn; read it there rather than asking for any of it, and if the session says offline, start it with session.start before any other godot operation
+- The godot tool takes an ops list, so put everything you want from the editor now into one call: three inspections is one call of three entries, not three calls
 - Each entry names its op with its parameters beside it, and the entries run in order; most ops may be repeated in one call, and the few that may not — along with the debugger's, which have to be the only entry of theirs — say so on their own line
 
 Editing the project:
-- Scenes and project.godot belong to the editor: change them with godot_scene, godot_node and godot_project, never by writing the file as text — the write, edit and bash tools refuse those paths
+- Scenes and project.godot belong to the editor: change them with the scene, node and project operations, never by writing the file as text — the write, edit and bash tools refuse those paths
 - GDScript belongs to the language server: the write and edit tools refuse a .gd, because a file written behind the server leaves Godot running the old code
-{typing}- Never guess a script filename: godot_script list names every script in the project, and is the call to make before opening, reading or writing one whose path you were not given
+{typing}- Never guess a script filename: script.list names every script in the project, and is the call to make before opening, reading or writing one whose path you were not given
 - Every other file is yours to write
-- Create a script with godot_script save, then godot_script diagnostics on the same path — a script that does not parse stops its scene from loading, and the language server is the only thing that says so immediately
-- godot_script open, close and diagnostics each take a list of paths: after writing several scripts, name them all in one diagnostics call, not one call per script
-- Change a script that exists with godot_script edit, which replaces exact text and answers with the diagnostics itself: read the file, then send every change to every file in one call, not one call per change
-- Scene mutations are undoable until godot_scene save; the revision each one is checked against is supplied by the router, so never ask for it or pass it
-- Build with godot_node create_nodes and set_properties: one call carrying every node, then one carrying every property, not one call per node — every call costs a whole request, and a batch is also one undo step
-- The edited scene (godot_scene, godot_node) and the running game (godot_runtime) are separate: editing one never changes the other
+- Create a script with script.save, then script.diagnostics on the same path — a script that does not parse stops its scene from loading, and the language server is the only thing that says so immediately
+- script.open, script.close and script.diagnostics each take a list of paths: after writing several scripts, name them all in one diagnostics call, not one call per script
+- Change a script that exists with script.edit, which replaces exact text and answers with the diagnostics itself: read the file, then send every change to every file in one call, not one call per change
+- Scene mutations are undoable until scene.save; the revision each one is checked against is supplied by the router, so never ask for it or pass it
+- Build with node.create_nodes and node.set_properties: one call carrying every node, then one carrying every property, not one call per node — every call costs a whole request, and a batch is also one undo step
+- The edited scene (scene.*, node.*) and the running game (runtime.*) are separate: editing one never changes the other
 - A property holding a resource takes {"type": "resource", "value": {"path": "res://..."}}; a bare string is refused
-- A 2D collision shape has a tool: godot_resource create_shape writes it and imports it, and art has one: godot_resource create_texture draws a PNG and imports it, which is how a project with no art gets some. A resource with neither has none — write the .tres yourself, as `[gd_resource type="BoxMesh" format=3]`, a blank line, `[resource]`, then `size = Vector3(2, 2, 2)`
-- Build a 2D level from tiles — godot_resource create_tileset, then godot_node set_cells on a TileMapLayer; a hundred ColorRects is not a level, and a TileSet written as text opens with no tiles in it
-- Wire a scene with godot_node connect_signal and add_to_group, never with a connect call in _ready as well: the second connection errors every time the node loads
-- Write and attach a script before connecting to it, because a connection names a method that has to exist; godot_node inspect reads groups, signals and connections
+- A 2D collision shape has a tool: resource.create_shape writes it and imports it, and art has one: resource.create_texture draws a PNG and imports it, which is how a project with no art gets some. A resource with neither has none — write the .tres yourself, as `[gd_resource type="BoxMesh" format=3]`, a blank line, `[resource]`, then `size = Vector3(2, 2, 2)`
+- Build a 2D level from tiles — resource.create_tileset, then node.set_cells on a TileMapLayer; a hundred ColorRects is not a level, and a TileSet written as text opens with no tiles in it
+- Wire a scene with node.connect_signal and node.add_to_group, never with a connect call in _ready as well: the second connection errors every time the node loads
+- Write and attach a script before connecting to it, because a connection names a method that has to exist; node.inspect reads groups, signals and connections
 
 Running and debugging:
-- After godot_debug launch, wait with await_stop before reading the stack
-- Read godot_logs when something fails without explanation
+- After debug.launch, wait with debug.await_stop before reading the stack
+- Read logs.read when something fails without explanation
 
 Approvals:
 - Deleting or moving a file, enabling a plugin, and writing a machine-wide editor setting ask the user first
@@ -219,13 +219,12 @@ mod tests {
     fn the_godot_half_is_added_only_when_those_tools_are_offered() {
         let shipped = default_prompt(CATALOG, true);
         assert!(shipped.starts_with("You are Gofer"));
-        assert!(shipped.contains("godot_session start"));
-        assert!(shipped.contains("godot_docs_search"));
+        assert!(shipped.contains("session.start"));
+        assert!(shipped.contains("docs_search.search"));
         assert_eq!(default_prompt(&[], true), BASE_PROMPT);
         assert!(default_prompt(&[], true).contains("subagent"));
         assert!(default_prompt(&[], true).contains("web_search"));
         assert!(default_prompt(&[], true).contains("web_fetch"));
-        assert!(shipped.contains("godot_docs_search"));
     }
 
     /// The engine the prompt names is the engine the session refuses to start without. Read from
@@ -246,33 +245,31 @@ mod tests {
         assert!(shipped.contains("newer than your training data"));
     }
 
-    /// The rule the model was never told about, and the only line of the prompt that depends on a
-    /// setting.
-    ///
-    /// A project with the rule off is not told GDScript warnings are errors, because there they are
-    /// not — and a placeholder left behind would say `{typing}` to the model, which is the failure
-    /// the engine-line test guards against for the same reason.
+    /// Never an operation the catalogue does not offer: a prompt naming one sends the model at a
+    /// refusal it cannot read its way out of.
     #[test]
     fn every_operation_the_prompt_names_is_one_the_catalogue_has() {
         let prompt = default_prompt(crate::ai_tools::CATALOG, true);
         let mut checked: Vec<String> = Vec::new();
         for domain in crate::ai_tools::CATALOG {
+            let short = domain.name.trim_start_matches("godot_");
             let known: Vec<&str> = domain.operations.iter().map(|one| one.op).collect();
-            for occurrence in prompt.match_indices(&format!("{} ", domain.name)) {
-                let rest = &prompt[occurrence.0 + domain.name.len() + 1..];
-                let word: String = rest
+            for occurrence in prompt.match_indices(&format!("{short}.")) {
+                let rest = &prompt[occurrence.0 + short.len() + 1..];
+                let op: String = rest
                     .chars()
                     .take_while(|one| one.is_ascii_lowercase() || *one == '_')
                     .collect();
-                if !word.contains('_') || word.starts_with('_') || word.ends_with('_') {
+                let dotted = format!("{short}.{op}");
+                // `scene.*` names a whole domain, and project.godot is the project file.
+                if op.is_empty() || dotted == "project.godot" {
                     continue;
                 }
-                checked.push(format!("{} {word}", domain.name));
+                checked.push(dotted.clone());
                 assert!(
-                    known.contains(&word.as_str()),
-                    "the prompt tells the model to use `{} {word}`, and {} has no such operation. \
+                    known.contains(&op.as_str()),
+                    "the prompt tells the model to use `{dotted}`, and {} has no such operation. \
                      Its operations are: {known:?}",
-                    domain.name,
                     domain.name
                 );
             }
@@ -283,6 +280,12 @@ mod tests {
         );
     }
 
+    /// The rule the model was never told about, and the only line of the prompt that depends on a
+    /// setting.
+    ///
+    /// A project with the rule off is not told GDScript warnings are errors, because there they are
+    /// not — and a placeholder left behind would say `{typing}` to the model, which is the failure
+    /// the engine-line test guards against for the same reason.
     #[test]
     fn the_strict_typing_rule_is_in_the_prompt_only_where_it_is_enforced() {
         let enforced = default_prompt(CATALOG, true);

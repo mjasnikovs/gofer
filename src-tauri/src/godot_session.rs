@@ -1456,7 +1456,7 @@ fn the_game_crashed(facts: &SessionFacts) -> Option<String> {
     Some(format!(
         "The game died of a signal: {}. That is the game process crashing, not this call — \
          running it again will not help until the cause is gone. The backtrace under it is in \
-         godot_logs read.",
+         logs.read.",
         message.trim()
     ))
 }
@@ -1517,7 +1517,7 @@ fn explaining(facts: &SessionFacts, mut failure: ToolFailure) -> ToolFailure {
     if let Some(crash) = editor_crashed(facts) {
         failure.message = format!(
             "{}\n\nThe Godot editor itself died: {crash}. That is the engine crashing, not this \
-             call — retrying it will not help. Start a new session with godot_session start.",
+             call — retrying it will not help. Start a new session with session.start.",
             failure.message.trim_end()
         );
     }
@@ -1623,11 +1623,11 @@ fn refusing_a_halted_game(
         ..ToolFailure::new(
             "game_halted",
             format!(
-                "The game is stopped in the debugger, so it runs no frame and godot_runtime {op} \
-                 cannot be answered. Waiting will not change that. godot_debug continue lets it \
-                 run on, and godot_debug stack_trace says where it is stopped. godot_runtime \
-                 get_tree, inspect_node and get_monitors are not refused here — a break stops the \
-                 scene tree and not the reads, so a stopped game still answers one."
+                "The game is stopped in the debugger, so it runs no frame and runtime.{op} \
+                 cannot be answered. Waiting will not change that. debug.continue lets it run \
+                 on, and debug.stack_trace says where it is stopped. runtime.get_tree, \
+                 runtime.inspect_node and runtime.get_monitors are not refused here — a break \
+                 stops the scene tree and not the reads, so a stopped game still answers one."
             ),
         )
     })
@@ -1647,8 +1647,8 @@ fn refusing_a_halted_game(
 fn the_debugger_holds_the_game(facts: &SessionFacts) -> Option<String> {
     facts.debugger_holds_a_game.then(|| {
         "This game was launched by the debugger, and a game stopped at a breakpoint answers \
-         nothing until it runs on. If one is set, godot_debug continue is what lets this call \
-         through; godot_debug stack_trace says where it is stopped."
+         nothing until it runs on. If one is set, debug.continue is what lets this call through; \
+         debug.stack_trace says where it is stopped."
             .to_owned()
     })
 }
@@ -1722,9 +1722,9 @@ fn a_breakpoint_is_still_armed(facts: &SessionFacts) -> Option<String> {
     }
     Some(format!(
         "A breakpoint is still set in {}. The editor holds breakpoints rather than the debug \
-         session, so it hands them to the next game it plays — including one godot_runtime run \
-         starts — and a game stopped at one draws no frame. Clear it with godot_debug \
-         set_breakpoints and an empty lines list for that file, then run again.",
+         session, so it hands them to the next game it plays — including one runtime.run \
+         starts — and a game stopped at one draws no frame. Clear it with debug.set_breakpoints \
+         and an empty lines list for that file, then run again.",
         facts.armed_breakpoints.join(", ")
     ))
 }
@@ -1746,8 +1746,8 @@ fn the_helper_is_not_installed(facts: &SessionFacts) -> Option<String> {
         "The game has no Gofer runtime helper to answer with: project.godot no longer registers \
          the GoferRuntime autoload, so nothing in the game can reply and waiting will not change \
          that. Something rewrote project.godot after this session staged it — a branch switch, a \
-         merge, or an edit to the file. Restart the editor with godot_session stop then \
-         godot_session start, which stages it again."
+         merge, or an edit to the file. Restart the editor with session.stop then session.start, \
+         which stages it again."
             .to_owned(),
     )
 }
@@ -2879,7 +2879,7 @@ mod tests {
             carried.message
         );
         assert!(
-            carried.message.contains("godot_session start"),
+            carried.message.contains("session.start"),
             "the failure offered no way out: {}",
             carried.message
         );
@@ -3054,7 +3054,7 @@ mod tests {
             carried.message
         );
         assert!(
-            carried.message.contains("godot_session start"),
+            carried.message.contains("session.start"),
             "and the one thing worth doing about it: {}",
             carried.message
         );
@@ -3418,11 +3418,7 @@ mod tests {
             },
             addon_failure("runtime_timeout", "The game did not answer in time"),
         );
-        assert!(
-            held.message.contains("godot_debug continue"),
-            "{}",
-            held.message
-        );
+        assert!(held.message.contains("debug.continue"), "{}", held.message);
 
         let alone = explaining(
             &a_session_with_nothing_wrong(),
@@ -3457,7 +3453,7 @@ mod tests {
         assert_eq!(refused.code, "game_halted");
         assert!(refused.retryable, "continue is what makes this call work");
         assert!(
-            refused.message.contains("godot_debug continue"),
+            refused.message.contains("debug.continue"),
             "{}",
             refused.message
         );
@@ -3507,11 +3503,7 @@ mod tests {
             },
             addon_failure("runtime_timeout", "The game did not answer in time"),
         );
-        assert!(
-            held.message.contains("godot_debug continue"),
-            "{}",
-            held.message
-        );
+        assert!(held.message.contains("debug.continue"), "{}", held.message);
         assert!(
             !held.message.contains("still set in"),
             "one sentence or the other, never both: {}",

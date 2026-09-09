@@ -1199,7 +1199,7 @@ static func property_not_found_error(node: Node, path: String, property: String)
 ## plugin's, and turning it into a sentence is not.
 static func why_the_editor_cannot_see_it(target: Node, added_here: Array[String]) -> String:
     var named := ". The editor cannot compile its script, so the methods it reports are the last "
-    named += "version that compiled — read godot_script diagnostics for what is wrong with it."
+    named += "version that compiled — read script.diagnostics for what is wrong with it."
     if added_here.is_empty():
         return named
     return (
@@ -1207,7 +1207,8 @@ static func why_the_editor_cannot_see_it(target: Node, added_here: Array[String]
         + " If the only thing wrong is a name from %s: an autoload registered while the editor has "
         % ", ".join(added_here)
         + "been running is not one the editor can resolve until it restarts, though the running "
-        + "game resolves it fine. Stop and start the session with godot_session, then connect."
+        + "game resolves it fine. Stop and start the session with session.stop and session.start, "
+        + "then connect."
     )
 
 ## Where a method the caller named would have to live, said to a caller that has not put one there.
@@ -1221,7 +1222,7 @@ static func where_a_method_would_be(target: Node, method: String = "") -> String
     if script == null:
         return (
             ". No script is attached to it, so it has no methods of its own — write one with "
-            + "godot_script save and set the node's script property to it first. `target` is the "
+            + "script.save and set the node's script property to it first. `target` is the "
             + "node carrying the method and defaults to the scene root, so name it if the method "
             + "lives elsewhere."
         )

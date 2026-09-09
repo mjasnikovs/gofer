@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict'
 import {readFile} from 'node:fs/promises'
 import test from 'node:test'
-import {createGodotTools} from './godot-tools.mjs'
+import {createGodotTools, normalizeGodotCall} from './godot-tools.mjs'
 import {normalizeToolCalls} from './tool-call-repair.mjs'
 import {declaredDomains} from './declared-domains.mjs'
 import {validateToolArguments} from '@earendil-works/pi-ai'
+
+const dotted = (tool, op) => `${tool.replace(/^godot_/u, '')}.${op}`
+
+const asOneCall = row => ({ops: [{op: dotted(row.tool, row.op), ...row.wrote}]})
 
 const catalog = [
     {
@@ -109,12 +113,10 @@ test("the line between the two engines is the schema's, not a column in the fixt
         await readFile(new URL('../fixtures/tool-call-repairs.json', import.meta.url), 'utf8')
     )
     const domains = await declaredDomains()
-    const tools = createGodotTools(domains, {call: async () => ({})})
+    const [godot] = createGodotTools(domains, {call: async () => ({})})
     assert.ok(fixture.repairs.length > 10, 'the corpus lost its repairs')
     for (const row of fixture.repairs) {
-        const tool = tools.find(one => one.name === row.tool)
-        assert.ok(tool, `${row.tool} is in the corpus and is not advertised`)
-        const accepted = schemaAccepts(tool, {ops: [{op: row.op, ...row.wrote}]})
+        const accepted = schemaAccepts(godot, asOneCall(row))
         if (accepted) {
             assert.notEqual(
                 row.repairedBy,
@@ -136,9 +138,8 @@ test("the line between the two engines is the schema's, not a column in the fixt
         continue
     }
     for (const row of fixture.repairs.filter(one => one.repairedBy === 'schema')) {
-        const tool = tools.find(one => one.name === row.tool)
         assert.ok(
-            !schemaAccepts(tool, {ops: [{op: row.op, ...row.wrote}]}),
+            !schemaAccepts(godot, asOneCall(row)),
             `${row.why}: the schema admits this again, so the router has to own it once more`
         )
     }
@@ -178,6 +179,28 @@ test('a call the router would accept is never rewritten, for every operation', a
     assert.ok(asked > 100, `the catalogue has to be reached for this to mean anything: ${asked}`)
 })
 
+// The tool the model holds hands the repairs one list of every operation, so a name that fits
+// nothing in its own domain now has 110 siblings to be confused with.
+test('a call the one tool would accept is never rewritten, for every dotted operation', async () => {
+    const domains = await declaredDomains()
+    const [godot] = createGodotTools(domains, {call: async () => ({})})
+    let asked = 0
+    for (const domain of domains) {
+        for (const operation of domain.operations) {
+            const entry = theLeastEntry(operation)
+            const call = {ops: [{...entry, op: dotted(domain.name, entry.op)}]}
+            const once = godot.prepareArguments(structuredClone(call))
+            assert.equal(
+                sortedKeys(once),
+                sortedKeys(call),
+                `${call.ops[0].op} was rewritten though it was already right`
+            )
+            asked += 1
+        }
+    }
+    assert.ok(asked > 100, `the catalogue has to be reached for this to mean anything: ${asked}`)
+})
+
 function sortedKeys(value) {
     return JSON.stringify(value, (key, held) =>
         held && typeof held === 'object' && !Array.isArray(held) ?
@@ -186,11 +209,10 @@ function sortedKeys(value) {
     )
 }
 
-test('an operation this tool does not have is refused by name, with a signpost', () => {
-    const tools = createGodotTools(catalog, {call: async () => ({})})
-    const node = tools.find(tool => tool.name === 'godot_scene')
+test('an operation this domain does not have is refused by name, with a signpost', () => {
     assert.throws(
-        () => node.prepareArguments({ops: [{op: 'get_tree'}, {op: 'capture'}]}),
+        () =>
+            normalizeGodotCall(catalog, 'godot_scene', {ops: [{op: 'get_tree'}, {op: 'capture'}]}),
         error => {
             assert.match(error.message, /no 'capture' operation/u)
             assert.match(error.message, /get_tree, save/u)
@@ -200,11 +222,9 @@ test('an operation this tool does not have is refused by name, with a signpost',
     )
 })
 
-test('an operation no tool has is refused without inventing a signpost', () => {
-    const tools = createGodotTools(catalog, {call: async () => ({})})
-    const scene = tools.find(tool => tool.name === 'godot_scene')
+test('an operation no domain has is refused without inventing a signpost', () => {
     assert.throws(
-        () => scene.prepareArguments({ops: [{op: 'levitate'}]}),
+        () => normalizeGodotCall(catalog, 'godot_scene', {ops: [{op: 'levitate'}]}),
         error => {
             assert.match(error.message, /no 'levitate' operation/u)
             assert.ok(!error.message.includes('is an operation of'), 'no signpost was invented')
@@ -214,10 +234,13 @@ test('an operation no tool has is refused without inventing a signpost', () => {
 })
 
 test('a call naming only real operations is left alone', () => {
-    const tools = createGodotTools(catalog, {call: async () => ({})})
-    const scene = tools.find(tool => tool.name === 'godot_scene')
-    assert.deepEqual(scene.prepareArguments({ops: [{op: 'get_tree'}, {op: 'save'}]}), {
-        ops: [{op: 'get_tree'}, {op: 'save'}]
+    const [godot] = createGodotTools(catalog, {call: async () => ({})})
+    assert.deepEqual(
+        godot.prepareArguments({ops: [{op: 'scene.get_tree'}, {op: 'runtime.capture'}]}),
+        {ops: [{op: 'scene.get_tree'}, {op: 'runtime.capture'}]}
+    )
+    assert.deepEqual(normalizeGodotCall(catalog, 'godot_scene', {ops: [{op: 'save'}]}), {
+        ops: [{op: 'save'}]
     })
 })
 
@@ -812,32 +835,39 @@ test('a call is a list, and a bare operation is a list of one', async () => {
             return Promise.resolve({passages: []})
         }
     }
-    const [scene, , , docs] = createGodotTools(catalog, host)
+    const [godot] = createGodotTools(catalog, host)
 
-    const drive = (tool, id, args) => tool.execute(id, tool.prepareArguments(args))
+    const drive = (id, args) => godot.execute(id, godot.prepareArguments(args))
 
-    await drive(docs, 'call-1', {
-        ops: [{question: 'Camera2D shake'}, {question: 'TileMapLayer'}, {question: 'AnimationTree'}]
+    await drive('call-1', {
+        ops: [
+            {op: 'docs_search.search', question: 'Camera2D shake'},
+            {op: 'docs_search.search', question: 'TileMapLayer'},
+            {op: 'scene.get_tree'}
+        ]
     })
-    await drive(docs, 'call-2', {question: 'Camera2D shake'})
-    await drive(docs, 'call-3', {op: 'search', params: {question: 'Camera2D shake'}})
+    await drive('call-2', {op: 'docs_search.search', question: 'Camera2D shake'})
+    await drive('call-3', {op: 'docs_search.search', params: {question: 'Camera2D shake'}})
     assert.deepEqual(
         calls.map(call => call.params),
         [
             {
                 ops: [
-                    {question: 'Camera2D shake', op: 'search'},
-                    {question: 'TileMapLayer', op: 'search'},
-                    {question: 'AnimationTree', op: 'search'}
+                    {question: 'Camera2D shake', op: 'docs_search.search'},
+                    {question: 'TileMapLayer', op: 'docs_search.search'},
+                    {op: 'scene.get_tree'}
                 ]
             },
-            {ops: [{question: 'Camera2D shake', op: 'search'}]},
-            {ops: [{question: 'Camera2D shake', op: 'search'}]}
+            {ops: [{question: 'Camera2D shake', op: 'docs_search.search'}]},
+            {ops: [{question: 'Camera2D shake', op: 'docs_search.search'}]}
         ]
     )
+    assert.deepEqual(
+        calls.map(call => call.tool),
+        ['godot', 'godot', 'godot']
+    )
 
-    assert.deepEqual(scene.parameters.required, ['ops'])
-    assert.deepEqual(docs.parameters.required, ['ops'])
+    assert.deepEqual(godot.parameters.required, ['ops'])
 })
 
 test('a refused list says that none of it ran, and a refused single call does not', () => {
@@ -1217,20 +1247,13 @@ test('what the worker leaves for the router still passes the schema', async () =
     )
     const {default: Ajv} = await import('ajv')
     const ajv = new Ajv({strict: false, allErrors: true})
-    const tools = new Map(
-        createGodotTools(await declaredDomains(), {call: async () => ({})}).map(tool => [
-            tool.name,
-            tool
-        ])
-    )
+    const [godot] = createGodotTools(await declaredDomains(), {call: async () => ({})})
+    const validate = ajv.compile(godot.parameters)
 
     for (const row of corpus.repairs) {
         // A shape the schema refuses outright is written by neither engine's rules.
         if (row.repairedBy === 'schema') continue
-        const tool = tools.get(row.tool)
-        assert.ok(tool, `${row.tool} is not a tool`)
-        const validate = ajv.compile(tool.parameters)
-        const prepared = tool.prepareArguments({ops: [{op: row.op, ...row.wrote}]})
+        const prepared = godot.prepareArguments(asOneCall(row))
         assert.ok(
             validate(prepared),
             `${row.tool} ${row.op}: ${row.why} — the worker left a call the schema refuses: `
@@ -1238,7 +1261,7 @@ test('what the worker leaves for the router still passes the schema', async () =
         )
         if (row.repairedBy !== 'worker') continue
         assert.ok(
-            !validate({ops: [{op: row.op, ...row.wrote}]}),
+            !validate(asOneCall(row)),
             `${row.tool} ${row.op}: ${row.why} — the schema accepts this unrepaired, so the `
                 + 'router could have answered it'
         )
