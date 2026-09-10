@@ -91,8 +91,21 @@ const PARAMETERS = {
 /// No `m`: matching is line by line already. No `u`: with it, the GNU word marks a model reaches
 /// for are a SyntaxError, and a refused call costs a whole request; without it they degrade to the
 /// bare character.
+// A list written as a string — `["scripts", "scenes"]` — is a list: a live turn wrote it that way,
+// was told the file did not exist, and searched one folder instead of two.
+function listWrittenAsText(path) {
+    if (typeof path !== 'string' || !path.trim().startsWith('[')) return undefined
+    try {
+        const parsed = JSON.parse(path)
+        return Array.isArray(parsed) ? parsed : undefined
+    } catch {
+        return undefined
+    }
+}
+
 export function pathsOf(path) {
-    const many = Array.isArray(path) ? path : [path ?? '.']
+    const given = listWrittenAsText(path) ?? path
+    const many = Array.isArray(given) ? given : [given ?? '.']
     const kept = many.filter(one => typeof one === 'string' && one !== '')
     return kept.length === 0 ? ['.'] : kept
 }
@@ -330,7 +343,10 @@ export function createGrepTool() {
 
             for (const one of named) {
                 const start = await unwrap(await env.absolutePath(one, signal), `find ${one}`)
-                const info = await unwrap(await env.fileInfo(start, signal), `open ${one}`)
+                const info = await unwrap(
+                    await env.fileInfo(start, signal),
+                    `open ${one}${one.includes(',') ? ' — one path, or a list of them: ["scripts", "scenes"]' : ''}`
+                )
                 if (info.kind === 'file') await searchFile(info)
                 else if (info.kind === 'directory') await walk(start)
                 else throw new Error(`grep cannot search ${one}, which is not a file or folder`)

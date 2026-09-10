@@ -496,17 +496,21 @@ impl Workspace {
     /// pass its own check and then refuse the sidecar's — leaving exactly the breakage the sidecars
     /// exist to prevent, reported as a failure. A rename that still fails after that puts the main
     /// file back, so either both ends moved or neither did.
-    pub fn move_path(&self, from: &str, to: &str) -> Result<(), FileError> {
+    /// Answers with the sidecars that moved with the file — its `.uid`, an asset's `.import` —
+    /// under their new names, so a caller that listed them knows where they went.
+    pub fn move_path(&self, from: &str, to: &str) -> Result<Vec<String>, FileError> {
         self.reject_live_sidecar(from)?;
         self.reject_live_sidecar(to)?;
         let source = self.resolve(from)?;
         let destination = self.resolve(to)?;
         let mut carrying = Vec::new();
+        let mut also_moved = Vec::new();
         for suffix in SIDECARS {
             let carried = self.resolve(&format!("{from}.{suffix}"))?;
             let landing = self.resolve(&format!("{to}.{suffix}"))?;
             if carried.exists() {
                 carrying.push((carried, landing));
+                also_moved.push(format!("{to}.{suffix}"));
             }
         }
         if !source.exists() {
@@ -533,7 +537,7 @@ impl Workspace {
             }
             moved.push((carried, landing));
         }
-        Ok(())
+        Ok(also_moved)
     }
 
     /// Deletes one file or one empty directory. Recursive deletion is deliberately absent.

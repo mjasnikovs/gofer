@@ -774,7 +774,9 @@ fn move_workspace_path(
     app: AppHandle,
     request: files::MovePathRequest,
 ) -> Result<(), files::FileError> {
-    active_workspace(&app)?.move_path(&request.from, &request.to)
+    active_workspace(&app)?
+        .move_path(&request.from, &request.to)
+        .map(|_| ())
 }
 
 #[tauri::command(async)]

@@ -1287,9 +1287,11 @@ fn resource_domain<R: Runtime>(
         "move" => {
             let request: files::MovePathRequest = from_params(params)?;
             let workspace = crate::active_workspace(app)?;
-            workspace.move_path(&request.from, &request.to)?;
+            let also_moved = workspace.move_path(&request.from, &request.to)?;
             tell_the_editor_the_worktree_moved(app);
-            Ok(json!({"from": request.from, "to": request.to, "moved": true}))
+            Ok(
+                json!({"from": request.from, "to": request.to, "moved": true, "alsoMoved": also_moved}),
+            )
         }
         "delete" => {
             let request: files::DeletePathRequest = from_params(params)?;

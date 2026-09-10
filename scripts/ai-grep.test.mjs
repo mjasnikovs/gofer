@@ -10,6 +10,7 @@ import {
     MAX_LINE_CHARS,
     createGrepTool,
     isSkipped,
+    pathsOf,
     matcherFor,
     suffixesOf,
     workspaceRelative
@@ -80,6 +81,16 @@ test('names a path it cannot open', async context => {
     context.after(current.remove)
 
     await assert.rejects(grepIn(current.path)({pattern: 'x', path: 'nope'}), /nope/u)
+    await assert.rejects(
+        grepIn(current.path)({pattern: 'x', path: 'scripts,scenes'}),
+        /a list of them: \["scripts", "scenes"\]/u
+    )
+})
+
+test('a list written as text is a list', () => {
+    assert.deepEqual(pathsOf('["scripts", "scenes"]'), ['scripts', 'scenes'])
+    assert.deepEqual(pathsOf('[not json'), ['[not json'])
+    assert.deepEqual(pathsOf(['a', 'b']), ['a', 'b'])
 })
 
 test('keeps only the files the glob names', async context => {

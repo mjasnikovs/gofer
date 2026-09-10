@@ -1461,11 +1461,15 @@ fn every_operation_no_turn_has_ever_used_still_answers() {
     let _gate = crate::approvals::serialize_gate_tests();
     crate::approvals::open();
     let approving = crate::godot_journey_acceptance::approve_when_asked();
-    call(
+    let moved = call(
         "godot_resource",
         json!({"ops": [{"op": "move", "from": BROKEN_PATH, "to": "scripts/broken_moved.gd"}]}),
     )
     .expect("move a file inside the worktree");
+    assert!(
+        moved["ops"][0]["result"]["alsoMoved"].is_array(),
+        "a move names the sidecars that went with the file: {moved}"
+    );
     assert_eq!(
         approving.join().expect("the approval responder"),
         1,

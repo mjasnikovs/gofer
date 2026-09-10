@@ -3080,6 +3080,15 @@
                         "name": "moved",
                         "kind": "flag",
                         "required": true
+                    },
+                    {
+                        "name": "alsoMoved",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "text"
+                        },
+                        "required": true,
+                        "note": "The sidecars that went with it — its `.uid`, an asset's `.import` — under their new names."
                     }
                 ]
             },

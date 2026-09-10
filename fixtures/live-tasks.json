@@ -533,6 +533,79 @@
                 "logs.read"
             ],
             "task": "Make the fighter script crash on purpose: at the third tick, index an empty array. Launch the game under the debugger with no breakpoints, wait for the debugger to stop on the error, and report the stack frame, the line, and the value of ticks from the locals. Then remove the crash again, launch once more, let it run two seconds without stopping, and terminate."
+        },
+        {
+            "id": "platformer-jump",
+            "fixture": "live-project",
+            "ops": [
+                "resource.create_tileset",
+                "node.create_nodes",
+                "node.set_cells",
+                "node.change_type",
+                "resource.create_shape",
+                "node.set_properties",
+                "script.edit",
+                "project.set_input_action",
+                "scene.save",
+                "runtime.run",
+                "runtime.input",
+                "runtime.wait",
+                "runtime.inspect_node",
+                "runtime.stop"
+            ],
+            "task": "Make the player a platformer character. Cut assets/tiles.png (16x16 tiles, 8 across, 2 down; the top-left tile is ground) into a TileSet where the ground tile is solid, paint a floor of ground from x=0 to x=39 at y=14 on a TileMapLayer, turn the Player into a CharacterBody2D with a 16x24 rectangle collision shape placed on top of the floor, give it gravity and a jump on the Space key (a new input action named jump), save, run the game, wait until it has landed, press Space, and prove with two position reads that it went up and came back down."
+        },
+        {
+            "id": "signal-score",
+            "fixture": "live-project",
+            "ops": [
+                "node.create_nodes",
+                "node.connect_signal",
+                "script.edit",
+                "script.save",
+                "scene.save",
+                "runtime.run",
+                "runtime.wait",
+                "runtime.inspect_node",
+                "logs.read",
+                "runtime.stop"
+            ],
+            "task": "Add a Score label at the top left of the main scene and a script on Main that keeps an integer score. Every time the Timer ticks, the score goes up by 5 and the label shows it. Wire the Timer's timeout to the handler as a scene connection rather than in code. Run the game for about three seconds and prove from the label's text that the score rose."
+        },
+        {
+            "id": "hud-and-pause",
+            "fixture": "live-project",
+            "ops": [
+                "project.set_input_action",
+                "node.create_nodes",
+                "node.set_properties",
+                "script.edit",
+                "scene.save",
+                "runtime.run",
+                "runtime.input",
+                "runtime.get_tree",
+                "runtime.inspect_node",
+                "runtime.stop"
+            ],
+            "task": "Add a pause menu: pressing Escape toggles the scene tree's paused state and shows a Label saying PAUSED in the middle of the screen; pressing it again hides the label and resumes. Bind Escape to a new input action named pause_game. Run the game, press Escape once, prove from the running tree that it is paused and the label is visible, press it again, and prove it resumed."
+        },
+        {
+            "id": "spawn-loop",
+            "fixture": "live-project",
+            "ops": [
+                "scene.create",
+                "node.create_nodes",
+                "script.save",
+                "scene.save",
+                "node.instantiate",
+                "script.edit",
+                "runtime.run",
+                "runtime.wait",
+                "runtime.get_tree",
+                "logs.read",
+                "runtime.stop"
+            ],
+            "task": "Make the Player fire a bullet every half second: a bullet scene at res://scenes/bullet.tscn (Node2D root with a small ColorRect) whose script moves it right at 400 px/s and frees it once its x passes 700, printing \"bullet gone\". Instantiate bullets from player.gd under Main using a Timer. Run the game for about three seconds and prove with the running tree and the log that bullets were spawned and freed."
         }
     ]
 }
