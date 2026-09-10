@@ -1746,7 +1746,7 @@ fn logs_domain(params: Value) -> Result<Value, ToolFailure> {
     let mut query: LogQuery = from_params(with_declared_defaults(
         tool_params::GODOT_LOGS_OPERATIONS,
         "read",
-        a_search_reads_every_severity(params),
+        params,
     ))?;
     let wanted = query
         .limit
@@ -1783,26 +1783,6 @@ fn logs_domain(params: Value) -> Result<Value, ToolFailure> {
         "dropped": dropped,
         "terminalLinesOmitted": omitted,
     }))
-}
-
-/// A `contains` that named no severity searches every line, not the warnings alone.
-///
-/// The catalogue's default is `warning`, so that a bare read answers what went wrong rather than
-/// the editor's chatter. A caller naming a substring wants the line that holds it, whatever its
-/// severity: a live turn searched for the word its own script had just printed, was answered an
-/// empty page, and reported the print as not having happened.
-fn a_search_reads_every_severity(params: Value) -> Value {
-    let mut params = params;
-    if let Some(object) = params.as_object_mut()
-        && object
-            .get("contains")
-            .and_then(Value::as_str)
-            .is_some_and(|needle| !needle.is_empty())
-        && !object.contains_key("minSeverity")
-    {
-        object.insert("minSeverity".to_owned(), json!("info"));
-    }
-    params
 }
 
 /// The call with every parameter the catalogue defaults filled in, where the call named none.
@@ -3176,15 +3156,7 @@ mod tests {
             );
         }
 
-        assert!(
-            logs_domain(json!({"limit": 12})).expect("the logs read")["entries"]
-                .as_array()
-                .is_some_and(Vec::is_empty),
-            "a call naming no severity reads at the catalogue's default, which these lines are below"
-        );
-
-        let answered =
-            logs_domain(json!({"limit": 12, "minSeverity": "info"})).expect("the logs read");
+        let answered = logs_domain(json!({"limit": 12})).expect("the logs read");
         let entries = answered["entries"].as_array().expect("entries");
         assert_eq!(entries.len(), 12, "{answered}");
         assert_eq!(entries[0]["message"], "[player] line 0", "{answered}");
@@ -3194,22 +3166,68 @@ mod tests {
             "{answered}"
         );
 
-        let next = logs_domain(
-            json!({"limit": 3, "minSeverity": "info", "after": answered["cursor"].clone()}),
-        )
-        .expect("the next page");
+        let next = logs_domain(json!({"limit": 3, "after": answered["cursor"].clone()}))
+            .expect("the next page");
         assert_eq!(next["entries"][0]["message"], "[player] line 12", "{next}");
 
         let searched = logs_domain(json!({"limit": 5, "contains": "line 2"})).expect("the search");
         assert_eq!(
             searched["entries"][0]["message"], "[player] line 2",
-            "a search that named no severity reads every line, not the warnings alone: {searched}"
+            "{searched}"
         );
         let narrowed = logs_domain(json!({"contains": "line 2", "minSeverity": "warning"}))
             .expect("the narrowed search");
         assert!(
             narrowed["entries"].as_array().is_some_and(Vec::is_empty),
             "a search that named a severity keeps it: {narrowed}"
+        );
+        godot_session::clear_logs();
+    }
+
+    /// A game's own output is the verdict of whatever it just ran, and a bare read has to carry it.
+    ///
+    /// The default severity was `warning`, to keep the editor's chatter out of a page. Godot marks
+    /// none of a game's output, so a test scene printing `ALL CHECKS PASSED` is classified `info`
+    /// and fell under it. A live turn ran its own combat check, read the log, was answered nine
+    /// editor lines and not one of its own, and spent six minutes in the debugger hunting a verdict
+    /// the read had already dropped. Chatter is held back by the terminal-progress collapse, which
+    /// is where the volume actually was: that whole session logged 115 lines, 89 of them the game.
+    #[test]
+    fn a_bare_read_carries_what_the_game_printed_on_its_error_stream() {
+        let _test = godot_session::SESSION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        godot_session::clear_logs();
+        godot_session::append_log(
+            godot_session::LogSource::Editor,
+            "[  90% ] import | scenes/main.tscn\n",
+        );
+        godot_session::append_log(
+            godot_session::LogSource::EditorError,
+            "[PASS] splash: 12 damage killed both 10-hp dummies\n",
+        );
+        godot_session::append_log(godot_session::LogSource::EditorError, "ALL CHECKS PASSED\n");
+
+        let answered = logs_domain(json!({})).expect("the logs read");
+        let messages: Vec<&str> = answered["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .filter_map(|entry| entry["message"].as_str())
+            .collect();
+        assert!(
+            messages.contains(&"ALL CHECKS PASSED"),
+            "a bare read has to carry the game's own verdict: {answered}"
+        );
+        assert!(
+            messages.contains(&"[PASS] splash: 12 damage killed both 10-hp dummies"),
+            "{answered}"
+        );
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.contains("import | scenes/main.tscn")),
+            "the editor's own chatter is what the default is for: {answered}"
         );
         godot_session::clear_logs();
     }

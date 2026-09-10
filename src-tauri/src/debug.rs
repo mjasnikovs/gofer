@@ -54,6 +54,13 @@ pub enum DebugRequest {
     },
     /// Runs the project under the debugger with the given breakpoints installed.
     Launch {
+        /// Which scene to run: `main`, `current`, or a `res://` path. `None` means the main scene.
+        ///
+        /// Godot appends `playArgs` after the `--scene` it builds itself and keeps the first, so a
+        /// scene path put there is accepted and silently ignored. This is the only opening that
+        /// reaches the run mode.
+        #[serde(default)]
+        scene: Option<String>,
         #[serde(default)]
         play_args: Vec<String>,
         #[serde(default)]
@@ -134,7 +141,7 @@ pub fn request_fields(op: &str) -> Option<&'static [(&'static str, bool)]> {
         "status" | "attach" | "threads" | "restart" | "terminate" => &[],
         "set_breakpoints" => &[("path", false), ("lines", true)],
         "breakpoint_locations" => &[("path", false), ("line", false)],
-        "launch" => &[("playArgs", true), ("breakpoints", true)],
+        "launch" => &[("scene", true), ("playArgs", true), ("breakpoints", true)],
         "stack_trace" | "continue" | "pause" | "step_over" | "step_in" | "step_out" => ON_A_THREAD,
         "scopes" => &[("frameId", false)],
         "variables" => &[("variablesReference", false)],
@@ -555,11 +562,18 @@ fn answer(request: DebugRequest) -> Result<DebugResponse, DapError> {
             })
         }
         DebugRequest::Launch {
+            scene,
             play_args,
             breakpoints,
         } => {
             refuse_a_second_launch(holds_a_game())?;
-            launch(&client, &workspace, play_args, breakpoints)
+            launch(
+                &client,
+                &workspace,
+                scene.as_deref(),
+                play_args,
+                breakpoints,
+            )
         }
         DebugRequest::Attach => {
             client.attach()?;
@@ -708,11 +722,12 @@ fn refuse_a_second_launch(holds_a_game: bool) -> Result<(), DapError> {
 fn launch(
     client: &DapClient,
     workspace: &Workspace,
+    scene: Option<&str>,
     play_args: Vec<String>,
     breakpoints: Vec<SourceBreakpoints>,
 ) -> Result<DebugResponse, DapError> {
     ensure_scene_open()?;
-    let launching = client.start_launch(workspace.root(), &play_args)?;
+    let launching = client.start_launch(workspace.root(), scene, &play_args)?;
 
     let mut verified = Vec::new();
     let mut install_error = None;
@@ -1601,14 +1616,48 @@ mod tests {
         .expect("launch request");
 
         let DebugRequest::Launch {
+            scene,
             play_args,
             breakpoints,
         } = request
         else {
             panic!("the launch request must deserialize as a launch")
         };
+        assert_eq!(scene, None, "a launch naming no scene runs the main one");
         assert_eq!(play_args, ["--headless"]);
         assert_eq!(breakpoints[0].path, "res://scripts/probe.gd");
         assert_eq!(breakpoints[0].lines, [7]);
+    }
+
+    /// A launch that cannot name a scene can only ever debug the main one.
+    ///
+    /// The DAP launch arguments carry `scene`, and Gofer writes `"main"` into every one of them. A
+    /// live turn wanting its own test scene put the path in `playArgs` instead, which is the only
+    /// opening the operation offers; Godot appends those after its own `--scene`, and the engine
+    /// keeps the first. The real game booted, ran until it was killed, and the next launch was
+    /// refused as `already_launched`.
+    #[test]
+    fn a_launch_can_name_the_scene_it_runs() {
+        let launch = crate::tool_params::operation_of("godot_debug", "launch")
+            .expect("the launch operation");
+        let names: Vec<&str> = launch.params.iter().map(|param| param.name).collect();
+        assert!(
+            names.contains(&"scene"),
+            "launch offers no way to name a scene: {names:?}"
+        );
+
+        let request: DebugRequest = serde_json::from_value(json!({
+            "op": "launch",
+            "scene": "res://test_scenes/unit_combat_check.tscn",
+        }))
+        .expect("launch request");
+        let DebugRequest::Launch { scene, .. } = request else {
+            panic!("the launch request must deserialize as a launch")
+        };
+        assert_eq!(
+            scene.as_deref(),
+            Some("res://test_scenes/unit_combat_check.tscn"),
+            "the scene the call named has to reach the launch"
+        );
     }
 }

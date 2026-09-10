@@ -134,7 +134,7 @@ fn the_editor_runs_breaks_steps_and_terminates() {
     );
 
     let launching = client
-        .start_launch(&worktree, &["--headless".to_owned()])
+        .start_launch(&worktree, None, &["--headless".to_owned()])
         .expect("start launch");
 
     let breakpoints = client

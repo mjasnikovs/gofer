@@ -841,7 +841,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:8641a9e607ecb91b
+// GENERATED-BEGIN operations sha256:ead63662a515e41f
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -1746,9 +1746,10 @@ pub const GODOT_DEBUG_OPERATIONS: &[Operation] = &[
         op(
             "godot_debug",
             "launch",
-            "Runs the project under the debugger.",
+            "Runs the project under the debugger, the main scene unless `scene` names another.",
             Answers::Rust,
             &[
+                defaulting(opt("scene", Text), Fallback::Text("main")),
                 opt("playArgs", List),
                 shaped(
                     opt("breakpoints", List),
@@ -2056,13 +2057,13 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
 pub const GODOT_LOGS_OPERATIONS: &[Operation] = &[op(
     "godot_logs",
     "read",
-    "Reads a page, and a contains search reads every severity.",
+    "Reads a page of the editor and game log, newest last.",
     Answers::Rust,
     &[
         opt("after", Int),
         defaulting(
             opt("minSeverity", Kind::Choice(&["info", "warning", "error"])),
-            Fallback::Text("warning"),
+            Fallback::Text("info"),
         ),
         opt("source", Kind::Choice(&["editor", "editorError"])),
         opt("contains", Text),

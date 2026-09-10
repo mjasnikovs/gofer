@@ -4291,12 +4291,18 @@
         {
             "tool": "godot_debug",
             "op": "launch",
-            "summary": "Runs the project under the debugger.",
+            "summary": "Runs the project under the debugger, the main scene unless `scene` names another.",
             "alone": {
                 "scope": "exclusive",
                 "why": "One debuggee, driven in order: each answer decides what the next call means."
             },
             "params": [
+                {
+                    "name": "scene",
+                    "kind": "text",
+                    "required": false,
+                    "default": "main"
+                },
                 {
                     "name": "playArgs",
                     "kind": "list",
@@ -5317,7 +5323,7 @@
         {
             "tool": "godot_logs",
             "op": "read",
-            "summary": "Reads a page, and a contains search reads every severity.",
+            "summary": "Reads a page of the editor and game log, newest last.",
             "params": [
                 {
                     "name": "after",
@@ -5329,7 +5335,7 @@
                     "kind": "choice",
                     "of": ["info", "warning", "error"],
                     "required": false,
-                    "default": "warning"
+                    "default": "info"
                 },
                 {
                     "name": "source",

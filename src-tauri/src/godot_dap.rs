@@ -451,14 +451,19 @@ impl DapClient {
     /// `project` must be the editor's own project path — Godot rejects anything outside it with
     /// `wrong_path`. `play_args` are forwarded to the game process verbatim, which is how a
     /// headless editor passes `--headless` on to the game: Godot does not forward it itself.
+    ///
+    /// `scene` is Godot's own run mode: `main`, `current`, or a scene path it runs as a custom
+    /// scene. It is the only way to run anything but the main scene, because Godot appends
+    /// `play_args` after the `--scene` it builds from this and the engine keeps the first.
     pub fn start_launch(
         &self,
         project: &Path,
+        scene: Option<&str>,
         play_args: &[String],
     ) -> Result<PendingLaunch, DapError> {
         let arguments = json!({
             "project": project.to_string_lossy(),
-            "scene": "main",
+            "scene": scene.unwrap_or("main"),
             "playArgs": play_args,
         });
         *self
@@ -1487,7 +1492,7 @@ mod tests {
         let script = PathBuf::from("/project/scripts/main.gd");
 
         let launching = client
-            .start_launch(Path::new("/project"), &["--headless".to_owned()])
+            .start_launch(Path::new("/project"), None, &["--headless".to_owned()])
             .expect("start launch");
         let launch = recv_command(&server, "launch");
         let breakpoints = client
@@ -1503,7 +1508,10 @@ mod tests {
             .expect("launch succeeds once configurationDone arrives");
 
         assert_eq!(launch["arguments"]["project"], "/project");
-        assert_eq!(launch["arguments"]["scene"], "main");
+        assert_eq!(
+            launch["arguments"]["scene"], "main",
+            "a launch naming no scene runs the main one"
+        );
         assert_eq!(launch["arguments"]["playArgs"], json!(["--headless"]));
         let set_breakpoints = recv_command(&server, "setBreakpoints");
         assert_eq!(
@@ -2010,7 +2018,7 @@ mod tests {
         let events = client.subscribe_events();
 
         let launching = client
-            .start_launch(Path::new("/project"), &[])
+            .start_launch(Path::new("/project"), None, &[])
             .expect("start launch");
         client.configuration_done().expect("configuration done");
         client.await_launch(launching).expect("launch response");
@@ -2157,15 +2165,28 @@ mod tests {
         });
         let client = connected_client(&server);
         let launching = client
-            .start_launch(Path::new("/project"), &["--headless".to_owned()])
+            .start_launch(
+                Path::new("/project"),
+                Some("res://test_scenes/combat.tscn"),
+                &["--headless".to_owned()],
+            )
             .expect("start launch");
         client.await_launch(launching).expect("launch");
         client.restart().expect("restart");
         client.terminate().expect("terminate");
         client.disconnect(false).expect("disconnect");
 
+        let launch = recv_command(&server, "launch");
+        assert_eq!(
+            launch["arguments"]["scene"], "res://test_scenes/combat.tscn",
+            "the scene the caller named is the run mode Godot is given"
+        );
         let restart = recv_command(&server, "restart");
         assert_eq!(restart["arguments"]["arguments"]["project"], "/project");
+        assert_eq!(
+            restart["arguments"]["arguments"]["scene"], "res://test_scenes/combat.tscn",
+            "a restart re-runs the scene that was launched, not the main one"
+        );
         assert_eq!(
             restart["arguments"]["arguments"]["playArgs"],
             json!(["--headless"])
