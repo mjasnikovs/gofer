@@ -48,6 +48,8 @@ const BREAK_LINE: i64 = 11;
 /// and finished nothing. So the breakpoint is moved onto the first statement of the body, and this
 /// turn is what proves the move reaches a real editor rather than only a string.
 const ASKED_LINE: i64 = 10;
+/// The blank line above that declaration: where a model that counted lines by eye lands.
+const EMPTY_LINE: i64 = 9;
 const PROBE_SCENE: &str = "[gd_scene load_steps=2 format=3]\n\n[ext_resource type=\"Script\" path=\"res://scripts/main_probe.gd\" id=\"1_probe\"]\n\n[node name=\"AiFixture\" type=\"Node2D\"]\nscript = ExtResource(\"1_probe\")\n\n[node name=\"Label\" type=\"Label\" parent=\".\"]\noffset_right = 320.0\noffset_bottom = 40.0\n";
 
 /// The same unclosed parameter list the language-server acceptance uses, because it is a parse
@@ -526,7 +528,10 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
     let saved = std::fs::read_to_string(session.worktree.join("main.tscn")).expect("read scene");
     assert!(saved.contains("AiMarker"), "{saved}");
 
-    assert_eq!(results[4]["files"][0]["text"], BROKEN_SCRIPT);
+    assert_eq!(
+        results[4]["files"][0]["text"],
+        crate::ai_tools::numbered_lines(BROKEN_SCRIPT)
+    );
     assert_eq!(
         results[5]["files"][0]["published"],
         true,
@@ -965,6 +970,10 @@ fn a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits() {
         !again["ops"][0]["result"]["stopped"].is_null(),
         "a restart carries the breakpoints of the launch before it: {again}"
     );
+    assert!(
+        crate::debug::holds_a_game(),
+        "the old game's end, written before the restart was answered, is not the new game's"
+    );
     let _ = call("godot_debug", json!({"ops": [{"op": "terminate"}]}));
 
     call(
@@ -984,6 +993,102 @@ fn a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits() {
         !crate::debug::holds_a_game(),
         "a disconnect that terminates the debuggee leaves no game behind"
     );
+}
+
+/// Three things a live debugging turn met, on a real editor, through the router.
+///
+/// A breakpoint asked for on the blank line above `_tick` stops on the first line of its body,
+/// rather than verifying and never firing. The pause's stale stop does not answer the wait after
+/// the continue. And a game the runtime stopped is not one the debugger still holds, so the next
+/// launch is not refused as `already_launched`.
+#[test]
+fn a_debugger_turn_meets_what_a_live_turn_met() {
+    let session = start_session();
+    let app = mock_app();
+    let data = TempDir::new().expect("temporary application data");
+    let storage = crate::storage::ProjectStorage::open(data.path(), &session.worktree)
+        .expect("open project storage");
+    app.manage(crate::storage::StorageSlot::new(Ok(storage)));
+
+    let call = |tool: &str, params: Value| {
+        ai_tools::dispatch(
+            app.handle(),
+            ai_tools::ToolRequest {
+                tool: tool.to_owned(),
+                params,
+            },
+        )
+    };
+
+    let launched = call(
+        "godot_debug",
+        json!({"ops": [{
+            "op": "launch",
+            "playArgs": ["--headless"],
+            "breakpoints": [{"path": PROBE_PATH, "lines": [EMPTY_LINE]}],
+        }]}),
+    )
+    .expect("the debugger launches the probe");
+    let taken = &launched["ops"][0]["result"]["breakpoints"][0];
+    assert_eq!(
+        taken["line"], BREAK_LINE,
+        "an empty line moves onto the next one that runs: {launched}"
+    );
+    assert!(
+        taken["message"]
+            .as_str()
+            .is_some_and(|note| note.contains("holds no statement")),
+        "the answer says why it moved: {launched}"
+    );
+    let stopped = call(
+        "godot_debug",
+        json!({"ops": [{"op": "await_stop", "timeoutMs": 60000}]}),
+    )
+    .expect("the moved breakpoint fires");
+    assert_eq!(
+        stopped["ops"][0]["result"]["stopped"]["reason"], "breakpoint",
+        "{stopped}"
+    );
+
+    call("godot_debug", json!({"ops": [{"op": "continue"}]})).expect("run on");
+    call(
+        "godot_debug",
+        json!({"ops": [{"op": "set_breakpoints", "path": PROBE_PATH, "lines": []}]}),
+    )
+    .expect("clear the breakpoint so the game runs freely");
+    // The live turn's shape: pause, read nothing, continue — the pause's stop is still queued.
+    call("godot_debug", json!({"ops": [{"op": "pause"}]})).expect("pause the running game");
+    call("godot_debug", json!({"ops": [{"op": "stack_trace"}]})).expect("a paused game answers");
+    call("godot_debug", json!({"ops": [{"op": "continue"}]})).expect("run on again");
+    let after = call(
+        "godot_debug",
+        json!({"ops": [{"op": "await_stop", "timeoutMs": 3000}]}),
+    );
+    match after {
+        Err(failure) => assert_eq!(failure.code, "stop_timeout", "{}", failure.message),
+        Ok(answer) => panic!("nothing stops a game running freely, yet the wait answered {answer}"),
+    }
+
+    let stopped = call("godot_runtime", json!({"ops": [{"op": "stop"}]}))
+        .expect("the runtime stops the game the debugger launched");
+    assert_eq!(stopped["ops"][0]["result"]["running"], false, "{stopped}");
+    let again = call(
+        "godot_debug",
+        json!({"ops": [{"op": "launch", "playArgs": ["--headless"]}]}),
+    );
+    match again {
+        Ok(_) => {}
+        Err(failure) => panic!(
+            "a game the runtime stopped is not one the debugger holds: {} {}",
+            failure.code, failure.message
+        ),
+    }
+    let _ = call("godot_debug", json!({"ops": [{"op": "terminate"}]}));
+    call(
+        "godot_debug",
+        json!({"ops": [{"op": "disconnect", "terminateDebuggee": true}]}),
+    )
+    .expect("let go of the adapter");
 }
 
 #[test]

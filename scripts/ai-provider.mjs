@@ -61,6 +61,7 @@ import {createWebSearchTool} from './ai-search.mjs'
 import {createTranscript, withoutEmptyToolCalls, withoutTrailingAnswer} from './ai-transcript.mjs'
 import {toolTarget} from './tool-target.mjs'
 import {withoutPackedLiterals} from './scene-text.mjs'
+import {withLineNumbers} from './numbered-read.mjs'
 import {confineTool} from './workspace-confinement.mjs'
 import {readableProviderError} from './provider-error.mjs'
 import {piThinkingLevel} from './thinking-level.mjs'
@@ -373,7 +374,7 @@ function contextMessage(message, model) {
 export function createAgentTools(workspacePath, domains, host, extra = [], model, frozen = []) {
     const env = createToolEnv(workspacePath)
     const confined = [
-        withoutPackedLiterals(createReadTool()),
+        withoutPackedLiterals(withLineNumbers(createReadTool())),
         createWriteTool(),
         createEditTool(),
         createBashTool()

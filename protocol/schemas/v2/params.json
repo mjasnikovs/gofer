@@ -3162,7 +3162,7 @@
         {
             "tool": "godot_script",
             "op": "open",
-            "summary": "Opens a script as a language-server document.",
+            "summary": "Opens a script as a language-server document, its text coming back with each line prefixed by its 1-indexed number and a tab.",
             "params": [
                 {
                     "name": "paths",
@@ -4336,6 +4336,14 @@
                             "shape": "godotVerifiedBreakpoint"
                         },
                         "required": true
+                    },
+                    {
+                        "name": "armed",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "text"
+                        },
+                        "required": false
                     }
                 ]
             },
@@ -5309,7 +5317,7 @@
         {
             "tool": "godot_logs",
             "op": "read",
-            "summary": "Reads a page.",
+            "summary": "Reads a page, and a contains search reads every severity.",
             "params": [
                 {
                     "name": "after",

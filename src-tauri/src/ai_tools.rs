@@ -887,6 +887,10 @@ fn run_one<R: Runtime>(
                 crate::script::reparse_open_documents();
             }
             if domain.name == "godot_runtime" {
+                // The adapter's own terminated event says the same, on another socket, later.
+                if answered.is_ok() && op == "stop" {
+                    crate::debug::note_the_game_is_gone();
+                }
                 return answered.map_err(|error| {
                     godot_session::carrying_the_error_that_ended_the_game(error.into())
                 });
@@ -1503,6 +1507,22 @@ fn named_scripts(params: &Value) -> Result<Vec<String>, ToolFailure> {
     Ok(paths)
 }
 
+/// The model counts lines badly: a named breakpoint line went from 15/60 right to 60/60 once the
+/// text carried its numbers (scripts/bench/lines-run.mjs), so a script reads the way the read
+/// tool answers.
+pub(crate) fn numbered_lines(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    text.strip_suffix('\n')
+        .unwrap_or(text)
+        .split('\n')
+        .enumerate()
+        .map(|(index, line)| format!("{}\t{line}", index + 1))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// How much script text one `open` call answers with before it starts withholding.
 ///
 /// The worker holds a tool result at 24,000 characters and slices it there, mid-file. Ten of
@@ -1597,7 +1617,8 @@ fn script_domain<R: Runtime>(
                         }
                     },
                 )?;
-                let text_bytes = document.text.len();
+                let listing = numbered_lines(&document.text);
+                let text_bytes = listing.len();
                 let answered = if withholds_the_text(spent, text_bytes, answers.is_empty()) {
                     json!({
                         "path": document.path,
@@ -1608,7 +1629,9 @@ fn script_domain<R: Runtime>(
                     })
                 } else {
                     spent += text_bytes;
-                    to_value(document)
+                    let mut answered = to_value(document);
+                    answered["text"] = Value::String(listing);
+                    answered
                 };
                 answers.push(answered);
             }
@@ -1723,7 +1746,7 @@ fn logs_domain(params: Value) -> Result<Value, ToolFailure> {
     let mut query: LogQuery = from_params(with_declared_defaults(
         tool_params::GODOT_LOGS_OPERATIONS,
         "read",
-        params,
+        a_search_reads_every_severity(params),
     ))?;
     let wanted = query
         .limit
@@ -1760,6 +1783,26 @@ fn logs_domain(params: Value) -> Result<Value, ToolFailure> {
         "dropped": dropped,
         "terminalLinesOmitted": omitted,
     }))
+}
+
+/// A `contains` that named no severity searches every line, not the warnings alone.
+///
+/// The catalogue's default is `warning`, so that a bare read answers what went wrong rather than
+/// the editor's chatter. A caller naming a substring wants the line that holds it, whatever its
+/// severity: a live turn searched for the word its own script had just printed, was answered an
+/// empty page, and reported the print as not having happened.
+fn a_search_reads_every_severity(params: Value) -> Value {
+    let mut params = params;
+    if let Some(object) = params.as_object_mut()
+        && object
+            .get("contains")
+            .and_then(Value::as_str)
+            .is_some_and(|needle| !needle.is_empty())
+        && !object.contains_key("minSeverity")
+    {
+        object.insert("minSeverity".to_owned(), json!("info"));
+    }
+    params
 }
 
 /// The call with every parameter the catalogue defaults filled in, where the call named none.
@@ -2076,6 +2119,13 @@ fn to_value<T: Serialize>(value: T) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_listing_numbers_every_line_and_not_the_newline_after_the_last() {
+        assert_eq!(super::numbered_lines(""), "");
+        assert_eq!(super::numbered_lines("a\n\nb\n"), "1\ta\n2\t\n3\tb");
+        assert_eq!(super::numbered_lines("a\r\nb"), "1\ta\r\n2\tb");
+    }
+
     use super::*;
     use tauri::Manager;
     use tempfile::TempDir;
@@ -3149,6 +3199,18 @@ mod tests {
         )
         .expect("the next page");
         assert_eq!(next["entries"][0]["message"], "[player] line 12", "{next}");
+
+        let searched = logs_domain(json!({"limit": 5, "contains": "line 2"})).expect("the search");
+        assert_eq!(
+            searched["entries"][0]["message"], "[player] line 2",
+            "a search that named no severity reads every line, not the warnings alone: {searched}"
+        );
+        let narrowed = logs_domain(json!({"contains": "line 2", "minSeverity": "warning"}))
+            .expect("the narrowed search");
+        assert!(
+            narrowed["entries"].as_array().is_some_and(Vec::is_empty),
+            "a search that named a severity keeps it: {narrowed}"
+        );
         godot_session::clear_logs();
     }
 

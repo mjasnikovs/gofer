@@ -1,6 +1,7 @@
 import {Agent, createBashTool, createReadTool} from '@earendil-works/pi-agent-core/node'
 import {createAssistantMessageEventStream} from '@earendil-works/pi-ai'
 import {createGodotTools} from './godot-tools.mjs'
+import {withLineNumbers} from './numbered-read.mjs'
 import {
     abortableWait,
     createToolEnv,
@@ -233,7 +234,7 @@ function underCommandClock(tool, {timeoutMs, timers}) {
     }
 }
 
-const CONFINED_CHILD_TOOLS = {read: createReadTool, bash: createBashTool}
+const CONFINED_CHILD_TOOLS = {read: () => withLineNumbers(createReadTool()), bash: createBashTool}
 
 /// The script operations that only ask a question. A child holds these and nothing else of that
 /// domain, because a research agent that could call `edit` or `save` would no longer be one.

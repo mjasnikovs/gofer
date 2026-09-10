@@ -470,7 +470,7 @@ test('a child that repeats one call is refused on the eighth and ended on the te
     // The tenth call ends the child; the model is never asked an eleventh time.
     assert.equal(models.turns, 10)
     const heard = index => models.contexts[index].messages.at(-1)
-    assert.match(heard(7).content[0].text, /^extends Node/u)
+    assert.match(heard(7).content[0].text, /^1\textends Node/u)
     assert.match(heard(8).content[0].text, /^Refused: this is the 8th read call in a row/u)
     assert.match(heard(9).content[0].text, /^Refused: this is the 9th read call/u)
 })

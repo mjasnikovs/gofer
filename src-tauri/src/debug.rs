@@ -178,6 +178,11 @@ pub enum DebugResponse {
     },
     Launched {
         breakpoints: Vec<VerifiedBreakpoint>,
+        /// The same list as on `Breakpoints`. The editor hands every armed breakpoint to the game
+        /// it launches, and a launch that named none answered `breakpoints: []` over a game that
+        /// was about to stop on one set earlier — which a live turn read as unset, and set again.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        armed: Vec<String>,
     },
     Attached,
     Threads {
@@ -324,6 +329,15 @@ fn pretend_a_breakpoint_is_armed(path: Option<&str>) {
     if let Some(path) = path {
         armed.insert(path.to_owned(), vec![1]);
     }
+}
+
+/// Records that the adapter reported the debuggee gone — `terminated` or `exited`, whoever ended it.
+///
+/// A game the debugger launched can be stopped by `runtime.stop`, which answers `running: false`
+/// and tells this module nothing. The next `launch` was then refused as `already_launched` over
+/// a game that was not there. The adapter's stream is the one place every ending passes through.
+pub(crate) fn note_the_game_is_gone() {
+    DEBUGGER_HOLDS_A_GAME.store(false, Ordering::Relaxed);
 }
 
 /// Whether a game is running because the debugger started one.
@@ -723,6 +737,7 @@ fn launch(
     crate::godot_dap::note_the_debuggee_is_running();
     Ok(DebugResponse::Launched {
         breakpoints: verified,
+        armed: where_the_breakpoints_are(),
     })
 }
 
@@ -759,7 +774,7 @@ fn set_breakpoints(
     let absolute = resolve(workspace, path)?;
     let relative = relative_path(workspace, &absolute).unwrap_or_else(|| path.to_owned());
     let text = std::fs::read_to_string(&absolute).unwrap_or_default();
-    let moved: Vec<Moved> = lines.iter().map(|line| Moved::of(&text, *line)).collect();
+    let moved = without_a_line_twice(lines.iter().map(|line| Moved::of(&text, *line)));
     let asked: Vec<i64> = moved.iter().map(|one| one.line).collect();
     let taken = client.set_breakpoints(&absolute, &asked)?;
     note_the_armed_breakpoints(&relative, &asked);
@@ -789,50 +804,182 @@ fn set_breakpoints(
 /// turn did exactly that four times, spent six of its calls on `stop_timeout`, and finished nothing.
 /// So the breakpoint moves onto the first statement of the body, which is what every debugger does
 /// with a line that cannot hold one, and the answer says where it went.
+///
+/// Two asked-for lines that move onto the same statement are one breakpoint, told once: the answer
+/// is paired with the request entry by position, and a doubled line would pair a note with the
+/// wrong entry. The entry that has something to say is the one kept.
+fn without_a_line_twice(moved: impl Iterator<Item = Moved>) -> Vec<Moved> {
+    let mut kept: Vec<Moved> = Vec::new();
+    for one in moved {
+        match kept.iter_mut().find(|seen| seen.line == one.line) {
+            Some(seen) if seen.from.is_none() => seen.from = one.from,
+            Some(_) => {}
+            None => kept.push(one),
+        }
+    }
+    kept
+}
+
+/// An empty or comment line is the same shape: Godot verifies it and never stops. A live turn that
+/// miscounted onto the blank line above a function waited out thirty timeouts against three games.
+/// So those move too, onto the next line that runs — through a `func` header, onto its body.
+///
+/// Which lines run was measured on 4.7.2, one breakpoint per launch: a body statement other than
+/// `pass`, and a class-level `var` or `static var` with an initialiser and no annotation. Nothing
+/// else fires — not `extends`, `class_name`, `signal`, `const`, `enum`, a bare `var`, an `@export`
+/// or `@onready` initialiser, a header, or `pass` — and every one of them verifies.
 struct Moved {
     line: i64,
-    from: Option<i64>,
+    from: Option<Left>,
+}
+
+/// What the line asked for was, when a breakpoint could not stay on it — or could not go anywhere.
+#[derive(Clone, Copy)]
+enum Left {
+    Header(i64),
+    Empty(i64),
+    Nowhere(i64),
 }
 
 impl Moved {
     fn of(text: &str, line: i64) -> Self {
-        match first_statement_of_function(text, line) {
-            Some(body) => Self {
-                line: body,
-                from: Some(line),
-            },
-            None => Self { line, from: None },
+        let lines: Vec<&str> = text.lines().collect();
+        let Some(asked) = usize::try_from(line.checked_sub(1).unwrap_or(-1))
+            .ok()
+            .and_then(|index| lines.get(index))
+        else {
+            return Self { line, from: None };
+        };
+        if declares_a_function(asked) {
+            return match first_statement_of_function(text, line) {
+                Some(body) => Self {
+                    line: body,
+                    from: Some(Left::Header(line)),
+                },
+                None => Self {
+                    line,
+                    from: Some(Left::Nowhere(line)),
+                },
+            };
         }
+        if holds_no_statement(asked) {
+            return match next_line_that_runs_after_an_empty_one(text, line) {
+                Some(next) => Self {
+                    line: next,
+                    from: Some(Left::Empty(line)),
+                },
+                None => Self {
+                    line,
+                    from: Some(Left::Nowhere(line)),
+                },
+            };
+        }
+        Self { line, from: None }
     }
 
     fn note(&self) -> Option<String> {
-        let from = self.from?;
-        Some(format!(
-            "Line {from} declares the function and never runs, so a breakpoint on it would be \
-             verified and never hit. This one is on line {}, the first statement of the body.",
-            self.line
-        ))
+        Some(match self.from? {
+            Left::Header(from) => format!(
+                "Line {from} declares the function and never runs, so a breakpoint on it would be \
+                 verified and never hit. This one is on line {}, the first statement of the body.",
+                self.line
+            ),
+            Left::Empty(from) => format!(
+                "Line {from} holds no statement and never runs, so a breakpoint on it would be \
+                 verified and never hit. This one is on line {}, the next line that does.",
+                self.line
+            ),
+            Left::Nowhere(from) => format!(
+                "Line {from} never runs and nothing after it does either, so this breakpoint is \
+                 verified and will never hit. Name a line that holds a statement."
+            ),
+        })
     }
+}
+
+fn declares_a_function(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.starts_with("func ") || trimmed.starts_with("static func ")
+}
+
+/// A declaration line at class level or inside an inner class or property: none of these run.
+fn declares_something(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    [
+        "extends ",
+        "class_name ",
+        "class ",
+        "signal ",
+        "const ",
+        "enum ",
+        "var ",
+        "static var ",
+        "@",
+        "set(",
+        "get:",
+        "get(",
+        "func ",
+        "static func ",
+    ]
+    .iter()
+    .any(|prefix| trimmed.starts_with(prefix))
+}
+
+fn holds_no_statement(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed.is_empty() || trimmed.starts_with('#')
+}
+
+fn indentation_of(text: &str) -> usize {
+    text.len() - text.trim_start().len()
+}
+
+/// A `var` with something to evaluate: the one declaration the debugger stops on.
+fn initialises_a_member(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    let declaration = trimmed
+        .strip_prefix("static var ")
+        .or_else(|| trimmed.strip_prefix("var "));
+    declaration.is_some_and(|rest| rest.contains('='))
+}
+
+/// `func quick(): pass` — the body is on the header line, and nothing below belongs to it.
+fn holds_an_inline_body(header: &str) -> bool {
+    let Some(after_parameters) = header.rsplit_once(')').map(|(_, rest)| rest) else {
+        return false;
+    };
+    after_parameters
+        .split_once(':')
+        .is_some_and(|(_, body)| !holds_no_statement(body))
+}
+
+/// Whether a line runs: a body statement other than `pass`, or a member with an initialiser.
+fn runs(text: &str) -> bool {
+    if declares_something(text) {
+        return initialises_a_member(text);
+    }
+    indentation_of(text) > 0 && text.trim() != "pass"
 }
 
 /// The first line of a function's body, when `line` is the `func` that declares it.
 ///
 /// `None` for everything else, which is every ordinary breakpoint: a line already holding a
-/// statement is left exactly where it was asked for.
+/// statement is left exactly where it was asked for. Also `None` for a body that holds only
+/// `pass`, or one written on the header line, since nothing in either stops.
 fn first_statement_of_function(text: &str, line: i64) -> Option<i64> {
     let lines: Vec<&str> = text.lines().collect();
     let index = usize::try_from(line.checked_sub(1)?).ok()?;
-    let declares = |text: &str| {
-        let trimmed = text.trim_start();
-        trimmed.starts_with("func ") || trimmed.starts_with("static func ")
-    };
-    if !declares(lines.get(index)?) {
+    if !declares_a_function(lines.get(index)?) {
         return None;
     }
+    let indent = indentation_of(lines[index]);
     let mut header = index;
     while !lines[header].trim_end().ends_with(':') {
+        if holds_an_inline_body(lines[header]) {
+            return None;
+        }
         header += 1;
-        if header >= lines.len() || declares(lines[header]) {
+        if header >= lines.len() || declares_something(lines[header]) {
             return None;
         }
     }
@@ -840,11 +987,38 @@ fn first_statement_of_function(text: &str, line: i64) -> Option<i64> {
         .iter()
         .enumerate()
         .skip(header + 1)
-        .find(|(_, text)| {
-            let trimmed = text.trim();
-            !trimmed.is_empty() && !trimmed.starts_with('#')
-        })
+        .filter(|(_, text)| !holds_no_statement(text))
+        .take_while(|(_, text)| indentation_of(text) > indent)
+        .find(|(_, text)| runs(text))
         .and_then(|(found, _)| i64::try_from(found + 1).ok())
+}
+
+/// The next line the debugger stops on, when `line` is empty or a comment.
+///
+/// A `func` header met on the way is crossed into its body; every other declaration is walked
+/// past; an indented line is a body statement and counts unless it is `pass`.
+fn next_line_that_runs_after_an_empty_one(text: &str, line: i64) -> Option<i64> {
+    let lines: Vec<&str> = text.lines().collect();
+    let index = usize::try_from(line.checked_sub(1)?).ok()?;
+    if !holds_no_statement(lines.get(index)?) {
+        return None;
+    }
+    for (found, next) in lines.iter().enumerate().skip(index + 1) {
+        if holds_no_statement(next) {
+            continue;
+        }
+        let number = i64::try_from(found + 1).ok()?;
+        if declares_a_function(next) {
+            if let Some(body) = first_statement_of_function(text, number) {
+                return Some(body);
+            }
+            continue;
+        }
+        if runs(next) {
+            return Some(number);
+        }
+    }
+    None
 }
 
 /// Returns the adapter for the active session, connecting on first use.
@@ -1071,6 +1245,7 @@ mod tests {
             },
             super::DebugResponse::Launched {
                 breakpoints: Vec::new(),
+                armed: Vec::new(),
             },
             super::DebugResponse::Acknowledged,
         ] {
@@ -1127,6 +1302,142 @@ mod tests {
 
         let statics = "extends Node\n\nstatic func make() -> int:\n\treturn 3\n";
         assert_eq!(first_statement_of_function(statics, 3), Some(4));
+    }
+
+    #[test]
+    fn a_breakpoint_on_an_empty_line_moves_onto_the_next_line_that_runs() {
+        let script = "extends Node2D\n\nvar total := 0\n\n\nfunc _announce(ticks: int) -> void:\n\t# say it\n\tprint(ticks)\n\tif ticks == 5:\n\n\t\ttotal = ticks\n";
+
+        let above_a_function = Moved::of(script, 4);
+        assert_eq!(above_a_function.line, 8);
+        let note = above_a_function
+            .note()
+            .expect("a moved breakpoint says where it went");
+        assert!(
+            note.contains("Line 4 holds no statement") && note.contains("line 8"),
+            "{note}"
+        );
+
+        assert_eq!(
+            Moved::of(script, 7).line,
+            8,
+            "a comment moves onto the statement under it"
+        );
+        assert_eq!(
+            Moved::of(script, 10).line,
+            11,
+            "a blank inside a body moves within it"
+        );
+        assert_eq!(
+            Moved::of(script, 2).line,
+            3,
+            "a blank above a declaration moves onto it"
+        );
+
+        let last_is_empty = "extends Node\n\nfunc go() -> void:\n\tpass\n\n";
+        assert_eq!(
+            Moved::of(last_is_empty, 5).line,
+            5,
+            "nothing runs after the last blank line"
+        );
+        assert!(
+            Moved::of(last_is_empty, 5).note().is_some(),
+            "and it says so"
+        );
+        assert_eq!(Moved::of(script, 8).line, 8);
+        assert!(Moved::of(script, 8).note().is_none());
+    }
+
+    /// Measured on 4.7.2, one breakpoint per launch: of these class-level lines only the `var`
+    /// with an initialiser and the `static var` fire; `pass` in a body never does.
+    #[test]
+    fn a_breakpoint_walks_past_the_class_level_lines_that_never_run() {
+        let script = "# header comment\nextends Node\n\nclass_name Probe\nsignal fired\nconst SPEED := 3\nenum State {A, B}\nvar counter := 0\nvar plain\n@onready var later := get_tree()\n@export var speed: float = 2.0\nstatic var shared := 1\n\nfunc _init() -> void:\n\tpass\n\nfunc _process(_delta: float) -> void:\n\tcounter += 1\n";
+
+        assert_eq!(
+            Moved::of(script, 1).line,
+            8,
+            "the header comment walks to the first initialiser"
+        );
+        assert_eq!(Moved::of(script, 3).line, 8);
+        assert_eq!(
+            Moved::of(script, 13).line,
+            18,
+            "a body of only pass is walked through"
+        );
+        assert_eq!(
+            Moved::of(script, 14).line,
+            14,
+            "a function holding only pass keeps the header"
+        );
+        let nowhere = Moved::of(script, 14)
+            .note()
+            .expect("a breakpoint that can never hit says so");
+        assert!(
+            nowhere.contains("never runs and nothing after it"),
+            "{nowhere}"
+        );
+        assert_eq!(Moved::of(script, 16).line, 18);
+        assert_eq!(
+            Moved::of(script, 8).line,
+            8,
+            "a line that fires is left alone"
+        );
+
+        let only_declarations = "extends Node\n\nconst A := 1\nsignal done\n";
+        assert_eq!(
+            Moved::of(only_declarations, 2).line,
+            2,
+            "nothing after it runs"
+        );
+
+        let inline = "extends Node\n\nfunc quick(): pass\n\nclass Inner:\n\tvar x = 1\n\tfunc go() -> void:\n\t\tprint(1)\n";
+        assert_eq!(
+            first_statement_of_function(inline, 3),
+            None,
+            "an inline body owns no line below"
+        );
+        assert_eq!(Moved::of(inline, 3).line, 3);
+        assert_eq!(
+            Moved::of(inline, 2).line,
+            6,
+            "a blank walks past the inline body to the first initialiser"
+        );
+        assert_eq!(Moved::of(inline, 5).line, 5, "a class line is left alone");
+
+        let property =
+            "extends Node\n\nvar hp: int:\n\tset(v):\n\t\thp = v\n\tget:\n\t\treturn hp\n";
+        assert_eq!(
+            Moved::of(property, 2).line,
+            5,
+            "a setter header never runs; its body does"
+        );
+
+        let inner = "extends Node\n\nclass Inner:\n\tvar plain\n\tvar set_up := 2\n";
+        assert_eq!(
+            Moved::of(inner, 2).line,
+            5,
+            "a bare var inside a class is walked past too"
+        );
+
+        let dedented = "extends Node\n\nfunc a() -> void:\n\tpass\nfunc b() -> void:\n\tgo()\n";
+        assert_eq!(
+            first_statement_of_function(dedented, 3),
+            None,
+            "the next function is not a's body"
+        );
+        assert_eq!(first_statement_of_function(dedented, 5), Some(6));
+
+        let doubled =
+            without_a_line_twice([Moved::of(script, 1), Moved::of(script, 3)].into_iter());
+        assert_eq!(doubled.len(), 1);
+        assert_eq!(doubled[0].line, 8);
+        let told = without_a_line_twice([Moved::of(script, 8), Moved::of(script, 3)].into_iter());
+        assert_eq!(told.len(), 1);
+        assert!(
+            told[0].note().is_some(),
+            "the entry with something to say is the one kept"
+        );
     }
 
     #[test]

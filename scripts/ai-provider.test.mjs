@@ -410,10 +410,7 @@ test('runs the Pi agent tool loop and streams tool lifecycle events', async cont
         assert.equal(events.find(event => event.type === 'tool-start').name, 'read')
         assert.equal(events.find(event => event.type === 'tool-start').target, 'package.json')
         assert.equal(events.find(event => event.type === 'tool-end').isError, false)
-        assert.equal(
-            JSON.parse(events.find(event => event.type === 'tool-end').output).name,
-            'gofer'
-        )
+        assert.equal(events.find(event => event.type === 'tool-end').output, '1\t{"name":"gofer"}')
         assert.equal(bodies[1].messages.at(-1).role, 'tool')
         const cost = events.find(event => event.type === 'tool-cost')
         assert.deepEqual(cost.ids, [events.find(event => event.type === 'tool-start').id])

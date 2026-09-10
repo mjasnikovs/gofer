@@ -841,7 +841,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:dfa87a7f019367ba
+// GENERATED-BEGIN operations sha256:8641a9e607ecb91b
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -1498,7 +1498,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
     op(
         "godot_script",
         "open",
-        "Opens a script as a language-server document.",
+        "Opens a script as a language-server document, its text coming back with each line prefixed by its 1-indexed number and a tab.",
         Answers::Rust,
         &[need("paths", Kind::ListOf(&Text))],
     ),
@@ -2056,7 +2056,7 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
 pub const GODOT_LOGS_OPERATIONS: &[Operation] = &[op(
     "godot_logs",
     "read",
-    "Reads a page.",
+    "Reads a page, and a contains search reads every severity.",
     Answers::Rust,
     &[
         opt("after", Int),
