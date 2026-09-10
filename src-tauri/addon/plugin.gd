@@ -2551,6 +2551,11 @@ func _scene_open(params: Dictionary) -> Dictionary:
         }
     if not ResourceLoader.exists(path):
         return Params.error("scene_not_found", "Scene %s does not exist" % path, {"path": path})
+    # Opening the scene that is open is not a switch: the switch's sweep zeroes the revision, and
+    # a live turn read revision 0 on a scene still holding its unsaved edit at revision 1.
+    var root := _edited_root()
+    if root != null and root.scene_file_path == path and path == _current_scene_path:
+        return {"scene": path, "revision": _scene_revision, "dirty": _scene_is_dirty()}
     return _switch_edited_scene(path)
 
 func _scene_create(params: Dictionary) -> Dictionary:

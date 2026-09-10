@@ -146,6 +146,14 @@ fn label_text(session: &Session) -> String {
         relative["path"], "/root/RuntimeProbe/Label",
         "a path relative to the current scene resolves: {relative}"
     );
+    let slashed = session.call(
+        "runtime.inspect_node",
+        json!({"path": "/RuntimeProbe/Label", "properties": ["text"]}),
+    );
+    assert_eq!(
+        slashed["path"], "/root/RuntimeProbe/Label",
+        "the edited scene's own spelling, leading slash and all, resolves: {slashed}"
+    );
     let inspected = session.call(
         "runtime.inspect_node",
         json!({"path": "RuntimeProbe/Label", "properties": ["text"]}),

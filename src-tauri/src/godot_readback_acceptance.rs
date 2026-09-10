@@ -197,6 +197,13 @@ fn every_scene_command_answers_from_the_file_it_wrote() {
         "node.create",
         json!({"parent": "/Level", "name": "Marker", "type": "Marker2D"}),
     );
+    let before = session.call("session.get_state", json!({}))["revision"].clone();
+    let reopened = session.call("scene.open", json!({"path": "res://readback.tscn"}));
+    assert_eq!(
+        reopened["revision"], before,
+        "opening the scene that is open is not a switch, and keeps the revision: {reopened}"
+    );
+    assert_eq!(reopened["dirty"], true, "{reopened}");
     let saved = session.mutate("scene.save", json!({}));
     assert_eq!(saved["dirty"], false);
     let on_disk = std::fs::read_to_string(session.worktree.join("readback.tscn"))

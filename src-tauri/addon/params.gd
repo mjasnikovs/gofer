@@ -1263,9 +1263,11 @@ static func property_not_found_error(node: Node, path: String, property: String)
         )
     elif near.is_empty():
         message += (
-            ". node.inspect with no `properties` lists every property this node has with its "
-            + "current value, including the theme_override_* ones a Control keeps — naming this "
-            + "one there is refused the same way"
+            ". node.inspect with no `properties` lists every property this node has — the ones "
+            + "changed from the class default with their value, the rest by name under "
+            + "atClassDefault, including the theme_override_* ones a Control keeps. A name in "
+            + "neither list is not a property of this node, and naming it there is refused the "
+            + "same way"
         )
     else:
         message += ". Did you mean %s?" % near

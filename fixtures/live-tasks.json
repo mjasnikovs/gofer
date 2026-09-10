@@ -653,6 +653,52 @@
                 "runtime.stop"
             ],
             "task": "In scripts/player.gd, on ready, tween the Player from its start position to (400, 200) over two seconds. Run the game, read the Player's position at about half a second and again at about two and a half seconds, and prove it moved and then stopped at the target."
+        },
+        {
+            "id": "camera-follow",
+            "fixture": "live-project",
+            "ops": [
+                "node.create_nodes",
+                "node.set_properties",
+                "script.edit",
+                "project.set_input_action",
+                "scene.save",
+                "runtime.run",
+                "runtime.input",
+                "runtime.wait",
+                "runtime.inspect_node",
+                "runtime.stop"
+            ],
+            "task": "Give the Player a Camera2D child that is the current camera, and make the Player move right at 300 px/s while the D key is held. Run the game, hold D for a second, and prove with the camera's global position before and after that the camera followed the player."
+        },
+        {
+            "id": "save-load",
+            "fixture": "live-project",
+            "ops": [
+                "script.edit",
+                "script.diagnostics",
+                "scene.save",
+                "runtime.run",
+                "runtime.wait",
+                "logs.read",
+                "runtime.stop"
+            ],
+            "task": "Make the game save the total tick count to user://ticks.json every tick and print \"saved N\" each time, and on start load the file if it exists and print \"loaded N\". Run the game for three seconds, stop it, run it again for two seconds, and prove from the log that the second run loaded the count the first run saved."
+        },
+        {
+            "id": "animation-player",
+            "fixture": "live-project",
+            "ops": [
+                "node.create_nodes",
+                "node.set_properties",
+                "script.edit",
+                "scene.save",
+                "runtime.run",
+                "runtime.wait",
+                "runtime.inspect_node",
+                "runtime.stop"
+            ],
+            "task": "Add an AnimationPlayer to the main scene with an animation named fade that takes the Label's modulate alpha from 1 to 0 over one second, and play it on ready. Run the game, read the Label's modulate at about half a second and again after the animation is over, and prove it faded."
         }
     ]
 }

@@ -170,9 +170,9 @@ func _as_far_as_the_path_goes(raw: String) -> String:
 func _running_node(path: String) -> Node:
     var root := get_tree().root
     var found := root.get_node_or_null(NodePath(path))
-    if found != null or path.begins_with("/"):
+    if found != null:
         return found
-    found = root.get_node_or_null(NodePath("/root/" + path))
+    found = root.get_node_or_null(NodePath("/root" + path if path.begins_with("/") else "/root/" + path))
     if found != null:
         return found
     var scene := get_tree().current_scene
