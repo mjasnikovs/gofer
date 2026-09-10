@@ -1683,11 +1683,11 @@ fn the_debugger_holds_the_game(facts: &SessionFacts) -> Option<String> {
 /// diagnostic is not one, and `last_session_errors` has already dropped the engine's epilogue and
 /// the editor's own chatter before this reads them.
 fn the_games_own_scripts_did_not_compile(facts: &SessionFacts) -> Option<String> {
-    if !facts
-        .errors
-        .iter()
-        .any(|line| line.starts_with("SCRIPT ERROR:"))
-    {
+    // The editor's language server spells the same failure `ERROR: LSP: Failed to parse script:`
+    // — a warning the project treats as an error reached a live turn that way, and only that way.
+    if !facts.errors.iter().any(|line| {
+        line.starts_with("SCRIPT ERROR:") || line.starts_with("ERROR: LSP: Failed to parse script")
+    }) {
         return None;
     }
     Some(
@@ -2959,6 +2959,29 @@ mod tests {
         assert!(
             !carried.message.contains("GoferRuntime"),
             "a staged project was accused of losing its helper: {}",
+            carried.message
+        );
+    }
+
+    /// The editor's language server spells a compile failure its own way, and a warning the
+    /// project treats as an error reaches the session only that way.
+    #[test]
+    fn a_parse_failure_the_language_server_reported_is_a_compile_failure_too() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[
+            (LogSource::Editor, "GOFER_ADDON_READY:2"),
+            (
+                LogSource::EditorError,
+                "ERROR: LSP: Failed to parse script: res://scripts/player.gd",
+            ),
+        ]);
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_slow_start",
+            "The game is running and its helper has not answered yet.",
+        ));
+        assert!(
+            carried.message.contains("did not compile"),
+            "a parse failure was read as a slow start: {}",
             carried.message
         );
     }

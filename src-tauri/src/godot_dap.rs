@@ -267,6 +267,15 @@ pub struct StoppedDetails {
 }
 
 impl StoppedDetails {
+    /// Godot's `pause` raises its own `stopped: paused` and, behind it, a `stopped: exception`
+    /// with no text. Under load the second lands after the continue that resumed from the pause
+    /// is answered, so the resume mark does not cover it, and the next wait answers with it. A
+    /// real exception always names its error — every one a live turn met did — so an empty one is
+    /// the echo and never a stop worth answering.
+    pub fn is_a_pauses_echo(&self) -> bool {
+        self.reason == "exception" && self.text.as_deref().is_none_or(str::is_empty)
+    }
+
     /// Parses a `stopped` event body. Returns `None` when the body is not an object, which a
     /// conforming adapter never sends.
     pub fn from_event_body(body: &Value) -> Option<Self> {
@@ -803,6 +812,9 @@ impl DapClient {
                     let Some(stop) = StoppedDetails::from_event_body(&event.body) else {
                         continue;
                     };
+                    if stop.is_a_pauses_echo() {
+                        continue;
+                    }
                     if stop.thread_id.is_none_or(|id| id == thread_id) {
                         return Ok(Some(stop));
                     }
@@ -1887,6 +1899,46 @@ mod tests {
             .await_stop(&events, MAIN_THREAD_ID, Duration::from_secs(2))
             .expect("await stop");
         assert!(outcome.is_none());
+        client.shutdown();
+        server.join.join().expect("server thread");
+    }
+
+    /// The pause's own empty exception is never the stop a wait is for.
+    #[test]
+    fn an_exception_with_no_text_is_a_pauses_echo_and_skipped() {
+        let server = start_fake_server(|message, writer| {
+            match message["command"].as_str().unwrap_or_default() {
+                "initialize" => handshake_handler(message, writer),
+                "continue" => FakeAction::ResultThen(
+                    json!({}),
+                    vec![
+                        json!({"seq": 901, "type": "event", "event": "stopped",
+                            "body": {"reason": "exception", "threadId": 1,
+                                     "description": "Exception", "text": ""}}),
+                        json!({"seq": 902, "type": "event", "event": "stopped",
+                            "body": {"reason": "breakpoint", "threadId": 1,
+                                     "description": "Breakpoint"}}),
+                    ],
+                ),
+                _ => FakeAction::Ignore,
+            }
+        });
+        let client = connected_client(&server);
+        let events = client.subscribe_events();
+
+        client.continue_execution(MAIN_THREAD_ID).expect("continue");
+        let stop = client
+            .await_stop(&events, MAIN_THREAD_ID, Duration::from_secs(2))
+            .expect("await stop")
+            .expect("a stop");
+        assert_eq!(stop.reason, "breakpoint", "{stop:?}");
+        assert!(
+            StoppedDetails::from_event_body(
+                &json!({"reason": "exception", "threadId": 1, "text": "Division by zero"})
+            )
+            .is_some_and(|real| !real.is_a_pauses_echo()),
+            "an exception that names its error is real"
+        );
         client.shutdown();
         server.join.join().expect("server thread");
     }

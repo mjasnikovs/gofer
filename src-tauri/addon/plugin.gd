@@ -1095,6 +1095,18 @@ func _launch_pending(id: String, kind: String) -> Dictionary:
         "seen_playing": false,
     }
 
+## A game the editor is playing whose helper never answered is halted at an error or still
+## starting: a live turn read get_state's `running: true` and this refusal's "no game" ten seconds
+## apart and took them for two different games.
+func _why_no_helper_answers() -> String:
+    if not EditorInterface.is_playing_scene():
+        return "No game with the Gofer runtime helper is running"
+    return (
+        "A game is playing but its Gofer helper has not answered, so nothing inside it can be "
+        + "read: it is halted at an error or still starting. runtime.get_state says which; "
+        + "runtime.stop ends it."
+    )
+
 ## Forwards a request to the running game. Without a live helper the request fails immediately —
 ## the caller can start the game and retry, so the error is retryable.
 func _runtime_forward(id: String, op: String, params: Dictionary) -> void:
@@ -1102,10 +1114,10 @@ func _runtime_forward(id: String, op: String, params: Dictionary) -> void:
         if RuntimeQueue.EXIT_ANSWERING_OPS.has(op):
             _respond_result(id, {"exited": true})
         else:
-            _respond_error(id, "runtime_not_running", "No game with the Gofer runtime helper is running", true)
+            _respond_error(id, "runtime_not_running", _why_no_helper_answers(), true)
         return
     if _runtime_broke and RuntimeQueue.PROCESS_AWAITING_OPS.has(op):
-        _respond_error(id, "runtime_broke", "The game is paused in the debugger, so it runs no frames and this call would wait forever. get_tree, inspect_node and get_monitors all answer while it is paused. debug.continue lets it go, and debug.stack_trace says where it is stopped. If it stopped while starting, what stopped it is in the session output - read that, fix it, and run again", true)
+        _respond_error(id, "runtime_broke", "The game is paused in the debugger, so it runs no frames and this call would wait forever. get_tree, inspect_node and get_monitors all answer while it is paused. debug.continue lets it go, and debug.stack_trace says where it is stopped. If it stopped while starting, what stopped it is in the session output - read that, stop the game with runtime.stop, fix it, and run again", true)
         return
     _runtime_pending.append({
         "id": id,
@@ -1152,7 +1164,7 @@ func _on_runtime_debugger_session_breaked(session_id: int) -> void:
     _fail_pending(
         ["run"],
         "runtime_broke",
-        "The game stopped at an error while starting and is paused in the debugger; read the error in the session output, fix it, and run again",
+        "The game stopped at an error while starting and is paused in the debugger, and stays there until runtime.stop ends it; read the error in the session output, stop the game, fix what the error names, and run again",
     )
 
 ## The debugger has resumed the game. It can answer again, and a game that is only being watched

@@ -477,6 +477,62 @@
                 "project.set_setting"
             ],
             "task": "Run the game exactly as the project is now. If the editor puts up a dialog, tell me its title and buttons and dismiss it with the button that cancels. Then set the main scene to the one scene the project has and run it for real, and stop it."
+        },
+        {
+            "id": "coin-pickup",
+            "fixture": "live-project",
+            "ops": [
+                "resource.create_texture",
+                "resource.create_shape",
+                "scene.create",
+                "node.create_nodes",
+                "node.set_properties",
+                "script.save",
+                "node.connect_signal",
+                "scene.save",
+                "node.instantiate",
+                "node.change_type",
+                "script.edit",
+                "runtime.run",
+                "runtime.input",
+                "runtime.wait",
+                "logs.read",
+                "runtime.stop"
+            ],
+            "task": "Build a coin the player can collect. Draw a 16x16 yellow coin texture, make a coin scene at res://scenes/coin.tscn whose root is an Area2D with a Sprite2D and a CollisionShape2D (a 16x16 rectangle shape), and a script that prints \"collected\" and frees the coin when a body enters it. Turn the Player into a CharacterBody2D with its own 24x24 rectangle collision shape, and make it move 200 px/s to the right while the D key is held. Place three coins to the right of the player at x = 120, 180, 240 on the player's y. Run the game, hold D for about a second, and prove from the log that at least one coin printed \"collected\"."
+        },
+        {
+            "id": "enemy-chase",
+            "fixture": "live-score",
+            "ops": [
+                "scene.open",
+                "node.create_nodes",
+                "node.set_properties",
+                "script.save",
+                "scene.save",
+                "runtime.run",
+                "runtime.wait",
+                "runtime.inspect_node",
+                "runtime.stop"
+            ],
+            "task": "Add an Enemy node to the main scene that starts 300 px to the right of the Player and moves toward the Player at 60 px/s every frame, printing the remaining distance once per second. Run the game for about three seconds and prove with two reads of the Enemy's position that it got closer."
+        },
+        {
+            "id": "debug-crash",
+            "fixture": "live-pipeline",
+            "ops": [
+                "script.open",
+                "script.edit",
+                "debug.launch",
+                "debug.await_stop",
+                "debug.stack_trace",
+                "debug.scopes",
+                "debug.variables",
+                "debug.evaluate",
+                "debug.terminate",
+                "logs.read"
+            ],
+            "task": "Make the fighter script crash on purpose: at the third tick, index an empty array. Launch the game under the debugger with no breakpoints, wait for the debugger to stop on the error, and report the stack frame, the line, and the value of ticks from the locals. Then remove the crash again, launch once more, let it run two seconds without stopping, and terminate."
         }
     ]
 }
