@@ -905,18 +905,18 @@ impl Moved {
     fn note(&self) -> Option<String> {
         Some(match self.from? {
             Left::Header(from) => format!(
-                "Line {from} declares the function and never runs, so a breakpoint on it would be \
-                 verified and never hit. This one is on line {}, the first statement of the body.",
+                "Line {from} declares the function and never runs. The breakpoint is armed on \
+                 line {}, the first statement of the body, and fires there.",
                 self.line
             ),
             Left::Empty(from) => format!(
-                "Line {from} holds no statement and never runs, so a breakpoint on it would be \
-                 verified and never hit. This one is on line {}, the next line that does.",
+                "Line {from} holds no statement and never runs. The breakpoint is armed on line \
+                 {}, the next line that does, and fires there.",
                 self.line
             ),
             Left::Declaration(from) => format!(
-                "Line {from} is a declaration and never runs, so a breakpoint on it would be \
-                 verified and never hit. This one is on line {}, the next line that does.",
+                "Line {from} is a declaration and never runs. The breakpoint is armed on line {}, \
+                 the next line that does, and fires there.",
                 self.line
             ),
             Left::Nowhere(from) => format!(

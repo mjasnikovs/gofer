@@ -976,6 +976,16 @@ fn every_configuration_command_answers_from_godot() {
         "a setting reported reset must be gone"
     );
 
+    let tail = session.error(
+        "project.set_setting",
+        json!({"name": "run/main_scene", "value": {"type": "String", "value": "res://a.tscn"}}),
+        None,
+    );
+    assert!(
+        tail.starts_with("setting_not_found") && tail.contains("application/run/main_scene"),
+        "the tail of a registered name is that setting, not a new one: {tail}"
+    );
+
     session.call(
         "project.set_setting",
         json!({"name": "physics/2d/default_gravity", "value": {"type": "float", "value": 1400.0}}),

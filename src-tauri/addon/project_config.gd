@@ -145,11 +145,20 @@ static func set_setting(params: Dictionary) -> Dictionary:
 ## custom setting instead of the built-in one — accepted, saved, and read back, while the setting
 ## that governs anything stays untouched. Custom settings are legitimate, so an unknown name is not
 ## refused on its own; it is refused only when swapping the separator finds a real one.
+## `run/main_scene` for `application/run/main_scene`: a live turn wrote the tail of a real name,
+## was answered `created: true`, read the phantom back, and spent twelve calls on a game that
+## still would not start. A name a registered setting ends with is that setting, not a new one.
 static func _setting_meant(name: String) -> String:
-    if not name.contains("."):
-        return ""
-    var candidate := name.replace(".", "/")
-    return candidate if ProjectSettings.has_setting(candidate) else ""
+    if name.contains("."):
+        var candidate := name.replace(".", "/")
+        if ProjectSettings.has_setting(candidate):
+            return candidate
+    var tail := "/" + name
+    for info in ProjectSettings.get_property_list():
+        var known := str(info.get("name", ""))
+        if known.ends_with(tail) and ProjectSettings.has_setting(known):
+            return known
+    return ""
 
 ## Restores a setting's default when it has one and removes it otherwise. An autoload, input
 ## action, or plugin entry must go through its own removal command.

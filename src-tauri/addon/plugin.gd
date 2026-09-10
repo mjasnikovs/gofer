@@ -1057,17 +1057,33 @@ func _respond_dialog_open(id: String, dialog: Dictionary, launch_is_waiting: boo
         id,
         "editor_dialog_open",
         (
-            "The editor is waiting for an answer to '%s': %s (choices: %s)%s"
+            "The editor is waiting for an answer to '%s': %s (choices: %s)%s%s"
             % [
                 dialog["title"],
                 dialog["text"],
                 ", ".join(dialog["buttons"]),
-                Params.after_a_dialog(launch_is_waiting)
+                Params.after_a_dialog(launch_is_waiting),
+                _a_main_scene_the_dialog_is_about(str(dialog["text"]))
             ]
         ),
         false,
         {"dialog": dialog}
     )
+
+## The one dialog no button fixes: the main scene setting names a file that is not there. A live
+## turn answered Cancel four times and ran again each time, because the refusal named the dialog
+## and never the setting behind it.
+func _a_main_scene_the_dialog_is_about(text: String) -> String:
+    var main_scene := str(ProjectSettings.get_setting("application/run/main_scene", ""))
+    if main_scene.is_empty() or not text.contains(main_scene):
+        return ""
+    if ResourceLoader.exists(main_scene):
+        return ""
+    return (
+        " application/run/main_scene names '%s', which does not exist, and no button here changes "
+        + "that: answer Cancel, point the setting at a scene that exists with project.set_setting, "
+        + "and run again."
+    ) % main_scene
 
 ## A launch entry. `seen_playing` is what lets the sweep tell a game still booting from a game that
 ## booted and died: both read `is_playing_scene() == false`, and only the second one is over.
