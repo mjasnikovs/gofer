@@ -374,3 +374,74 @@ test('a media file is passed over without being read', async context => {
 
     assert.equal(await grepIn(current.path)({pattern: 'needle'}), 'a.txt:1: needle')
 })
+
+test('several patterns are answered in one call, each under its own heading', async context => {
+    const current = await workspace(project)
+    context.after(current.remove)
+
+    const text = await grepIn(current.path)({
+        pattern: ['func hit', 'extends Node'],
+        glob: '*.gd'
+    })
+
+    assert.deepEqual(text.split('\n'), [
+        'func hit:',
+        'scripts/enemy.gd:3: func hit() -> void:',
+        'scripts/player.gd:3: func hit() -> void:',
+        '',
+        'extends Node:',
+        'scripts/enemy.gd:1: extends Node',
+        'scripts/player.gd:1: extends Node'
+    ])
+})
+
+test('a pattern nothing matches says so under its own heading', async context => {
+    const current = await workspace(project)
+    context.after(current.remove)
+
+    const text = await grepIn(current.path)({pattern: ['func hit', 'nowhere']})
+
+    assert.match(text, /^func hit:\n/u)
+    assert.match(text, /\nnowhere:\nNo matches found$/u)
+})
+
+test('countOnly answers one number a pattern and nothing else', async context => {
+    const current = await workspace(project)
+    context.after(current.remove)
+
+    const text = await grepIn(current.path)({
+        pattern: ['func hit', 'extends Node', 'nowhere'],
+        countOnly: true
+    })
+
+    assert.deepEqual(text.split('\n'), ['func hit: 2', 'extends Node: 2', 'nowhere: 0'])
+})
+
+test('a count is not capped by the limit, because a short count is a wrong one', async context => {
+    const current = await workspace(async path => {
+        await writeFile(join(path, 'a.txt'), 'hit\n'.repeat(DEFAULT_MATCH_LIMIT + 40))
+    })
+    context.after(current.remove)
+
+    const text = await grepIn(current.path)({pattern: 'hit', countOnly: true})
+
+    assert.equal(text, `hit: ${DEFAULT_MATCH_LIMIT + 40}`)
+})
+
+test('the limit is per pattern, so one busy search does not starve the others', async context => {
+    const current = await workspace(async path => {
+        await writeFile(join(path, 'a.txt'), `${'noisy\n'.repeat(DEFAULT_MATCH_LIMIT + 5)}quiet\n`)
+    })
+    context.after(current.remove)
+
+    const text = await grepIn(current.path)({pattern: ['noisy', 'quiet']})
+
+    assert.match(text, /\nquiet:\na\.txt:\d+: quiet/u)
+})
+
+test('an empty list of patterns is refused, not treated as a match-everything', async context => {
+    const current = await workspace(project)
+    context.after(current.remove)
+
+    await assert.rejects(grepIn(current.path)({pattern: []}), /needs a pattern/u)
+})

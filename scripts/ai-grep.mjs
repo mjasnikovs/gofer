@@ -27,18 +27,20 @@ const DESCRIPTION =
     'Search the contents of the project files for a pattern, and return the matching lines with '
     + 'their paths and line numbers. Reach for this before a shell command: it searches scenes and '
     + 'resources the shell is not allowed to name, and it skips the editor cache. '
-    + `Stops at ${DEFAULT_MATCH_LIMIT} matches or ${MAX_OUTPUT_BYTES / 1024}KB, whichever comes `
-    + 'first, and says so when it does.'
+    + `Stops at ${DEFAULT_MATCH_LIMIT} matches a pattern or ${MAX_OUTPUT_BYTES / 1024}KB in all, `
+    + 'whichever comes first, and says so when it does.'
 
 const PARAMETERS = {
     type: 'object',
     properties: {
         pattern: {
-            type: 'string',
+            oneOf: [{type: 'string'}, {type: 'array', items: {type: 'string'}}],
             description:
                 'A JavaScript regular expression, tested against each line on its own, so ^ and $ '
                 + 'are the start and end of a line. This is not grep: [[:alpha:]], \\< and \\> mean '
-                + 'nothing here. To search for text exactly as written, set literal.'
+                + 'nothing here. To search for text exactly as written, set literal. Pass a list '
+                + 'to run several searches over the same files in one call, each answered under '
+                + 'its own heading — that is one call and one pass, not one per pattern.'
         },
         path: {
             type: 'string',
@@ -71,6 +73,12 @@ const PARAMETERS = {
             description:
                 'Return the paths of the files that match and no lines, to find where something '
                 + 'lives before reading it.'
+        },
+        countOnly: {
+            type: 'boolean',
+            description:
+                'Return how many lines match and nothing else, one number per pattern. Counting '
+                + 'ignores limit, because a count of everything is still one number.'
         }
     },
     required: ['pattern']
@@ -82,6 +90,13 @@ const PARAMETERS = {
 /// No `m`: matching is line by line already. No `u`: with it, the GNU word marks a model reaches
 /// for are a SyntaxError, and a refused call costs a whole request; without it they degrade to the
 /// bare character.
+export function patternsOf(pattern) {
+    const many = Array.isArray(pattern) ? pattern : [pattern]
+    const kept = many.filter(one => typeof one === 'string' && one !== '')
+    if (kept.length === 0) throw new Error('grep needs a pattern to search for')
+    return kept
+}
+
 export function matcherFor({pattern, literal, ignoreCase}) {
     const source = literal ? pattern.replace(/[\\^$.*+?()[\]{}|]/gu, '\\$&') : pattern
     try {
@@ -193,6 +208,21 @@ async function unwrap(result, what) {
     throw new Error(`grep could not ${what}: ${result.error.message}`)
 }
 
+/// One block per pattern, and no heading at all when there is only one — a single search reads as
+/// it always did, and a batch says which answer belongs to which pattern.
+function answerText(searches, countOnly) {
+    if (countOnly) return searches.map(one => `${one.pattern}: ${one.found}`).join('\n')
+    if (searches.length === 1) {
+        return searches[0].rows.length === 0 ? 'No matches found' : searches[0].rows.join('\n')
+    }
+    return searches
+        .map(
+            one =>
+                `${one.pattern}:\n${one.rows.length === 0 ? 'No matches found' : one.rows.join('\n')}`
+        )
+        .join('\n\n')
+}
+
 export function createGrepTool() {
     return {
         name: GREP_TOOL_NAME,
@@ -201,7 +231,12 @@ export function createGrepTool() {
         parameters: PARAMETERS,
         execute: async (_toolCallId, params, signal, _onUpdate, {env}) => {
             const given = params ?? {}
-            const matcher = matcherFor(given)
+            const searches = patternsOf(given.pattern).map(pattern => ({
+                pattern,
+                matcher: matcherFor({...given, pattern}),
+                rows: [],
+                found: 0
+            }))
             const suffixes = suffixesOf(given.glob)
             const limit = Math.max(1, given.limit ?? DEFAULT_MATCH_LIMIT)
             const context = Math.max(0, given.context ?? 0)
@@ -215,24 +250,24 @@ export function createGrepTool() {
                 `open ${given.path ?? 'the project'}`
             )
 
-            const state = {
-                rows: [],
-                found: 0,
-                bytes: 0,
-                oversized: 0,
-                unreadable: 0,
-                cut: false,
-                full: false
-            }
-            const append = row => {
+            const state = {bytes: 0, oversized: 0, unreadable: 0, cut: false, full: false}
+            const append = (search, row) => {
                 const size = Buffer.byteLength(row) + 1
                 if (state.bytes + size > MAX_OUTPUT_BYTES) {
                     state.full = true
                     return false
                 }
-                state.rows.push(row)
+                search.rows.push(row)
                 state.bytes += size
                 return true
+            }
+
+            // A count is not capped: counting every match still answers in one number, and a
+            // count that stopped early would be a wrong answer rather than a short one.
+            const roomFor = search => {
+                if (given.countOnly) return Number.MAX_SAFE_INTEGER
+                if (given.filesOnly) return 1
+                return limit + 1 - search.found
             }
 
             const searchFile = async file => {
@@ -243,24 +278,35 @@ export function createGrepTool() {
                 const bytes = await env.readBinaryFile(file.path, signal)
                 if (!bytes.ok || bytes.value.includes(0)) return
                 const label = workspaceRelative(root, file.path)
-                const room = given.filesOnly ? 1 : limit + 1 - state.found
-                const found = searchText(new TextDecoder().decode(bytes.value), label, matcher, {
-                    context,
-                    room
-                })
-                state.cut ||= found.cut
-                if (given.filesOnly) {
-                    if (found.blocks.length > 0 && append(label)) state.found += 1
-                    return
-                }
-                for (const block of found.blocks) {
-                    state.found += 1
-                    if (state.found > limit) return
-                    for (const row of block) {
-                        if (!append(row)) return
+                const text = new TextDecoder().decode(bytes.value)
+                for (const search of searches) {
+                    if (state.full) return
+                    if (!given.countOnly && search.found > limit) continue
+                    const found = searchText(text, label, search.matcher, {
+                        context,
+                        room: roomFor(search)
+                    })
+                    state.cut ||= found.cut
+                    if (given.countOnly) {
+                        search.found += found.blocks.length
+                        continue
+                    }
+                    if (given.filesOnly) {
+                        if (found.blocks.length > 0 && append(search, label)) search.found += 1
+                        continue
+                    }
+                    for (const block of found.blocks) {
+                        search.found += 1
+                        if (search.found > limit) break
+                        for (const row of block) {
+                            if (!append(search, row)) return
+                        }
                     }
                 }
             }
+
+            const exhausted = () =>
+                state.full || (!given.countOnly && searches.every(search => search.found > limit))
 
             const walk = async directory => {
                 const entries = await env.listDir(directory, signal)
@@ -270,13 +316,13 @@ export function createGrepTool() {
                 }
                 const sorted = [...entries.value].sort((a, b) => a.name.localeCompare(b.name))
                 for (const entry of sorted.filter(one => one.kind === 'file')) {
-                    if (state.found > limit || state.full) return
+                    if (exhausted()) return
                     if (isSkipped(workspaceRelative(root, entry.path))) continue
                     if (isMedia(entry.name) || !nameMatches(entry.name, suffixes)) continue
                     await searchFile(entry)
                 }
                 for (const entry of sorted.filter(one => one.kind === 'directory')) {
-                    if (state.found > limit || state.full) return
+                    if (exhausted()) return
                     if (isSkipped(workspaceRelative(root, entry.path))) continue
                     await walk(entry.path)
                 }
@@ -288,17 +334,20 @@ export function createGrepTool() {
 
             const notices = noticesFor({
                 limit,
-                limitReached: state.found > limit,
+                limitReached: !given.countOnly && searches.some(search => search.found > limit),
                 bytesReached: state.full,
                 cut: state.cut,
                 oversized: state.oversized,
                 unreadable: state.unreadable
             })
-            const body = state.rows.length === 0 ? 'No matches found' : state.rows.join('\n')
+            const body = answerText(searches, given.countOnly === true)
             const text = notices.length === 0 ? body : `${body}\n\n[${notices.join('. ')}]`
             return {
                 content: [{type: 'text', text}],
-                details: {matches: state.found, truncated: notices.length > 0}
+                details: {
+                    matches: searches.reduce((total, search) => total + search.found, 0),
+                    truncated: notices.length > 0
+                }
             }
         }
     }
