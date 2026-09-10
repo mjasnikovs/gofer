@@ -445,3 +445,32 @@ test('an empty list of patterns is refused, not treated as a match-everything', 
 
     await assert.rejects(grepIn(current.path)({pattern: []}), /needs a pattern/u)
 })
+
+test('several paths are searched in one call', async context => {
+    const current = await workspace(project)
+    context.after(current.remove)
+
+    const text = await grepIn(current.path)({pattern: 'extends Node', path: ['scripts', 'scenes']})
+
+    assert.deepEqual(text.split('\n'), [
+        'scripts/enemy.gd:1: extends Node',
+        'scripts/player.gd:1: extends Node'
+    ])
+})
+
+test('a path in the list that does not exist is named, not passed over', async context => {
+    const current = await workspace(project)
+    context.after(current.remove)
+
+    await assert.rejects(grepIn(current.path)({pattern: 'x', path: ['scripts', 'nope']}), /nope/u)
+})
+
+test('an empty path list searches the whole project', async context => {
+    const current = await workspace(project)
+    context.after(current.remove)
+
+    assert.equal(
+        await grepIn(current.path)({pattern: 'extends Node', path: []}),
+        await grepIn(current.path)({pattern: 'extends Node'})
+    )
+})

@@ -43,10 +43,11 @@ const PARAMETERS = {
                 + 'its own heading — that is one call and one pass, not one per pattern.'
         },
         path: {
-            type: 'string',
+            oneOf: [{type: 'string'}, {type: 'array', items: {type: 'string'}}],
             description:
                 'A file to search, or a directory to search under, named the way the project does '
-                + '— scripts/enemy, not its full path. Leave it out to search the whole project.'
+                + '— scripts/enemy, not its full path. Several are given as a list: '
+                + '["scripts", "test_scenes"]. Leave it out to search the whole project.'
         },
         glob: {
             type: 'string',
@@ -90,6 +91,12 @@ const PARAMETERS = {
 /// No `m`: matching is line by line already. No `u`: with it, the GNU word marks a model reaches
 /// for are a SyntaxError, and a refused call costs a whole request; without it they degrade to the
 /// bare character.
+export function pathsOf(path) {
+    const many = Array.isArray(path) ? path : [path ?? '.']
+    const kept = many.filter(one => typeof one === 'string' && one !== '')
+    return kept.length === 0 ? ['.'] : kept
+}
+
 export function patternsOf(pattern) {
     const many = Array.isArray(pattern) ? pattern : [pattern]
     const kept = many.filter(one => typeof one === 'string' && one !== '')
@@ -241,14 +248,7 @@ export function createGrepTool() {
             const limit = Math.max(1, given.limit ?? DEFAULT_MATCH_LIMIT)
             const context = Math.max(0, given.context ?? 0)
             const root = await unwrap(await env.absolutePath('.', signal), 'find the project root')
-            const start = await unwrap(
-                await env.absolutePath(given.path ?? '.', signal),
-                `find ${given.path ?? 'the project'}`
-            )
-            const info = await unwrap(
-                await env.fileInfo(start, signal),
-                `open ${given.path ?? 'the project'}`
-            )
+            const named = pathsOf(given.path)
 
             const state = {bytes: 0, oversized: 0, unreadable: 0, cut: false, full: false}
             const append = (search, row) => {
@@ -328,9 +328,13 @@ export function createGrepTool() {
                 }
             }
 
-            if (info.kind === 'file') await searchFile(info)
-            else if (info.kind === 'directory') await walk(start)
-            else throw new Error(`grep cannot search ${given.path}, which is not a file or folder`)
+            for (const one of named) {
+                const start = await unwrap(await env.absolutePath(one, signal), `find ${one}`)
+                const info = await unwrap(await env.fileInfo(start, signal), `open ${one}`)
+                if (info.kind === 'file') await searchFile(info)
+                else if (info.kind === 'directory') await walk(start)
+                else throw new Error(`grep cannot search ${one}, which is not a file or folder`)
+            }
 
             const notices = noticesFor({
                 limit,
