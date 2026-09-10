@@ -159,7 +159,10 @@ static func atlas_coords(params: Dictionary, key: String, grid: Vector2i) -> Dic
             return error(
                 "tile_out_of_atlas",
                 (
-                    "Tile (%d, %d) is outside the atlas, which is %d columns by %d rows"
+                    (
+                        "Tile (%d, %d) is outside the atlas, which is %d columns by %d rows; "
+                        + "a tile is [column, row]"
+                    )
                     % [pair.x, pair.y, grid.x, grid.y]
                 ),
                 {"tile": [pair.x, pair.y], "grid": [grid.x, grid.y]}

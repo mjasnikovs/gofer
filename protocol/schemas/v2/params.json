@@ -3449,7 +3449,7 @@
         {
             "tool": "godot_script",
             "op": "hover",
-            "summary": "Hover documentation.",
+            "summary": "Hover documentation at a position. `position.line` is 0-based, one less than the number script.open shows.",
             "params": [
                 {
                     "name": "path",
@@ -3495,7 +3495,7 @@
         {
             "tool": "godot_script",
             "op": "completion",
-            "summary": "Completion items.",
+            "summary": "Completion items at a position. `position.line` is 0-based, one less than the number script.open shows.",
             "params": [
                 {
                     "name": "path",
@@ -3549,7 +3549,7 @@
         {
             "tool": "godot_script",
             "op": "signature_help",
-            "summary": "Signature help.",
+            "summary": "Signature help at a position. `position.line` is 0-based, one less than the number script.open shows.",
             "params": [
                 {
                     "name": "path",
@@ -3595,7 +3595,7 @@
         {
             "tool": "godot_script",
             "op": "definition",
-            "summary": "Go to definition.",
+            "summary": "Go to definition from a position. `position.line` is 0-based, one less than the number script.open shows.",
             "params": [
                 {
                     "name": "path",
@@ -3656,7 +3656,7 @@
         {
             "tool": "godot_script",
             "op": "declaration",
-            "summary": "Go to declaration.",
+            "summary": "Go to declaration from a position. `position.line` is 0-based, one less than the number script.open shows.",
             "params": [
                 {
                     "name": "path",
@@ -3717,7 +3717,7 @@
         {
             "tool": "godot_script",
             "op": "references",
-            "summary": "Find references.",
+            "summary": "Find references of the symbol at a position. `position.line` is 0-based, one less than the number script.open shows.",
             "params": [
                 {
                     "name": "path",
@@ -3783,7 +3783,7 @@
         {
             "tool": "godot_script",
             "op": "highlights",
-            "summary": "Document highlights.",
+            "summary": "Document highlights of the symbol at a position. `position.line` is 0-based, one less than the number script.open shows.",
             "params": [
                 {
                     "name": "path",
@@ -3979,7 +3979,7 @@
         {
             "tool": "godot_script",
             "op": "prepare_rename",
-            "summary": "Checks whether a symbol can be renamed.",
+            "summary": "Checks whether the symbol at a position can be renamed. `position.line` is 0-based, one less than the number script.open shows.",
             "params": [
                 {
                     "name": "path",
@@ -4035,7 +4035,7 @@
         {
             "tool": "godot_script",
             "op": "rename",
-            "summary": "Plans a rename without writing, and refuses when the server plans nothing — every real rename touches at least the declaration, so an empty plan is the server declining rather than a rename that reached no files.",
+            "summary": "Plans a rename of the symbol at a position without writing, and refuses when the server plans nothing — every real rename touches at least the declaration, so an empty plan is the server declining rather than a rename that reached no files.",
             "params": [
                 {
                     "name": "path",

@@ -841,7 +841,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:ead63662a515e41f
+// GENERATED-BEGIN operations sha256:c62f7550cb7388df
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -1559,7 +1559,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
     op(
         "godot_script",
         "hover",
-        "Hover documentation.",
+        "Hover documentation at a position. `position.line` is 0-based, one less than the number script.open shows.",
         Answers::Rust,
         &[
             need("path", Text),
@@ -1572,7 +1572,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
     op(
         "godot_script",
         "completion",
-        "Completion items.",
+        "Completion items at a position. `position.line` is 0-based, one less than the number script.open shows.",
         Answers::Rust,
         &[
             need("path", Text),
@@ -1585,7 +1585,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
     op(
         "godot_script",
         "signature_help",
-        "Signature help.",
+        "Signature help at a position. `position.line` is 0-based, one less than the number script.open shows.",
         Answers::Rust,
         &[
             need("path", Text),
@@ -1598,7 +1598,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
     op(
         "godot_script",
         "definition",
-        "Go to definition.",
+        "Go to definition from a position. `position.line` is 0-based, one less than the number script.open shows.",
         Answers::Rust,
         &[
             need("path", Text),
@@ -1611,7 +1611,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
     op(
         "godot_script",
         "declaration",
-        "Go to declaration.",
+        "Go to declaration from a position. `position.line` is 0-based, one less than the number script.open shows.",
         Answers::Rust,
         &[
             need("path", Text),
@@ -1624,7 +1624,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
     op(
         "godot_script",
         "references",
-        "Find references.",
+        "Find references of the symbol at a position. `position.line` is 0-based, one less than the number script.open shows.",
         Answers::Rust,
         &[
             need("path", Text),
@@ -1638,7 +1638,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
     op(
         "godot_script",
         "highlights",
-        "Document highlights.",
+        "Document highlights of the symbol at a position. `position.line` is 0-based, one less than the number script.open shows.",
         Answers::Rust,
         &[
             need("path", Text),
@@ -1672,7 +1672,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
     op(
         "godot_script",
         "prepare_rename",
-        "Checks whether a symbol can be renamed.",
+        "Checks whether the symbol at a position can be renamed. `position.line` is 0-based, one less than the number script.open shows.",
         Answers::Rust,
         &[
             need("path", Text),
@@ -1685,7 +1685,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
     op(
         "godot_script",
         "rename",
-        "Plans a rename without writing, and refuses when the server plans nothing — every real rename touches at least the declaration, so an empty plan is the server declining rather than a rename that reached no files.",
+        "Plans a rename of the symbol at a position without writing, and refuses when the server plans nothing — every real rename touches at least the declaration, so an empty plan is the server declining rather than a rename that reached no files.",
         Answers::Rust,
         &[
             need("path", Text),
