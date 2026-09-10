@@ -490,9 +490,9 @@ fn install_file(workspace: &Workspace, path: &str, text: &str) -> Result<(), Fil
     workspace.replace(path, text).map(|_| ())
 }
 
-fn ignore_missing(result: Result<(), FileError>) -> Result<(), FileError> {
+fn ignore_missing<T: Default>(result: Result<T, FileError>) -> Result<T, FileError> {
     match result {
-        Err(error) if error.code == "not_found" => Ok(()),
+        Err(error) if error.code == "not_found" => Ok(T::default()),
         other => other,
     }
 }

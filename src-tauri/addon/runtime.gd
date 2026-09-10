@@ -162,6 +162,22 @@ func _as_far_as_the_path_goes(raw: String) -> String:
         reached += "/" + parts[index]
     return ""
 
+## The node a path names in the running tree, however the path is spelled.
+##
+## `/root/Main/Player` is the tree's own spelling; `Main/Player` and `Player` are the edited
+## scene's, and every live turn that inspected a running node wrote one of those first and was
+## corrected once. The correction was right and cost a call every run, so the spellings resolve.
+func _running_node(path: String) -> Node:
+    var root := get_tree().root
+    var found := root.get_node_or_null(NodePath(path))
+    if found != null or path.begins_with("/"):
+        return found
+    found = root.get_node_or_null(NodePath("/root/" + path))
+    if found != null:
+        return found
+    var scene := get_tree().current_scene
+    return null if scene == null else scene.get_node_or_null(NodePath(path))
+
 func _node_not_found(parameter: String, path: String) -> Dictionary:
     var plain := "No running node at '%s'" % path
     if _is_an_engine_name(path.get_file()):
@@ -192,7 +208,7 @@ func _op_tree(params: Dictionary) -> Dictionary:
     var start: Node = get_tree().root
     var from := str(params.get("root", ""))
     if not from.is_empty():
-        start = get_tree().root.get_node_or_null(NodePath(from))
+        start = _running_node(from)
         if start == null:
             return _node_not_found("root", from)
     var levels := int(params.get("depth", MAX_TREE_DEPTH))
@@ -275,7 +291,7 @@ func _op_inspect(params: Dictionary) -> Dictionary:
     if path.is_empty():
         return _failure("invalid_params", "runtime.inspect_node requires a path")
     path = path.strip_edges()
-    var node := get_tree().root.get_node_or_null(NodePath(path))
+    var node := _running_node(path)
     if node == null:
         return _node_not_found("path", path)
     var known: Array[String] = []
@@ -283,12 +299,19 @@ func _op_inspect(params: Dictionary) -> Dictionary:
         known.append(str(entry["name"]))
     var properties := {}
     var requested: Array = params.get("properties", [])
+    if requested.is_empty():
+        requested = known
     for name in requested:
         var property := str(name)
         if not known.has(property):
             return _failure(
                 "property_not_found",
-                "Node '%s' has no property '%s'%s" % [path, property, _nearest_of(node, property)]
+                (
+                    "Node '%s' has no property '%s'%s. runtime.inspect_node with no `properties` "
+                    + "lists every property this node has with its current value; a name that "
+                    + "reads like a call, is_on_floor(), is a method and has no value to read."
+                )
+                % [path, property, _nearest_of(node, property)]
             )
         properties[property] = Protocol.encode(node.get(property))
     return _succeed({

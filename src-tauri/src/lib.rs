@@ -782,7 +782,9 @@ fn delete_workspace_path(
     app: AppHandle,
     request: files::DeletePathRequest,
 ) -> Result<(), files::FileError> {
-    active_workspace(&app)?.delete(&request.path, request.expected_hash.as_deref())
+    active_workspace(&app)?
+        .delete(&request.path, request.expected_hash.as_deref())
+        .map(|_| ())
 }
 
 /// Streams settled batches of changes made by Godot, the user, or a confined shell command.

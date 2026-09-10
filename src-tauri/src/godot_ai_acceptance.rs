@@ -1480,6 +1480,10 @@ fn every_operation_no_turn_has_ever_used_still_answers() {
     )
     .expect("delete a file inside the worktree");
     assert_eq!(deleted["ops"][0]["result"]["deleted"], true, "{deleted}");
+    assert!(
+        deleted["ops"][0]["result"]["alsoRemoved"].is_array(),
+        "a delete names the sidecars that went with the file: {deleted}"
+    );
     assert_eq!(
         approving.join().expect("the approval responder"),
         1,

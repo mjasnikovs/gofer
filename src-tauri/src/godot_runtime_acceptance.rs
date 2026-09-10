@@ -133,10 +133,26 @@ fn launch_args(session: &Session) -> String {
 }
 
 /// Reads the probe label through the debugger channel, the inspectable consequence of input.
+///
+/// Spelled the edited scene's way on purpose — `RuntimeProbe/Label` and `Label` under the
+/// current scene are what every live turn wrote first — and the answer names the running tree's
+/// own `/root/RuntimeProbe/Label`, so the two spellings are proven to reach the same node.
 fn label_text(session: &Session) -> String {
+    let relative = session.call(
+        "runtime.inspect_node",
+        json!({"path": "Label", "properties": ["text"]}),
+    );
+    assert_eq!(
+        relative["path"], "/root/RuntimeProbe/Label",
+        "a path relative to the current scene resolves: {relative}"
+    );
     let inspected = session.call(
         "runtime.inspect_node",
-        json!({"path": "/root/RuntimeProbe/Label", "properties": ["text"]}),
+        json!({"path": "RuntimeProbe/Label", "properties": ["text"]}),
+    );
+    assert_eq!(
+        inspected["path"], "/root/RuntimeProbe/Label",
+        "a path relative to /root resolves: {inspected}"
     );
     inspected["properties"]["text"]
         .as_object()

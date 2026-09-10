@@ -537,7 +537,13 @@ impl Workspace {
     }
 
     /// Deletes one file or one empty directory. Recursive deletion is deliberately absent.
-    pub fn delete(&self, relative: &str, expected_hash: Option<&str>) -> Result<(), FileError> {
+    /// Answers with the sidecars that went with the file, so a caller that listed them does not
+    /// spend a call deleting a `.uid` that is already gone.
+    pub fn delete(
+        &self,
+        relative: &str,
+        expected_hash: Option<&str>,
+    ) -> Result<Vec<String>, FileError> {
         self.reject_live_sidecar(relative)?;
         let path = self.resolve(relative)?;
         let metadata = fs::symlink_metadata(&path).map_err(|error| {
@@ -548,7 +554,8 @@ impl Workspace {
             }
         })?;
         if metadata.is_dir() {
-            return fs::remove_dir(&path).map_err(|error| FileError::io(relative, &error));
+            fs::remove_dir(&path).map_err(|error| FileError::io(relative, &error))?;
+            return Ok(Vec::new());
         }
         if let Some(expected) = expected_hash {
             let actual = self.current_hash(relative, &path)?;
@@ -561,12 +568,16 @@ impl Workspace {
             }
         }
         fs::remove_file(&path).map_err(|error| FileError::io(relative, &error))?;
+        let mut also_removed = Vec::new();
         for suffix in SIDECARS {
-            if let Ok(carried) = self.resolve(&format!("{relative}.{suffix}")) {
-                let _ = fs::remove_file(&carried);
+            let sidecar = format!("{relative}.{suffix}");
+            if let Ok(carried) = self.resolve(&sidecar)
+                && fs::remove_file(&carried).is_ok()
+            {
+                also_removed.push(sidecar);
             }
         }
-        Ok(())
+        Ok(also_removed)
     }
 
     /// Refuses a path that is one live file's metadata rather than a file of its own.

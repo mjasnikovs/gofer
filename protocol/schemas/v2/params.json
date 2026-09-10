@@ -3115,6 +3115,15 @@
                         "name": "deleted",
                         "kind": "flag",
                         "required": true
+                    },
+                    {
+                        "name": "alsoRemoved",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "text"
+                        },
+                        "required": true,
+                        "note": "The sidecars that went with it — its `.uid`, an asset's `.import` — which are not there to delete afterwards."
                     }
                 ]
             },

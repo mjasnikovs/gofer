@@ -1294,9 +1294,9 @@ fn resource_domain<R: Runtime>(
         "delete" => {
             let request: files::DeletePathRequest = from_params(params)?;
             let workspace = crate::active_workspace(app)?;
-            workspace.delete(&request.path, request.expected_hash.as_deref())?;
+            let also_removed = workspace.delete(&request.path, request.expected_hash.as_deref())?;
             tell_the_editor_the_worktree_moved(app);
-            Ok(json!({"path": request.path, "deleted": true}))
+            Ok(json!({"path": request.path, "deleted": true, "alsoRemoved": also_removed}))
         }
         other => Err(ToolFailure::new(
             "unrouted_operation",
