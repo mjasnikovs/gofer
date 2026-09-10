@@ -501,10 +501,15 @@ fn answer_says_the_game_ended(answer: &DebugResponse) -> bool {
 /// return, and saying so costs one clause. A wait with breakpoints set names them, because the
 /// caller is being asked to look at what is on those lines and ask what reaches them.
 fn saying_what_has_not_been_reached(error: DapError, asked: Option<u64>) -> DapError {
-    if error.code != "stop_timeout" || asked.is_some_and(|asked| asked < DEFAULT_STOP_TIMEOUT_MS) {
+    if error.code != "stop_timeout" {
         return error;
     }
     let armed = where_the_breakpoints_are();
+    // A wait the caller shortened is told about its own deadline instead — unless nothing is
+    // armed, when a longer wait would have ended the same way.
+    if !armed.is_empty() && asked.is_some_and(|asked| asked < DEFAULT_STOP_TIMEOUT_MS) {
+        return error;
+    }
     let said = if armed.is_empty() {
         " No breakpoint is set, so nothing here stops the game on a line and this wait had only \
          an error or a pause to return on. Set one with set_breakpoints on the line you want \
@@ -529,7 +534,7 @@ fn saying_the_wait_was_the_callers_own(error: DapError, asked: Option<u64>) -> D
     let Some(asked) = asked.filter(|asked| *asked < DEFAULT_STOP_TIMEOUT_MS) else {
         return error;
     };
-    if error.code != "stop_timeout" {
+    if error.code != "stop_timeout" || where_the_breakpoints_are().is_empty() {
         return error;
     }
     DapError {
@@ -1621,7 +1626,24 @@ func _ready() -> void:
     /// calls describing a running game as a stopped one.
     #[test]
     fn a_stop_timeout_says_when_the_caller_named_the_deadline() {
+        let _armed = breakpoint_test_lock();
         let timed_out = DapError::new("stop_timeout", "No stopped event arrived within 5s");
+
+        // With nothing armed, no deadline would have helped: a live turn shortened its wait to
+        // 5 s on a launch that armed nothing and was told to wait the full 30 s for the same
+        // nothing. The breakpoint sentence is the one that turns that answer around.
+        pretend_a_breakpoint_is_armed(None);
+        let unarmed = saying_what_has_not_been_reached(
+            saying_the_wait_was_the_callers_own(timed_out.clone(), Some(5_000)),
+            Some(5_000),
+        );
+        assert!(
+            unarmed.message.contains("No breakpoint is set")
+                && !unarmed.message.contains("without timeoutMs"),
+            "{unarmed:?}"
+        );
+
+        pretend_a_breakpoint_is_armed(Some("scripts/player.gd"));
 
         let shortened = saying_the_wait_was_the_callers_own(timed_out.clone(), Some(5_000));
         assert_eq!(shortened.code, "stop_timeout");
@@ -1690,9 +1712,17 @@ func _ready() -> void:
             "{nothing:?}"
         );
 
+        assert!(
+            saying_what_has_not_been_reached(timed_out.clone(), Some(5_000))
+                .message
+                .contains("No breakpoint is set"),
+            "a shortened wait with nothing armed is still told nothing can stop it"
+        );
+        pretend_a_breakpoint_is_armed(Some("scripts/player.gd"));
         assert_eq!(
             saying_what_has_not_been_reached(timed_out.clone(), Some(5_000)).message,
-            timed_out.message
+            timed_out.message,
+            "a shortened wait with a breakpoint armed is told about its deadline instead"
         );
 
         let cancelled = DapError::new("cancelled", "The wait was stopped with its agent turn");
