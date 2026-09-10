@@ -3535,7 +3535,7 @@
                             "kind": "object"
                         },
                         "required": true,
-                        "note": "The language server’s own payload, passed through unchanged."
+                        "note": "label, kind, detail and insertText per item, members before constants and types; the server’s `data` blob is dropped."
                     },
                     {
                         "name": "isIncomplete",

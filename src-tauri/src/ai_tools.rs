@@ -1781,9 +1781,41 @@ fn script_domain<R: Runtime>(
         }
         _ => {
             let request: ScriptRequest = from_tagged_params(op, params)?;
-            Ok(to_value(script::call(request)?))
+            let answered = to_value(script::call(request)?);
+            Ok(if op == "completion" {
+                a_completion_the_model_can_read(answered)
+            } else {
+                answered
+            })
         }
     }
+}
+
+/// Completion items as the model can use them: members first, and no `data`.
+///
+/// After `timer.` the server answered 276 items, every one carrying a `data` blob that repeats the
+/// request it came from, and the enum types and `NOTIFICATION_*` constants sorted first. The
+/// result budget cut the list at 88, before `wait_time`, `start` or `timeout` — the only items the
+/// question was about. `data` is what `completionItem/resolve` needs, and Monaco keeps it on its
+/// own path; the model never resolves. Methods, fields, properties, variables and events come
+/// first, in the server's order within each half.
+fn a_completion_the_model_can_read(mut answered: Value) -> Value {
+    const MEMBER_KINDS: [u64; 6] = [2, 3, 5, 6, 10, 23];
+    let Some(items) = answered.get_mut("items").and_then(Value::as_array_mut) else {
+        return answered;
+    };
+    for item in items.iter_mut() {
+        if let Some(fields) = item.as_object_mut() {
+            fields.remove("data");
+            fields.remove("sortText");
+            fields.remove("filterText");
+        }
+    }
+    items.sort_by_key(|item| {
+        let kind = item.get("kind").and_then(Value::as_u64).unwrap_or(0);
+        u8::from(!MEMBER_KINDS.contains(&kind))
+    });
+    answered
 }
 
 /// Refuses a launch the debugger already made, before the editor is asked to make a second one.
@@ -4405,5 +4437,55 @@ mod tests {
         let failure = from_tagged_params::<DebugRequest>("status", json!("nope"))
             .expect_err("a string is not a parameter object");
         assert_eq!(failure.code, "invalid_params");
+    }
+}
+
+#[cfg(test)]
+mod completion_trim_tests {
+    use super::*;
+
+    #[test]
+    fn members_come_first_and_the_resolve_blob_is_dropped() {
+        let trimmed = a_completion_the_model_can_read(json!({
+            "op": "completion",
+            "isIncomplete": false,
+            "items": [
+                {"label": "ConnectFlags", "kind": 13, "data": {"position": 1}, "sortText": "a"},
+                {"label": "NOTIFICATION_READY", "kind": 21, "data": {"position": 1}},
+                {"label": "wait_time", "kind": 10, "data": {"position": 1}, "insertText": "wait_time"},
+                {"label": "start", "kind": 2, "data": {"position": 1}},
+                {"label": "timeout", "kind": 23, "data": {"position": 1}}
+            ]
+        }));
+        let labels: Vec<&str> = trimmed["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|item| item["label"].as_str().expect("label"))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "wait_time",
+                "start",
+                "timeout",
+                "ConnectFlags",
+                "NOTIFICATION_READY"
+            ]
+        );
+        assert!(
+            trimmed["items"]
+                .as_array()
+                .expect("items")
+                .iter()
+                .all(|item| item.get("data").is_none() && item.get("sortText").is_none()),
+            "{trimmed}"
+        );
+        assert_eq!(trimmed["items"][0]["insertText"], "wait_time");
+        assert_eq!(
+            a_completion_the_model_can_read(json!({"op": "hover"})),
+            json!({"op": "hover"}),
+            "an answer without items is left alone"
+        );
     }
 }

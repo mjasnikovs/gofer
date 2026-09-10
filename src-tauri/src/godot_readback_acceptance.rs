@@ -1055,6 +1055,13 @@ fn every_configuration_command_answers_from_godot() {
         "an override reported reset must be gone from project.godot:\n{}",
         project()
     );
+    let listed = session.call("project.list_input_actions", json!({}));
+    assert!(
+        listed["atEngineDefault"]
+            .as_array()
+            .is_some_and(|names| names.iter().any(|name| name == "ui_accept")),
+        "a reset built-in is back at its engine default without a restart: {listed}"
+    );
 
     let toggled = session.call(
         "project.set_plugin_enabled",

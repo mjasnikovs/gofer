@@ -435,15 +435,17 @@ static func reset_input_action(params: Dictionary) -> Dictionary:
         return Params.error(
             "input_action_not_found", "No input action named '%s'" % name, {"name": name}
         )
-    ProjectSettings.set_setting(setting, null)
+    # Writing null removes the key, and a removed built-in is in no list until the editor
+    # restarts; its engine default keeps it listed at that default, and the save skips it.
+    ProjectSettings.set_setting(setting, ProjectSettings.property_get_revert(setting))
     var failure := save_project_or_error()
     if not failure.is_empty():
         return failure
-    if ProjectSettings.has_setting(setting):
+    if not _is_at_its_engine_default(setting):
         return Params.readback_error(
             "project.reset_input_action %s" % name,
-            "no override",
+            "the engine default",
             ProjectSettings.get_setting(setting),
             {"name": name}
         )
-    return {"name": name, "reset": true, "restartRequired": true}
+    return {"name": name, "reset": true, "restartRequired": _restart_required(name)}
