@@ -1,5 +1,4 @@
 import {readFile} from 'node:fs/promises'
-import {signatureFrom} from './tool-schema.mjs'
 import {engineWords, readVocabulary} from './godot-vocabulary.mjs'
 
 function hidden(name) {
@@ -22,8 +21,8 @@ function spoken(param, words) {
  * The catalogue as the worker receives it, built from the two committed files rather than from a
  * running desktop: `params.json` for the operations and `godot-vocabulary.json` for the words.
  *
- * The same object the Rust `Wire` serializes — summary, signature, resolved parameters — so a test
- * that builds the tool from this is building the tool the model is given.
+ * The same object the Rust `Wire` serializes — summary, resolved parameters — so a test that
+ * builds the tool from this is building the tool the model is given.
  */
 export async function declaredDomains() {
     const {operations, domains, vocabularies} = JSON.parse(
@@ -38,7 +37,6 @@ export async function declaredDomains() {
     )
     return domains.map(domain => ({
         name: domain.name,
-        description: domain.description,
         operations: operations
             .filter(entry => entry.tool === domain.name)
             .map(entry => {
@@ -49,7 +47,6 @@ export async function declaredDomains() {
                 return {
                     op: entry.op,
                     summary: entry.summary,
-                    signature: signatureFrom(params),
                     params,
                     alone: entry.alone ?? null
                 }

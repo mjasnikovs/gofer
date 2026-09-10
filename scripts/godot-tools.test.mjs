@@ -25,7 +25,7 @@ test('one tool carries the whole router catalog and forwards every call', async 
         godot.parameters.properties.ops.items.oneOf.map(branch => branch.properties.op.const),
         ['scene.get_tree', 'scene.save', 'runtime.capture', 'resource.delete', 'docs_search.search']
     )
-    assert.match(godot.description, /# scene — The edited scene\./u)
+    assert.match(godot.description, /# scene\nOperations:\n/u)
     assert.match(godot.description, /- scene\.get_tree: Returns the edited scene hierarchy\./u)
     assert.match(godot.description, /- docs_search\.search: Retrieves ranked passages/u)
 
@@ -46,7 +46,6 @@ test('the narrowing sentences name dotted operations from every domain at once',
         [
             {
                 name: 'godot_session',
-                description: 'The session.',
                 operations: [
                     {
                         op: 'undo',
@@ -57,7 +56,6 @@ test('the narrowing sentences name dotted operations from every domain at once',
             },
             {
                 name: 'godot_debug',
-                description: 'The debuggee.',
                 operations: [
                     {
                         op: 'continue',

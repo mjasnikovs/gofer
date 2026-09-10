@@ -58,11 +58,9 @@ async function parameterCatalogue() {
     )
     if (!Array.isArray(domains) || domains.length === 0)
         throw new Error(`${path} declares no domains`)
-    for (const domain of domains) {
-        for (const key of ['name', 'description'])
-            if (typeof domain[key] !== 'string' || domain[key].trim() === '')
-                throw new Error(`${path}: a domain has no ${key}`)
-    }
+    for (const domain of domains)
+        if (typeof domain.name !== 'string' || domain.name.trim() === '')
+            throw new Error(`${path}: a domain has no name`)
     if (!Array.isArray(operations) || operations.length === 0)
         throw new Error(`${path} declares no operations`)
     for (const entry of operations) {
@@ -478,7 +476,7 @@ function rustParam(param) {
     if (param.vocabulary) call = `speaking(${call}, ${vocabularyConst(param.vocabulary)})`
     if (param.entry) call = `shaped(${call}, &[${param.entry.map(rustParam).join(', ')}])`
     if ('default' in param) call = `defaulting(${call}, ${rustFallback(param.default)})`
-    return param.note ? `noted(${call}, ${rustString(param.note)})` : call
+    return call
 }
 
 /** The one value a parameter falls back to, as the variant that carries its JSON type. */
@@ -602,9 +600,9 @@ function rustTagPayloads(tags) {
 /**
  * The ten domains, each pointing at the operation list generated beside it.
  *
- * The descriptions used to be written here, which put the only prose the model reads that no
- * check could reach inside a Rust source file. They are rows of `params.json` now, so the
- * recitation check and the tool the model receives read the same words.
+ * A domain is a name and its operations. It carried a description as well, in a Rust source file
+ * no check could reach and then as a row of `params.json`; the arm that cut all ten tied on
+ * success, so there is no domain prose left to hold anywhere.
  */
 function rustCatalog(domains) {
     const rows = domains
@@ -612,7 +610,6 @@ function rustCatalog(domains) {
             domain =>
                 '    ToolDomain {\n'
                 + `        name: ${rustString(domain.name)},\n`
-                + `        description: ${rustString(domain.description)},\n`
                 + `        operations: tool_params::${operationsConst(domain.name)},\n`
                 + '    },\n'
         )

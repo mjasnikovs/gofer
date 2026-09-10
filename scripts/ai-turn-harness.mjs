@@ -98,7 +98,6 @@ export function startServer() {
 export const catalog = [
     {
         name: 'godot_scene',
-        description: 'The edited scene.',
         operations: [
             {op: 'get_tree', summary: 'Returns the edited scene hierarchy.'},
             {op: 'save', summary: 'Saves the edited scene.'}
@@ -106,12 +105,10 @@ export const catalog = [
     },
     {
         name: 'godot_runtime',
-        description: 'The running game.',
         operations: [{op: 'capture', summary: 'Captures a PNG frame.'}]
     },
     {
         name: 'godot_resource',
-        description: 'Project resources.',
         operations: [
             {
                 op: 'delete',
@@ -122,7 +119,6 @@ export const catalog = [
     },
     {
         name: 'godot_docs_search',
-        description: 'The Godot documentation on this machine.',
         operations: [
             {
                 op: 'search',

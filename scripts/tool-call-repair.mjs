@@ -24,6 +24,13 @@ function asSentenceList(names) {
     return `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`
 }
 
+/** The parameters an operation takes, for a refusal that has to say what it does take. */
+function namesOf(params) {
+    const visible = (params ?? []).filter(param => !param.hidden)
+    if (visible.length === 0) return 'no parameters'
+    return asSentenceList(visible.map(param => `\`${param.name}\``))
+}
+
 function exactFit(declared, keys) {
     return (
         declared.every(param => !param.required || keys.includes(param.name))
@@ -326,11 +333,7 @@ export function refuseSiblingParameter(operations, entry) {
         if (owners.length !== 1) continue
         const shaped = owners[0].params.find(param => param.name === key)
         if (!Array.isArray(shaped?.entry) || shaped.entry.length === 0) continue
-        const takes =
-            operation.signature ? ` It takes ${operation.signature}.`
-            : operation.signature === '' && operation.params.every(param => param.hidden) ?
-                ' It takes no parameters.'
-            :   ''
+        const takes = ` It takes ${namesOf(operation.params)}.`
         throw new Error(
             `${entry.op} has no \`${key}\` parameter.${takes}`
                 + ` \`${key}\` is a parameter of ${owners[0].op}.`

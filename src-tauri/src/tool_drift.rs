@@ -501,57 +501,6 @@ fn addon_command_behind(domain: &str, op: &str) -> Option<String> {
     }
 }
 
-/// `path` names a file everywhere but one operation, and that one says so.
-///
-/// Counted over the whole catalogue: 29 operations declare a `path`, and in 28 of them it is a file
-/// — a scene, a script, a resource. In `godot_runtime inspect_node` it is a **node**, and
-/// `godot_node` calls that same thing `node`. So a model reading `path` has 28 reasons to write a
-/// file and one operation where that is wrong.
-///
-/// It writes `node` there instead: **seven times across seven live runs**, every one refused with
-/// `godot_runtime inspect_node has no \`node\` parameter`, every one corrected on the next call.
-/// That is the most persistent unrepaired shape in the recorded corpus, and repairing it is a
-/// guess — "one required parameter missing, one stray of the same kind" renames `colour` onto
-/// `name` sooner or later. What is not a guess is saying, in the description the model reads before
-/// it writes anything, that this one is the exception.
-///
-/// This test is what stops the exception growing a second member quietly. A new operation whose
-/// `path` is a node either says so in its note or fails here.
-#[test]
-fn the_one_path_that_names_a_node_says_so() {
-    let mut noted = Vec::new();
-    let mut bare = Vec::new();
-    for domain in CATALOG {
-        for operation in domain.operations {
-            let Some(params) = crate::tool_params::params_of(domain.name, operation.op) else {
-                continue;
-            };
-            for param in params {
-                if param.name != "path" {
-                    continue;
-                }
-                let where_ = format!("{}.{}", domain.name, operation.op);
-                if param.note.contains("`node`") {
-                    noted.push(where_);
-                } else {
-                    bare.push(where_);
-                }
-            }
-        }
-    }
-    assert_eq!(
-        noted,
-        vec!["godot_runtime.inspect_node".to_owned()],
-        "`path` names a node in exactly one operation, and that one has to say so in the \
-         description the model reads. Anything else here is a second exception nobody wrote down."
-    );
-    assert!(
-        bare.len() > 20,
-        "the other twenty-eight are files and say nothing, which is what makes the one worth \
-         saying: {bare:?}"
-    );
-}
-
 /// Every parameter the addon reads has to be named where the model reads about it, and every
 /// parameter named there has to be one the addon reads.
 ///
@@ -871,12 +820,12 @@ fn every_word_a_vocabulary_holds_reaches_the_model_as_a_schema_enum() {
     }
 }
 
-/// The signature and the summary the committed tool prints are the ones this build would print.
+/// The heading and the summary the committed tool prints are the ones this build would print.
 ///
-/// Two programs print the operation line now: `signature` in `tool_params.rs`, which reaches the
-/// model through the worker at runtime, and `signatureFrom` in `scripts/tool-schema.mjs`, which
-/// prints the committed file. A second spelling of one contract is the drift `tool_params.rs`
-/// exists to end, so the two are held together here rather than left to agree by hand.
+/// The description is built at runtime, by the worker, out of the rows this catalogue serializes;
+/// the committed file is the same build from the same rows through `scripts/declared-domains.mjs`.
+/// So a summary edited in `params.json` without regenerating is a file the model never reads,
+/// and this is what says so.
 #[test]
 fn the_committed_tool_prints_what_this_build_would() {
     let tool = committed_tool();
@@ -886,21 +835,12 @@ fn the_committed_tool_prints_what_this_build_would() {
     let mut missing = Vec::new();
     for domain in CATALOG {
         let short = domain.name.trim_start_matches("godot_");
-        let heading = format!("# {short} — {}", domain.description);
+        let heading = format!("# {short}\nOperations:\n");
         if !description.contains(&heading) {
-            missing.push(format!("{} is described differently", domain.name));
+            missing.push(format!("{} is headed differently", domain.name));
         }
         for operation in domain.operations {
-            let signature = crate::tool_params::signature(operation.params);
-            let spaced = if signature.is_empty() {
-                String::new()
-            } else {
-                format!(" {signature}")
-            };
-            let line = format!(
-                "\n- {short}.{}{spaced}: {}",
-                operation.op, operation.summary
-            );
+            let line = format!("\n- {short}.{}: {}", operation.op, operation.summary);
             if !description.contains(&line) {
                 missing.push(format!(
                     "{short}.{} reads differently: {line}",
@@ -981,27 +921,17 @@ fn recited_runs(text: &str, words: &[&str]) -> Vec<Vec<String>> {
 const NAMED_AS_THE_DEFAULT: [&str; 3] = ["TIME_FPS", "MEMORY_STATIC", "OBJECT_NODE_COUNT"];
 
 /// Every sentence the model reads, with the operation it belongs to.
+///
+/// One summary per operation, and nothing else: a domain's description and a parameter's note were
+/// prose too, until the arm that cut both tied on success against the shipped surface.
 fn prose_the_model_reads() -> Vec<(String, &'static str)> {
-    fn notes(
-        at: &str,
-        params: &'static [crate::tool_params::Param],
-        into: &mut Vec<(String, &'static str)>,
-    ) {
-        for param in params {
-            let inside = format!("{at} `{}`", param.name);
-            if !param.note.is_empty() {
-                into.push((inside.clone(), param.note));
-            }
-            notes(&inside, param.entry, into);
-        }
-    }
     let mut prose = Vec::new();
     for domain in CATALOG {
-        prose.push((domain.name.to_owned(), domain.description));
         for operation in domain.operations {
-            let at = format!("{} {}", domain.name, operation.op);
-            prose.push((at.clone(), operation.summary));
-            notes(&at, operation.params, &mut prose);
+            prose.push((
+                format!("{} {}", domain.name, operation.op),
+                operation.summary,
+            ));
         }
     }
     prose
@@ -1130,14 +1060,15 @@ fn the_tile_size_the_schema_advertises_is_the_one_the_addon_falls_back_to() {
     }
 }
 
-/// A value the addon decodes has to be documented as the tagged object it decodes.
+/// A value the addon decodes has to be declared as the tagged object it decodes.
 ///
 /// `Protocol.decode` takes `{type, value}` and refuses anything else with "A value must be a
 /// tagged object with a type and a value". Two summaries offered a bare `value` and a live run
-/// spent its calls being refused by that sentence — the tag is not a detail of the value, it is
-/// the shape of the parameter, so a summary that names the parameter has to carry it.
+/// spent its calls being refused by that sentence. The tag is not a detail of the value, it is the
+/// shape of the parameter, so it is declared rather than described: a `Kind::Tagged` reaches the
+/// model as the `$defs` branch its sampler is constrained by, which no sentence can do.
 #[test]
-fn a_parameter_the_addon_decodes_is_documented_as_a_tagged_value() {
+fn a_parameter_the_addon_decodes_is_declared_as_a_tagged_value() {
     let functions = editor_functions();
     let decoders: BTreeSet<String> = dispatch_pairs(EDITOR_ADDON, "return ")
         .into_iter()
@@ -1157,15 +1088,33 @@ fn a_parameter_the_addon_decodes_is_documented_as_a_tagged_value() {
             let Some(command) = addon_command_behind(domain.name, operation.op) else {
                 continue;
             };
-            if decoders.contains(&command) && !operation.summary.contains("tagged") {
+            if decoders.contains(&command)
+                && !DECODES_INSIDE_A_BARE_LIST.contains(&command.as_str())
+                && !takes_a_tagged_value(operation.params)
+            {
                 silent.push(format!(
-                    "{} {} decodes a tagged value and its summary never says so",
+                    "{} {} decodes a tagged value and declares none",
                     domain.name, operation.op
                 ));
             }
         }
     }
     assert!(silent.is_empty(), "{}", silent.join("\n"));
+}
+
+/// The two operations whose tagged values ride inside a bare `binds` list.
+///
+/// The addon decodes each item; the schema says `array` and nothing more, because `binds` is a
+/// `list` rather than a `listOf tagged`. What said so was the summary sentence the measured trim
+/// cut. Declaring the item shape instead is a change to the grammar the sampler is constrained by,
+/// which is a thing to measure rather than to slip in under a drift test.
+const DECODES_INSIDE_A_BARE_LIST: [&str; 2] = ["node.connect_signal", "node.disconnect_signal"];
+
+/// Whether an operation declares a tagged value anywhere in its parameters, however deep.
+fn takes_a_tagged_value(params: &'static [crate::tool_params::Param]) -> bool {
+    params.iter().any(|param| {
+        matches!(param.kind, crate::tool_params::Kind::Tagged) || takes_a_tagged_value(param.entry)
+    })
 }
 
 /// Whether a handler hands anything to the protocol decoder, following its helpers.
@@ -1188,46 +1137,36 @@ fn decodes_a_value(
         .any(|(callee, _)| decodes_a_value(callee, functions, seen))
 }
 
-/// The catalog has to name an input event the way the addon reads one.
+/// The catalog has to shape an input event the way the addon reads one.
 ///
 /// It documented `{"type": "key", "keycode": "A"}` while the addon reads `kind` and `key`, so a
 /// model that believed its own tool description was answered "Input event kind '' is not
-/// supported" and had to discover the real shape by reading an action back. Nothing else keeps
-/// the sentence and the decoder together, because the sentence is prose.
+/// supported" and had to discover the real shape by reading an action back. The shape is the
+/// declared `events` entry now rather than a sentence about it — that is what the sampler is
+/// constrained by — so the two halves held together here are the entry and the decoder.
 #[test]
 fn the_input_event_shape_the_catalog_documents_is_the_one_the_addon_reads() {
     const ADDON: &str = PARAMS_ADDON;
-    let summary = CATALOG
+    let events = crate::tool_params::params_of("godot_project", "set_input_action")
+        .expect("set_input_action declares its parameters")
         .iter()
-        .find(|domain| domain.name == "godot_project")
-        .and_then(|domain| {
-            domain
-                .operations
-                .iter()
-                .find(|operation| operation.op == "set_input_action")
-        })
-        .expect("godot_project set_input_action is in the catalog")
-        .summary;
+        .find(|param| param.name == "events")
+        .expect("set_input_action takes an events list");
+    let declared: BTreeSet<&str> = events.entry.iter().map(|field| field.name).collect();
     for field in ["kind", "key"] {
         assert!(
             ADDON.contains(&format!("entry.get(\"{field}\"")),
             "the addon reads {field} from an input event"
         );
         assert!(
-            summary.contains(&format!("\"{field}\"")),
-            "set_input_action must document the {field} field the addon reads: {summary}"
+            declared.contains(field),
+            "set_input_action must declare the {field} field the addon reads: {declared:?}"
         );
     }
     assert!(
-        !summary.contains("keycode"),
-        "the addon has no `keycode` field on an input event: {summary}"
+        !declared.contains("keycode"),
+        "the addon has no `keycode` field on an input event: {declared:?}"
     );
-
-    let events = crate::tool_params::params_of("godot_project", "set_input_action")
-        .expect("set_input_action declares its parameters")
-        .iter()
-        .find(|param| param.name == "events")
-        .expect("set_input_action takes an events list");
     for field in events.entry {
         assert!(
             ADDON.contains(&format!("entry.get(\"{}\"", field.name)),
@@ -1285,31 +1224,21 @@ fn mutating_operations_document_the_revision_they_require() {
     );
 }
 
-/// The one line the log summary promises is never about the project.
+/// The one line a failed call's errors drop is the editor talking to itself, and nothing else.
 ///
-/// `is_the_editor_talking_to_itself` drops it from the errors a failed call carries, and
-/// `godot_logs read` still answers with it because that page is raw. Thirteen recorded runs carry
-/// it, forty-five times, and one spent 66 seconds and a sub-agent call working out what in the
-/// project was calling `ConfigFile.get_value` — nothing was; it is the editor restoring its script
-/// tabs. The summary now says so, and the two have to name the same line or the sentence is
-/// pointing at nothing.
+/// Thirteen recorded runs carry it, forty-five times, and one spent 66 seconds and a sub-agent call
+/// working out what in the project was calling `ConfigFile.get_value` — nothing was; it is the
+/// editor restoring which script tabs were open. `godot_logs read` still answers with it because
+/// that page is raw, so the filter is the only thing that decides, and a filter this loose would
+/// swallow a real load failure.
 #[test]
-fn the_line_the_editor_talks_to_itself_with_is_the_one_the_summary_names() {
-    let summary = crate::tool_params::operation_of("godot_logs", "read")
-        .expect("godot_logs read")
-        .summary;
-    for named in ["`state`", "script tabs", "editorError"] {
-        assert!(
-            summary.contains(named),
-            "the summary must name {named}: {summary}"
-        );
-    }
+fn the_line_the_editor_talks_to_itself_with_is_the_one_the_filter_drops() {
     assert!(
         crate::godot_session::is_the_editor_talking_to_itself(
             "ERROR: Couldn't find the given section \"res://scripts/player.gd\" and key \"state\", \
              and no default was given."
         ),
-        "the filter and the sentence have to be about one line"
+        "the filter has to be about that line"
     );
     assert!(
         !crate::godot_session::is_the_editor_talking_to_itself(

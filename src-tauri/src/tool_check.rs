@@ -134,14 +134,11 @@ pub(crate) fn check_set(
                 } else {
                     "torn_param"
                 },
-                join(
-                    format!(
-                        "{opening} {takes_shape}{} One key arrived torn, carrying no value, so \
-                         what went wrong is the object you wrote rather than a word you chose: \
-                         write the whole call again.",
-                        what_it_carries(&intact)
-                    ),
-                    named.note,
+                format!(
+                    "{opening} {takes_shape}{} One key arrived torn, carrying no value, so \
+                     what went wrong is the object you wrote rather than a word you chose: \
+                     write the whole call again.",
+                    what_it_carries(&intact)
                 ),
                 json!({"op": op, "param": path(where_, named.name), "takes": shape}),
             ));
@@ -197,13 +194,10 @@ pub(crate) fn check_set(
             None if param.required => {
                 return Err(failure(
                     "missing_param",
-                    join(
-                        format!(
-                            "{call}{at} requires `{}`. {takes_shape}{}",
-                            param.name,
-                            what_it_carries(object)
-                        ),
-                        param.note,
+                    format!(
+                        "{call}{at} requires `{}`. {takes_shape}{}",
+                        param.name,
+                        what_it_carries(object)
                     ),
                     json!({"op": op, "param": path(where_, param.name), "takes": shape}),
                 ));
@@ -410,7 +404,7 @@ fn check_one(
 ) -> Result<(), ToolFailure> {
     let here = path(where_, param.name);
     if let Kind::Tagged = param.kind {
-        return check_tagged(call, &here, param, value);
+        return check_tagged(call, &here, value);
     }
     if fits(param.kind, value) {
         return check_inside(call, op, &here, param, value);
@@ -427,12 +421,9 @@ fn check_one(
     };
     Err(failure(
         "invalid_param",
-        join(
-            format!(
-                "{call} `{here}` takes {expected}, and this one was {}.{counted}",
-                describe(value)
-            ),
-            param.note,
+        format!(
+            "{call} `{here}` takes {expected}, and this one was {}.{counted}",
+            describe(value)
         ),
         json!({"param": here, "received": value}),
     ))
@@ -455,13 +446,10 @@ fn check_inside(
             if !fits(*inner, item) {
                 return Err(failure(
                     "invalid_param",
-                    join(
-                        format!(
-                            "{call} `{here}[{index}]` takes {}, and this one was {}.",
-                            wanted(*inner),
-                            describe(item)
-                        ),
-                        param.note,
+                    format!(
+                        "{call} `{here}[{index}]` takes {}, and this one was {}.",
+                        wanted(*inner),
+                        describe(item)
                     ),
                     json!({"param": format!("{here}[{index}]"), "received": item}),
                 ));
@@ -485,13 +473,10 @@ fn check_inside(
         let Some(object) = item.as_object() else {
             return Err(failure(
                 "invalid_param",
-                join(
-                    format!(
-                        "{call} `{at}` takes an object of {}, and this one was {}.",
-                        signature(param.entry),
-                        describe(item)
-                    ),
-                    param.note,
+                format!(
+                    "{call} `{at}` takes an object of {}, and this one was {}.",
+                    signature(param.entry),
+                    describe(item)
                 ),
                 json!({"param": at, "received": item}),
             ));
@@ -518,17 +503,14 @@ fn how_many_numbers(payload: &Payload) -> Option<usize> {
     }
 }
 
-fn check_tagged(call: &str, here: &str, param: &Param, value: &Value) -> Result<(), ToolFailure> {
+fn check_tagged(call: &str, here: &str, value: &Value) -> Result<(), ToolFailure> {
     let example = "{\"type\": \"Vector2\", \"value\": [12, 34]}";
     let Some(object) = value.as_object() else {
         return Err(failure(
             "invalid_param",
-            join(
-                format!(
-                    "{call} `{here}` takes a tagged value like {example}, and this one was {}.",
-                    describe(value)
-                ),
-                param.note,
+            format!(
+                "{call} `{here}` takes a tagged value like {example}, and this one was {}.",
+                describe(value)
             ),
             json!({"param": here, "received": value}),
         ));
@@ -536,10 +518,7 @@ fn check_tagged(call: &str, here: &str, param: &Param, value: &Value) -> Result<
     let Some(tag) = object.get("type").and_then(Value::as_str) else {
         return Err(failure(
             "invalid_param",
-            join(
-                format!("{call} `{here}` needs a `type`, as in {example}."),
-                param.note,
-            ),
+            format!("{call} `{here}` needs a `type`, as in {example}."),
             json!({"param": here, "received": value}),
         ));
     };
@@ -627,16 +606,13 @@ fn check_tagged(call: &str, here: &str, param: &Param, value: &Value) -> Result<
     };
     Err(failure(
         "invalid_param",
-        join(
-            format!(
-                "{call} `{here}`: a {tag} value takes {expected}{}.{fix}",
-                if expected.starts_with("a path") {
-                    String::new()
-                } else {
-                    format!(", and this one was {}", describe(inner))
-                }
-            ),
-            param.note,
+        format!(
+            "{call} `{here}`: a {tag} value takes {expected}{}.{fix}",
+            if expected.starts_with("a path") {
+                String::new()
+            } else {
+                format!(", and this one was {}", describe(inner))
+            }
         ),
         json!({"param": here, "type": tag, "received": inner}),
     ))
@@ -851,14 +827,6 @@ fn nearest(key: &str, spec: &[Param]) -> Option<&'static str> {
         .filter(|param| !param.hidden)
         .find(|param| reads_as(key, param))
         .map(|param| param.name)
-}
-
-fn join(message: String, note: &str) -> String {
-    if note.is_empty() {
-        message
-    } else {
-        format!("{message} {note}")
-    }
 }
 
 fn failure(code: &str, message: String, details: Value) -> ToolFailure {

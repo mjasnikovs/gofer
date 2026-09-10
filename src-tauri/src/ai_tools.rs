@@ -12,9 +12,8 @@
 //!
 //! The catalog below is also the contract the Node worker receives at startup: the ten domains, and
 //! under each of them the [`Operation`] rows [`crate::tool_params`] declares — the summary, the
-//! signature, the parameters and the narrowing the model is shown. It is the same list this router
-//! dispatches against, so a tool the model can call always exists here, and one it cannot call
-//! never does.
+//! parameters and the narrowing the model is shown. It is the same list this router dispatches
+//! against, so a tool the model can call always exists here, and one it cannot call never does.
 //!
 //! Every call also passes [`crate::approvals`] on its way in: most operations are auto-allowed
 //! because the worktree and the editor's undo stack can take them back, and the few that leave both
@@ -92,7 +91,7 @@ tool_failure_from!(
     crate::godot_session::SessionError
 );
 
-/// One domain tool: a name, what it is for, and every operation it accepts.
+/// One domain tool: a name and every operation it accepts.
 ///
 /// The operations are [`crate::tool_params`]'s, whole: one [`Operation`] per row of
 /// `protocol/schemas/v2/params.json`, carrying the prose the model reads as well as the parameters
@@ -101,12 +100,12 @@ tool_failure_from!(
 /// the summary used to live here and everything else there, so the view the model is given was
 /// assembled at serialization time out of two files nothing in the type system held together.
 ///
-/// The name and the description stay here, hand-written: a domain is a decision about how to
-/// present a hundred operations as ten tools, and there is nothing to hold it to.
+/// A domain used to carry a description as well — the grouping's own paragraph, ahead of its
+/// operation lines. The arm that cut all ten tied on success, so the model reads the name and the
+/// operations under it and nothing else.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct ToolDomain {
     pub name: &'static str,
-    pub description: &'static str,
     pub operations: &'static [Operation],
 }
 
@@ -125,56 +124,46 @@ impl ToolDomain {
 /// The ten domains. A grouping rather than a tool each: the model is given one `godot` tool whose
 /// dotted `op` names the domain, because a hundred flat tools fill its context with names it will
 /// never call and cost a round trip apiece.
-// GENERATED-BEGIN catalog sha256:92f2e31e09cfc234
+// GENERATED-BEGIN catalog sha256:dd245e1fb10f754a
 pub const CATALOG: &[ToolDomain] = &[
     ToolDomain {
         name: "godot_session",
-        description: "Owns the managed Godot editor session bound to the active task worktree.",
         operations: tool_params::GODOT_SESSION_OPERATIONS,
     },
     ToolDomain {
         name: "godot_scene",
-        description: "The edited scene in the editor — never the running game's scene tree. Every mutation here is checked against the scene's revision, and the router supplies that number from the last answer that carried one, so never pass it and never read the tree to fetch it.",
         operations: tool_params::GODOT_SCENE_OPERATIONS,
     },
     ToolDomain {
         name: "godot_node",
-        description: "Node authoring inside the edited scene. Every mutation is undoable and every one of them is checked against the scene's revision — which the router supplies from the last answer that carried one, and every mutation's own answer carries the next. So mutate, then mutate again: there is no revision to pass and no tree to re-read between them. Paths are the scene's own, like /Level1 or /Level1/Ground. Nothing here writes the file: scene.save does.",
         operations: tool_params::GODOT_NODE_OPERATIONS,
     },
     ToolDomain {
         name: "godot_project",
-        description: "Project settings, autoloads, the Input Map, plugins, and machine-wide editor settings. Project writes persist in the task worktree; editor settings are machine-wide and outside Git.",
         operations: tool_params::GODOT_PROJECT_OPERATIONS,
     },
     ToolDomain {
         name: "godot_resource",
-        description: "Project files as the editor sees them. Deleting and moving need the user's approval; nothing outside the task worktree can be named at all.",
         operations: tool_params::GODOT_RESOURCE_OPERATIONS,
     },
     ToolDomain {
         name: "godot_script",
-        description: "GDScript editing and intelligence through Godot's language server. Positions are {line, character}, zero-based. Open a script before querying it — and write GDScript here rather than with the file tools, which refuse a .gd, because writing here is what tells the server whether it parses. A script that does not parse stops the scene using it from loading. `edit` changes a script that exists and answers with its diagnostics, so it needs no `diagnostics` call after it; `save` creates one, and `diagnostics` on the same path is what then says whether it parses. Paths may be named either way, `scripts/mario.gd` or res://scripts/mario.gd.",
         operations: tool_params::GODOT_SCRIPT_OPERATIONS,
     },
     ToolDomain {
         name: "godot_debug",
-        description: "Godot's debug adapter. Install breakpoints with the launch itself, then wait for a stop before inspecting: stopping is an event, not a response.",
         operations: tool_params::GODOT_DEBUG_OPERATIONS,
     },
     ToolDomain {
         name: "godot_runtime",
-        description: "The running game: its live scene tree, input, performance, and screenshots. Distinct from the edited scene, and named differently: every path here starts at /root, where the node.* operations' start at the edited scene's own root.",
         operations: tool_params::GODOT_RUNTIME_OPERATIONS,
     },
     ToolDomain {
         name: "godot_logs",
-        description: "The session's captured output — editor, importer, plugin, and the game the editor launched — with a cursor and severity filtering.",
         operations: tool_params::GODOT_LOGS_OPERATIONS,
     },
     ToolDomain {
         name: "godot_docs_search",
-        description: "The Godot 4.7 documentation, on this machine. SEARCH IT BEFORE writing a class, method, signal or constant name, and before answering any question about how the engine behaves. Do not answer either from memory and do not reason it out from the name: what you remember is mostly Godot 3, where a great many of these names were spelled differently, and a name this does not return is a name to check rather than to guess at. Passages cite a chapter, never a URL. It holds the engine's documentation and nothing else, so send a question about this project's own scripts, scenes or files to the subagent tool instead.",
         operations: tool_params::GODOT_DOCS_SEARCH_OPERATIONS,
     },
 ];
@@ -850,7 +839,6 @@ mod ledger_acceptance_tests {
         record_dispatched(
             &ToolDomain {
                 name: "godot_scene",
-                description: "",
                 operations: &[],
             },
             tool_params::operation_of("godot_scene", "open")
@@ -859,7 +847,6 @@ mod ledger_acceptance_tests {
         record_dispatched(
             &ToolDomain {
                 name: "godot_docs_search",
-                description: "",
                 operations: &[],
             },
             tool_params::operation_of("godot_docs_search", "ask")
@@ -1121,7 +1108,7 @@ fn reconciled<R: Runtime>(app: &AppHandle<R>, answer: Value) -> Value {
 /// Drops the ledger's record when a refusal reports the file as gone.
 ///
 /// The record outlived the file — deleted, moved, or reverted outside the router — and the caller
-/// can neither see the hash nor clear it, because `expectedHash` is hidden from the signature.
+/// can neither see the hash nor clear it, because `expectedHash` is hidden from the tool.
 /// Left in place, the router would attach the same dead record to the next save and refuse it
 /// identically, with no call the model could make to escape. Forgetting here is what makes
 /// `save it again to create the file` a true sentence rather than a loop.
@@ -4031,7 +4018,7 @@ mod tests {
     /// Whether prose is naming a parameter rather than using an English word that happens to match.
     ///
     /// Half the parameter names are ordinary words — `scene`, `path`, `node`, `name` — and every
-    /// description is written in sentences about scenes and nodes. What identifies a parameter is
+    /// summary is written in sentences about scenes and nodes. What identifies a parameter is
     /// either a name no sentence would contain (`expectedRevision`, `timeoutMs`) or backticks
     /// around it, which is how every summary that does mean the key writes it.
     fn names_the_parameter(prose: &str, name: &str) -> bool {
@@ -4056,12 +4043,6 @@ mod tests {
                     continue;
                 };
                 for param in spec.iter().filter(|param| param.hidden) {
-                    assert!(
-                        !names_the_parameter(domain.description, param.name),
-                        "{} names the hidden `{}` in its description",
-                        domain.name,
-                        param.name
-                    );
                     assert!(
                         !names_the_parameter(operation.summary, param.name),
                         "{}.{} names the hidden `{}` in its summary",

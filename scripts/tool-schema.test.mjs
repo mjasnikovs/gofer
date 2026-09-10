@@ -3,7 +3,6 @@ import {readFile} from 'node:fs/promises'
 import test from 'node:test'
 import Ajv from 'ajv'
 import {createGodotTools} from './godot-tools.mjs'
-import {signatureOf} from './tool-schema.mjs'
 import {declaredDomains} from './declared-domains.mjs'
 
 const dotted = (tool, op) => `${tool.replace(/^godot_/u, '')}.${op}`
@@ -33,8 +32,8 @@ test('an exclusive operation and a once-only operation are advertised apart', ()
     ]
     const [godot] = createGodotTools(
         [
-            {name: 'godot_session', description: 'd', operations: session},
-            {name: 'godot_debug', description: 'd', operations: debug}
+            {name: 'godot_session', operations: session},
+            {name: 'godot_debug', operations: debug}
         ],
         {call: async () => ({})}
     )
@@ -101,12 +100,9 @@ test('the entry schema types every parameter and pins it to its own operation', 
             ]
         }
     ]
-    const [tool] = createGodotTools(
-        [{name: 'godot_script', description: 'd', operations: domain}],
-        {
-            call: async () => ({})
-        }
-    )
+    const [tool] = createGodotTools([{name: 'godot_script', operations: domain}], {
+        call: async () => ({})
+    })
     const [save, diagnostics] = branches(tool)
 
     assert.deepEqual(save.properties.text, {type: 'string'})
@@ -134,29 +130,23 @@ test('the entry schema types every parameter and pins it to its own operation', 
     assert.equal(save.properties.timeoutMs, undefined)
 })
 
-test('the signature is a leading space and a shape, or nothing at all', () => {
-    assert.equal(
-        signatureOf({op: 'save', signature: '{path: text, text: text}'}),
-        ' {path: text, text: text}'
-    )
-    assert.equal(signatureOf({op: 'reload'}), '')
-    assert.equal(signatureOf({op: 'reload', signature: ''}), '')
-
+// The line is the dotted name and the summary: the kinds the printed signature used to carry are
+// in the schema the sampler is constrained by, and the arm that dropped it tied on success.
+test('a domain heads its operations with its short name, and each line is a name and a summary', () => {
     const [tool] = createGodotTools(
         [
             {
                 name: 'godot_scene',
-                description: 'The edited scene.',
                 operations: [
-                    {op: 'save', summary: 'Saves it.', signature: '{path?: text}'},
+                    {op: 'save', summary: 'Saves it.'},
                     {op: 'reload', summary: 'Reloads it.'}
                 ]
             }
         ],
         {call: async () => ({})}
     )
-    assert.match(tool.description, /# scene — The edited scene\./u)
-    assert.match(tool.description, /- scene\.save \{path\?: text\}: Saves it\./u)
+    assert.match(tool.description, /# scene\nOperations:\n/u)
+    assert.match(tool.description, /- scene\.save: Saves it\./u)
     assert.match(tool.description, /- scene\.reload: Reloads it\./u)
 })
 

@@ -261,19 +261,18 @@ test('a parameter belonging to a sibling operation is refused by name', async ()
     )
 })
 
-test('the refusal quotes the signature the operation was advertised under', () => {
+test('the refusal names the parameters the operation does take', () => {
     const operations = [
-        {op: 'create', signature: '{parent: text}', params: [{name: 'parent', kind: 'text'}]},
+        {op: 'create', params: [{name: 'parent', kind: 'text'}]},
         {
             op: 'create_nodes',
-            signature: '{nodes: list of {parent: text}}',
             params: [{name: 'nodes', kind: 'list', entry: [{name: 'parent', kind: 'text'}]}]
         }
     ]
     assert.throws(
         () => normalizeToolCalls(operations, {ops: [{op: 'create', nodes: [{parent: '/Main'}]}]}),
         error => {
-            assert.match(error.message, /It takes \{parent: text\}\./u)
+            assert.match(error.message, /It takes `parent`\./u)
             return true
         }
     )
@@ -290,8 +289,8 @@ test('a key more than one sibling declares is left for the router', async () => 
 
 test('a sibling parameter with nothing inside it is left for the router', () => {
     const operations = [
-        {op: 'stop', signature: '{}', params: []},
-        {op: 'wait', signature: '{ms: int}', params: [{name: 'ms', kind: 'int'}]}
+        {op: 'stop', params: []},
+        {op: 'wait', params: [{name: 'ms', kind: 'int'}]}
     ]
     const call = {ops: [{op: 'stop', ms: 20}]}
     assert.deepEqual(normalizeToolCalls(operations, call), call)
@@ -902,8 +901,8 @@ test('a call is a list, and a bare operation is a list of one', async () => {
 
 test('a refused list says that none of it ran, and a refused single call does not', () => {
     const operations = [
-        {op: 'create', signature: '{parent: text}', params: [{name: 'parent', kind: 'text'}]},
-        {op: 'inspect', signature: '{node: text}', params: [{name: 'node', kind: 'text'}]}
+        {op: 'create', params: [{name: 'parent', kind: 'text'}]},
+        {op: 'inspect', params: [{name: 'node', kind: 'text'}]}
     ]
     assert.throws(
         () =>

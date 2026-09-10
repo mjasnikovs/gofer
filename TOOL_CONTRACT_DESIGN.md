@@ -27,17 +27,18 @@ the day and cannot tell them apart.
 
 ### Where 32k goes
 
-| piece                                 | tokens |   % |
-| ------------------------------------- | -----: | --: |
-| 10 Godot tools                        | 26,199 |  81 |
-| — of which per-op `oneOf` schemas     | 13,734 |  42 |
-| — of which the summary copied into it |  5,286 |  16 |
-| — of which prose descriptions         |  7,509 |  23 |
-| 5 local extras                        |  1,900 |   6 |
-| 4 pi built-ins                        |    991 |   3 |
-| inventory (`git ls-files`, 245 lines) |  2,179 |   7 |
-| system prompt                         |  1,419 |   4 |
-| the word `hi` and the template        |     11 |   0 |
+| piece                                                                    | tokens |                                                                                                             % |
+| ------------------------------------------------------------------------ | -----: | ------------------------------------------------------------------------------------------------------------: |
+| 10 Godot tools                                                           | 26,199 |                                                                                                            81 |
+| — of which per-op `oneOf` schemas                                        | 13,734 |                                                                                                            42 |
+| — of which the summary copied into it                                    |  5,286 |                                                                                                            16 |
+| — of which prose descriptions                                            |  7,509 |                                                                                                            23 |
+| 5 local extras                                                           |  1,900 |                                                                                                             6 |
+| 4 pi built-ins                                                           |    991 |                                                                                                             3 |
+| inventory (`git ls-files`, 245 lines)                                    |  2,179 |                                                                                                             7 |
+| the one note nothing else said: `runtime.inspect_node.path` names a node |    ~60 | in vs out on a running-tree ask, 10 seeds: 10 / 10 both ways, the model reads the path off `runtime.get_tree` | —   | **cut stands** |
+| system prompt                                                            |  1,419 |                                                                                                             4 |
+| the word `hi` and the template                                           |     11 |                                                                                                             0 |
 
 Chat-template framing adds about 185 tokens per tool on top of its own JSON.
 
@@ -236,23 +237,30 @@ ends with the harness re-run and the sign unchanged.
 
 ## Trims
 
-Unmeasured. Each one is a candidate, not a decision. The rule for all of them: interleaved, same
-process, on the surface that step 6 leaves, and per-line ablations do not compose — eleven lines
-that each measured "no effect" destroyed the survivors when cut together. Cut a set, measure the
-set.
+Measured 2026-09-10, on the surface step 6 left, interleaved in one process, 20 seeds on the trap
+tasks and 10 on the surface tasks. Each cut alone first, then every cut that held as one arm —
+eleven lines that each measured "no effect" once destroyed the survivors when cut together, so the
+set is what decides.
 
-| trim                                  | tokens/turn at stake | what decides it                                                                                                        |
-| ------------------------------------- | -------------------: | ---------------------------------------------------------------------------------------------------------------------- |
-| summary lines the model already obeys |         up to ~5,000 | one run, all candidate lines cut at once, on the trap tasks                                                            |
-| per-parameter `note`s (9,895 chars)   |               ~2,500 | same shape as the prose run; notes out vs in                                                                           |
-| the signature line in the description |               ~1,000 | measured essential on 2026-08-10 _under the merged bag_; unmeasured under a grammar that already carries the kinds     |
-| inventory (`git ls-files`)            |               ~2,200 | inventory vs a `files.list` op; score how often the model reaches for `bash find` and names a path that does not exist |
-| the five local extras                 |               ~1,900 | remove one at a time; a tool no task shape ever calls is dead                                                          |
-| system prompt                         |               ~1,400 | every shortened version lost on 2026-08-12; leave it alone unless a new arm beats the shipped one                      |
-| domain descriptions (2,850 chars)     |                 ~700 | in vs out, on the surface run's six tasks                                                                              |
+| trim                           | tokens/turn | alone                                                                                                                    | in the set                                                          | verdict                                                                                                                       |
+| ------------------------------ | ----------: | ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| summaries: first sentence only |      -3,713 | 73% vs 70%, better on 9 pairs, worse 6                                                                                   | held                                                                | **cut**; `runtime.input` keeps its whole summary, the one rule the prose run found the model does not already obey            |
+| per-parameter `note`s          |      -1,624 | tie, 8 / 7                                                                                                               | held                                                                | **cut**                                                                                                                       |
+| the signature line             |      -1,064 | tie, 0 / 0 on 60 pairs                                                                                                   | held                                                                | **cut**                                                                                                                       |
+| domain descriptions            |        -616 | tie, 0 / 0 on 60 pairs                                                                                                   | held                                                                | **cut**                                                                                                                       |
+| the set of the four            |      -7,037 | —                                                                                                                        | 5 / 5 on 100 trap pairs, 0 / 0 on 60 surface pairs, 26,445 → 19,408 | **shipped**                                                                                                                   |
+| inventory vs a `files.list` op |      -1,150 | inventory better on 9 pairs, worse 4; the op costs a turn and an editor round trip on 32 of 60; 0 ghost paths either way | —                                                                   | **keep the inventory**                                                                                                        |
+| the five local extras          |      ~1,900 | over 840 trials: subagent, remember, ask_user never called; web_search 8, web_fetch 2                                    | —                                                                   | **keep**: the task shapes here never need them, so removal cannot be measured by them, and each has a job outside these tasks |
+| system prompt                  |      ~1,400 | every shortened version lost on 2026-08-12                                                                               | —                                                                   | **leave alone**                                                                                                               |
 
-The harness that produced every number here lives in the session scratch directory (`surf-*.mjs`,
-`vocab-build.mjs`, `vrun.mjs`, `vreport.mjs`, `prose-build.mjs`, `VOCAB-RERUN.md`, `SURF-RERUN.md`).
-It builds the real tool list through `createAgentTools`, scores with `ajv` against the strict schema
-and replays `normalizeToolCalls`. Step 7 cannot run without it; commit it under `scripts/bench/`
-before the first trim.
+On the harness's turn — the shipped prompt, the tool block and the ask — that is 19,408 prompt
+tokens. The same turn cost 24,875 on the ten-tool list step 2 was measured against, and the schema
+run put the surface before step 1 at 30,637.
+
+The harness that produced every number here is committed under `scripts/bench/` (`surf-*.mjs`,
+`vocab-*.mjs`, `vrun.mjs`, `vreport.mjs`, `prose-*.mjs`, `trim-build.mjs`, `inv-*.mjs`,
+`VOCAB-RERUN.md`, `SURF-RERUN.md`). It builds the arm under test from the committed
+`godot-tool.json` and the shipped prompt, scores with `ajv` against the strict schema, and replays
+`normalizeToolCalls`. Each RERUN file ends with the recipe for re-running a step: the previous
+step's built arm as the baseline, the new build as the arm, the sign of the paired gap as the
+verdict.

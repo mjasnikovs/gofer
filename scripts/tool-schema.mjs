@@ -1,9 +1,5 @@
 import {tagPayloads} from './godot-vocabulary.mjs'
 
-export function signatureOf(operation) {
-    return operation.signature ? ` ${operation.signature}` : ''
-}
-
 /**
  * Where the 36 tag branches live, once, for every tagged parameter to point at.
  *
@@ -50,8 +46,9 @@ export function jsonSchemaOfKind(kind) {
     }
 }
 
-// A vocabulary is the parameter's `enum` and no sentence beside it: measured, the same enum with
-// the old 25-name sentence next to it lost, because the sampler wrote one of the 25.
+// A parameter is its shape and nothing else: no `description`, no vocabulary sentence beside the
+// `enum`. Both were measured out — the sampler wrote one of the 25 names the sentence recited, and
+// the arm with every per-parameter note cut tied on success 2,500 tokens a turn cheaper.
 export function jsonSchemaOfParam(param) {
     const schema = jsonSchemaOfKind(param)
     const inside = Array.isArray(param.entry) && param.entry.length > 0
@@ -59,7 +56,7 @@ export function jsonSchemaOfParam(param) {
     if (inside && param.kind === 'object') Object.assign(schema, jsonSchemaOfParams(param.entry))
     if ('minItems' in param) schema.minItems = param.minItems
     if ('default' in param) schema.default = param.default
-    return param.note ? {...schema, description: param.note} : schema
+    return schema
 }
 
 // A hidden parameter is the router's to fill in. Leaving it in the schema lets the grammar permit
@@ -95,51 +92,6 @@ export function jsonSchemaOfEntry(operations) {
             }
         })
     }
-}
-
-/** The one word a signature spells a kind with. See `short` in tool_params.rs. */
-function short(kind) {
-    switch (kind.kind) {
-        case 'listOf':
-            return 'list'
-        // A choice is text from a fixed set, and the schema carries which words. Spelling it
-        // "choice" would name the declaration rather than what goes in the call.
-        case 'choice':
-            return 'text'
-        default:
-            return kind.kind
-    }
-}
-
-/**
- * The signature the model reads, as `{node, property, value}`.
- *
- * The same string `signature` in tool_params.rs prints, because the model reads Rust's at runtime
- * and this one is what the committed `godot-tool.json` is built from. A Rust test holds the two
- * together over every operation; that is cheaper than teaching one of them to call the other
- * across a process boundary that only exists when an editor is running.
- */
-export function signatureFrom(params) {
-    const visible = params.filter(param => !param.hidden)
-    if (visible.length === 0) return ''
-    const names = visible.map(param => {
-        const mark = param.required ? '' : '?'
-        // A choice out of a vocabulary prints as text: the words are the engine's, the schema
-        // carries all of them, and a signature reciting one list of twenty-two is what the
-        // measured arm that names no member beat.
-        if (param.kind === 'choice')
-            return wordsOf(param) ?
-                    `${param.name}${mark}: text`
-                :   `${param.name}${mark}: ${(param.of ?? []).map(word => `"${word}"`).join('|')}`
-        if (Array.isArray(param.entry) && param.entry.length > 0)
-            return param.kind === 'object' ?
-                    `${param.name}${mark}: ${signatureFrom(param.entry)}`
-                :   `${param.name}${mark}: ${short(param)} of ${signatureFrom(param.entry)}`
-        if (param.kind === 'listOf')
-            return `${param.name}${mark}: list of ${short(param.of ?? {kind: 'text'})}`
-        return `${param.name}${mark}: ${short(param)}`
-    })
-    return `{${names.join(', ')}}`
 }
 
 /** Every tagged parameter of every operation, however deep its entry list goes. */

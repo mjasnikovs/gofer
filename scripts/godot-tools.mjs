@@ -1,6 +1,6 @@
 import {normalizeToolCalls} from './tool-call-repair.mjs'
 import {toolResult} from './tool-result.mjs'
-import {jsonSchemaOfEntry, signatureOf, taggedValueDefs} from './tool-schema.mjs'
+import {jsonSchemaOfEntry, taggedValueDefs} from './tool-schema.mjs'
 
 export const GODOT_TOOL_NAME = 'godot'
 
@@ -28,8 +28,7 @@ const narrowingOf = operation =>
     : ''
 
 const lineOf = operation =>
-    `- ${operation.op}${signatureOf(operation)}`
-    + `${operation.summary ? `: ${operation.summary}` : ''}${narrowingOf(operation)}`
+    `- ${operation.op}${operation.summary ? `: ${operation.summary}` : ''}${narrowingOf(operation)}`
 
 const OPENING =
     'Everything Gofer can do inside the open Godot editor. Every operation is named'
@@ -65,7 +64,7 @@ export function createGodotTools(domains, host) {
                 + domains
                     .map(
                         domain =>
-                            `# ${short(domain.name)} — ${domain.description}\nOperations:\n`
+                            `# ${short(domain.name)}\nOperations:\n`
                             + dottedIn(domain).map(lineOf).join('\n')
                     )
                     .join('\n\n'),

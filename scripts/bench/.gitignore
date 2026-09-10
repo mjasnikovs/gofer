@@ -11,5 +11,4 @@ corpus.json
 inventory.txt
 tools-partial.json
 rustprobe/
-surf-prompt-*.txt
-vocab-prompt-*.txt
+*-prompt-*.txt

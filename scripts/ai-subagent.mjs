@@ -253,19 +253,15 @@ const ASKS_THE_LANGUAGE_SERVER = new Set([
     'workspace_symbols'
 ])
 
-/// The catalogue's own script description tells the model to write GDScript with these operations
-/// rather than the file tools. A research child holds no operation that writes, so it has to be
-/// told what it actually has, or it spends turns being refused by `script.save`.
-const READS_THE_LANGUAGE_SERVER =
-    "GDScript intelligence through Godot's language server, read-only: it answers questions about "
-    + 'a script and cannot change or create one. Positions are {line, character}, zero-based. Open '
-    + 'a script before querying it. Paths may be named either way, `scripts/mario.gd` or '
-    + 'res://scripts/mario.gd.'
-
 /// The domains behind a child's one `godot` tool, and the slice of each it may hold.
+///
+/// A child used to be handed a description of its own for the script domain, saying the operations
+/// it holds only read. No domain carries a description any more — what a child holds is the
+/// operation list itself, which names no operation that writes, and `held` says the same in the
+/// child's system prompt.
 const CHILD_GODOT_DOMAINS = [
     {name: 'godot_docs_search'},
-    {name: 'godot_script', keep: ASKS_THE_LANGUAGE_SERVER, description: READS_THE_LANGUAGE_SERVER}
+    {name: 'godot_script', keep: ASKS_THE_LANGUAGE_SERVER}
 ]
 
 function childGodotDomain(wanted, found) {
@@ -277,7 +273,7 @@ function childGodotDomain(wanted, found) {
                 + 'are in the catalogue the backend offered.'
         )
     }
-    return {...found, operations, ...(wanted.description ? {description: wanted.description} : {})}
+    return {...found, operations}
 }
 
 function childGodotTool({domains, host}) {
