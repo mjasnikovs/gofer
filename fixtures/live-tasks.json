@@ -606,6 +606,53 @@
                 "runtime.stop"
             ],
             "task": "Make the Player fire a bullet every half second: a bullet scene at res://scenes/bullet.tscn (Node2D root with a small ColorRect) whose script moves it right at 400 px/s and frees it once its x passes 700, printing \"bullet gone\". Instantiate bullets from player.gd under Main using a Timer. Run the game for about three seconds and prove with the running tree and the log that bullets were spawned and freed."
+        },
+        {
+            "id": "rename-script-file",
+            "fixture": "live-project",
+            "ops": [
+                "resource.move",
+                "script.open",
+                "script.edit",
+                "script.diagnostics",
+                "scene.open",
+                "node.inspect",
+                "scene.save",
+                "runtime.run",
+                "logs.read",
+                "runtime.stop"
+            ],
+            "task": "Rename scripts/player.gd to scripts/hero.gd and keep the game working: the Player node must still use it, and whatever referenced the old path must point at the new one. Prove it by running the game for two seconds and reading the log for errors, then stop it."
+        },
+        {
+            "id": "level-switch",
+            "fixture": "live-project",
+            "ops": [
+                "scene.create",
+                "node.create_nodes",
+                "scene.save",
+                "script.save",
+                "node.set_properties",
+                "project.set_input_action",
+                "runtime.run",
+                "runtime.input",
+                "runtime.get_tree",
+                "runtime.stop"
+            ],
+            "task": "Make two levels: res://scenes/level_a.tscn and res://scenes/level_b.tscn, each a Node2D root with a Label naming the level. Make the main scene start by loading level_a under a node named LevelHolder, and switch to level_b when the N key is pressed (a new input action next_level). Run the game, read the tree to prove level_a is loaded, press N, and prove level_b replaced it."
+        },
+        {
+            "id": "tween-move",
+            "fixture": "live-project",
+            "ops": [
+                "script.edit",
+                "scene.save",
+                "runtime.run",
+                "runtime.wait",
+                "runtime.inspect_node",
+                "runtime.stop"
+            ],
+            "task": "In scripts/player.gd, on ready, tween the Player from its start position to (400, 200) over two seconds. Run the game, read the Player's position at about half a second and again at about two and a half seconds, and prove it moved and then stopped at the target."
         }
     ]
 }

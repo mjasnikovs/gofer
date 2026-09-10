@@ -989,6 +989,26 @@ fn every_configuration_command_answers_from_godot() {
         "a setting reported reset must be gone"
     );
 
+    let vsync = session.call(
+        "project.get_setting",
+        json!({"name": "display/window/vsync/vsync_mode"}),
+    );
+    assert_eq!(
+        vsync["means"], "Disabled",
+        "an enum setting names what its number stands for: {vsync}"
+    );
+    assert!(
+        vsync["choices"]
+            .as_array()
+            .is_some_and(|names| names.iter().any(|name| name == "Enabled")),
+        "and every name it could take: {vsync}"
+    );
+    let searched = session.call("project.search_settings", json!({"query": "vsync mode"}));
+    assert_eq!(
+        searched["settings"][0]["means"], "Disabled",
+        "a search answers the same: {searched}"
+    );
+
     let tail = session.error(
         "project.set_setting",
         json!({"name": "run/main_scene", "value": {"type": "String", "value": "res://a.tscn"}}),

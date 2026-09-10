@@ -65,14 +65,41 @@ static func search_settings(params: Dictionary) -> Dictionary:
             continue
         total += 1
         if matches.size() < MAX_SEARCH_RESULTS:
-            matches.append(
-                {
-                    "name": name,
-                    "value": Protocol.encode(ProjectSettings.get_setting(name)),
-                    "restartRequired": (int(info.get("usage", 0)) & PROPERTY_USAGE_RESTART_IF_CHANGED) != 0
-                }
-            )
+            var row := {
+                "name": name,
+                "value": Protocol.encode(ProjectSettings.get_setting(name)),
+                "restartRequired": (int(info.get("usage", 0)) & PROPERTY_USAGE_RESTART_IF_CHANGED) != 0
+            }
+            row.merge(_what_an_enum_value_means(info, ProjectSettings.get_setting(name)))
+            matches.append(row)
     return {"settings": matches, "totalMatches": total, "truncated": total > matches.size()}
+
+## `vsync_mode: 0` was published by a live turn as "Enabled — vsync on by default"; 0 is Disabled.
+## A setting the engine declares as an enum answers with the name its number stands for and the
+## names it could take, read off the same hint the Project Settings dialog shows as a dropdown.
+static func _what_an_enum_value_means(info: Dictionary, value: Variant) -> Dictionary:
+    if int(info.get("hint", PROPERTY_HINT_NONE)) != PROPERTY_HINT_ENUM or typeof(value) != TYPE_INT:
+        return {}
+    var choices := PackedStringArray()
+    var means := ""
+    var next := 0
+    for entry in str(info.get("hint_string", "")).split(",", false):
+        var parts := entry.split(":", false)
+        var label := parts[0].strip_edges()
+        var number := int(parts[1]) if parts.size() > 1 else next
+        next = number + 1
+        choices.append(label)
+        if number == int(value):
+            means = label
+    if choices.is_empty():
+        return {}
+    return {"means": means, "choices": choices}
+
+static func _property_info_of(name: String) -> Dictionary:
+    for info in ProjectSettings.get_property_list():
+        if str(info.get("name", "")) == name:
+            return info
+    return {}
 
 static func get_setting(params: Dictionary) -> Dictionary:
     var name := str(params.get("name", ""))
@@ -88,11 +115,13 @@ static func get_setting(params: Dictionary) -> Dictionary:
             ) % name,
             {"name": name}
         )
-    return {
+    var answer := {
         "name": name,
         "value": Protocol.encode(ProjectSettings.get_setting(name)),
         "restartRequired": _restart_required(name)
     }
+    answer.merge(_what_an_enum_value_means(_property_info_of(name), ProjectSettings.get_setting(name)))
+    return answer
 
 static func set_setting(params: Dictionary) -> Dictionary:
     var name := str(params.get("name", ""))

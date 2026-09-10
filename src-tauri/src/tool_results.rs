@@ -8,7 +8,7 @@
 //!
 //! Every field is read by serde and by nothing else, which is what the allow above is for.
 
-// GENERATED-BEGIN results sha256:933f94056701184d
+// GENERATED-BEGIN results sha256:c9488a47681b764a
 /// One node of a scene tree, and the nodes under it.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -47,6 +47,10 @@ pub struct GodotSetting {
     pub value: serde_json::Value,
     #[serde(default)]
     pub restart_required: Option<bool>,
+    #[serde(default)]
+    pub means: Option<String>,
+    #[serde(default)]
+    pub choices: Option<Vec<String>>,
 }
 
 /// One property of a node in the edited scene, as the inspector would show it.
@@ -347,6 +351,10 @@ pub struct ProjectGetSettingResult {
     pub name: String,
     pub value: serde_json::Value,
     pub restart_required: bool,
+    #[serde(default)]
+    pub means: Option<String>,
+    #[serde(default)]
+    pub choices: Option<Vec<String>>,
 }
 
 #[derive(Debug, serde::Deserialize)]

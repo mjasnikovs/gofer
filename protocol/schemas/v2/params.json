@@ -168,6 +168,21 @@
                     "name": "restartRequired",
                     "kind": "flag",
                     "required": false
+                },
+                {
+                    "name": "means",
+                    "kind": "text",
+                    "required": false,
+                    "note": "For a setting the engine declares as an enum: the name the number stands for."
+                },
+                {
+                    "name": "choices",
+                    "kind": "listOf",
+                    "of": {
+                        "kind": "text"
+                    },
+                    "required": false,
+                    "note": "For an enum setting: every name it could take, in the engine's order."
                 }
             ]
         },
@@ -2110,6 +2125,21 @@
                         "name": "restartRequired",
                         "kind": "flag",
                         "required": true
+                    },
+                    {
+                        "name": "means",
+                        "kind": "text",
+                        "required": false,
+                        "note": "For a setting the engine declares as an enum: the name the number stands for."
+                    },
+                    {
+                        "name": "choices",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "text"
+                        },
+                        "required": false,
+                        "note": "For an enum setting: every name it could take, in the engine's order."
                     }
                 ]
             },
