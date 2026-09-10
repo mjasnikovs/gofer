@@ -283,12 +283,23 @@ fn every_node_command_answers_from_the_edited_tree() {
         "Area2D"
     );
 
+    session.mutate(
+        "node.create",
+        json!({"parent": "/Stage/Pickup", "name": "Shape", "type": "CollisionShape2D"}),
+    );
     let copied = session.mutate(
         "node.duplicate",
         json!({"node": "/Stage/Pickup", "name": "Second"}),
     );
     assert_eq!(copied["node"], "/Stage/Second");
     session.call("node.inspect", json!({"node": "/Stage/Second"}));
+    session.mutate("scene.save", json!({}));
+    let saved = std::fs::read_to_string(session.worktree.join("tree.tscn"))
+        .expect("the duplicated scene is on disk");
+    assert!(
+        saved.contains("parent=\"Second\""),
+        "a duplicate's children are the edited scene's to save, not only its root:\n{saved}"
+    );
 
     let renamed = session.mutate(
         "node.rename",

@@ -3183,8 +3183,14 @@ func _node_duplicate(params: Dictionary) -> Dictionary:
         copy.name = new_name
 
     var root := _edited_root()
+    var owners := {}
+    Params.who_owned_what(node, owners)
+    var owned := PackedStringArray()
+    for path in owners:
+        if owners[path] == root:
+            owned.append(path)
     var undo := _begin_action("Duplicate %s" % node.name)
-    undo.add_do_method(self, "_do_attach", parent, copy, root, index + 1)
+    undo.add_do_method(self, "_do_attach_owned", parent, copy, root, index + 1, owned)
     undo.add_undo_method(self, "_do_detach", parent, copy)
     undo.add_do_reference(copy)
     undo.commit_action()
@@ -4411,6 +4417,18 @@ func _do_attach(parent: Node, child: Node, owner: Node, index: int) -> void:
         child.set_owner(owner)
     if index >= 0 and index < parent.get_child_count():
         parent.move_child(child, index)
+
+## Attaches a copied subtree. `Node.duplicate` gives the copy's descendants no owner the edited
+## scene knows, so a save wrote the copy and nothing under it; `owned` names the paths the
+## original's root owned, and those get the same owner on the copy.
+func _do_attach_owned(
+    parent: Node, child: Node, owner: Node, index: int, owned: PackedStringArray
+) -> void:
+    _do_attach(parent, child, owner, index)
+    for path in owned:
+        var descendant := child.get_node_or_null(NodePath(path.trim_prefix("/")))
+        if descendant != null:
+            descendant.set_owner(owner)
 
 func _do_detach(parent: Node, child: Node) -> void:
     if child.get_parent() == parent:

@@ -1256,7 +1256,12 @@ static func nearest_property(node: Node, property: String) -> String:
 static func property_not_found_error(node: Node, path: String, property: String) -> Dictionary:
     var message := "Node %s has no property %s" % [path, property]
     var near := nearest_property(node, property)
-    if near.is_empty():
+    if property in ["signals", "connections", "groups"]:
+        message += (
+            ". `signals`, `connections` and `groups` are not properties: every node.inspect "
+            + "answer carries all three beside `properties`, whatever the call named"
+        )
+    elif near.is_empty():
         message += (
             ". node.inspect with no `properties` lists every property this node has with its "
             + "current value, including the theme_override_* ones a Control keeps — naming this "
