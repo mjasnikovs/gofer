@@ -779,27 +779,56 @@ fn expecting_what_the_last_entry_produced(entry: &Requested, revision: Option<i6
     params
 }
 
-/// The ledger of operations a real editor answered, kept only while the acceptance suite runs.
+/// The ledger of operations a real editor answered, kept only while the acceptance suite or a
+/// live turn runs.
 ///
 /// The catalogue promises the model an operation, and only a run proves it still answers. The
 /// suite is one process per test with several in flight, so each write opens the file, appends one
-/// short line and closes it: an `O_APPEND` write under `PIPE_BUF` lands whole, so parallel
-/// processes interleave lines instead of clobbering each other.
+/// line and closes it: an `O_APPEND` write lands whole for a line under `PIPE_BUF`, so parallel
+/// processes interleave lines instead of clobbering each other. A line holding a script's whole
+/// text can be longer than that, and the live turn is one process, which is the only reader that
+/// asks for the parameters.
 #[cfg(all(test, feature = "godot-acceptance"))]
 pub(crate) mod dispatch_ledger {
+    use super::ToolFailure;
+    use serde_json::{Value, json};
     use std::io::Write;
 
-    /// Where `scripts/godot-acceptance.mjs` wants the ledger. Unset everywhere else, and then
-    /// nothing is written.
+    /// Where `scripts/godot-acceptance.mjs` and `scripts/live-turn.mjs` want the ledger. Unset
+    /// everywhere else, and then nothing is written.
     pub(crate) const LEDGER: &str = "GOFER_DISPATCH_LEDGER";
 
-    /// One dispatched operation, spelled the way `protocol/schemas/v2/godot-tool.json` spells it,
-    /// which is what the complement is computed against.
-    pub(crate) fn line(domain: &str, op: &str) -> String {
-        format!("{}.{op}\n", domain.strip_prefix("godot_").unwrap_or(domain))
+    /// One dispatched operation as a JSON line: `op` spelled the way
+    /// `protocol/schemas/v2/godot-tool.json` spells it, which is what the complement is computed
+    /// against; `code` and `message` of the failure, or null; the milliseconds it took; and the
+    /// parameters the router handed the handler.
+    pub(crate) fn line(
+        domain: &str,
+        op: &str,
+        params: &Value,
+        answered: &Result<Value, ToolFailure>,
+        ms: u128,
+    ) -> String {
+        let failure = answered.as_ref().err();
+        let mut line = json!({
+            "op": format!("{}.{op}", domain.strip_prefix("godot_").unwrap_or(domain)),
+            "code": failure.map(|f| f.code.clone()),
+            "message": failure.map(|f| f.message.clone()),
+            "ms": ms,
+            "params": params,
+        })
+        .to_string();
+        line.push('\n');
+        line
     }
 
-    pub(crate) fn record(domain: &str, op: &str) {
+    pub(crate) fn record(
+        domain: &str,
+        op: &str,
+        params: &Value,
+        answered: &Result<Value, ToolFailure>,
+        ms: u128,
+    ) {
         let Ok(path) = std::env::var(LEDGER) else {
             return;
         };
@@ -810,18 +839,38 @@ pub(crate) mod dispatch_ledger {
         else {
             return;
         };
-        let _ = ledger.write_all(line(domain, op).as_bytes());
+        let _ = ledger.write_all(line(domain, op, params, answered, ms).as_bytes());
     }
 }
 
-/// Records that this operation reached its handler. Compiles to nothing outside the suite.
+/// Records that this operation reached its handler, and what came back. Compiles to nothing
+/// outside the suite.
 #[cfg(all(test, feature = "godot-acceptance"))]
-fn record_dispatched(domain: &ToolDomain, operation: &Operation) {
-    dispatch_ledger::record(domain.name, operation.op);
+fn record_dispatched(
+    domain: &ToolDomain,
+    operation: &Operation,
+    params: &Value,
+    answered: &Result<Value, ToolFailure>,
+    started: std::time::Instant,
+) {
+    dispatch_ledger::record(
+        domain.name,
+        operation.op,
+        params,
+        answered,
+        started.elapsed().as_millis(),
+    );
 }
 
 #[cfg(not(all(test, feature = "godot-acceptance")))]
-fn record_dispatched(_domain: &ToolDomain, _operation: &Operation) {}
+fn record_dispatched(
+    _domain: &ToolDomain,
+    _operation: &Operation,
+    _params: &Value,
+    _answered: &Result<Value, ToolFailure>,
+    _started: std::time::Instant,
+) {
+}
 
 #[cfg(all(test, feature = "godot-acceptance"))]
 mod ledger_acceptance_tests {
@@ -829,13 +878,14 @@ mod ledger_acceptance_tests {
 
     /// The runner reads what this writes, so the line format is a contract between two files.
     #[test]
-    fn the_hook_appends_one_dotted_line_per_dispatched_operation() {
+    fn the_hook_appends_one_json_line_per_dispatched_operation() {
         let directory = tempfile::tempdir().expect("a directory for the ledger");
-        let ledger = directory.path().join("dispatch-ledger.txt");
+        let ledger = directory.path().join("dispatch-ledger.jsonl");
         let held = std::env::var(dispatch_ledger::LEDGER).ok();
         // SAFETY: the acceptance runner gives each test its own process.
         unsafe { std::env::set_var(dispatch_ledger::LEDGER, &ledger) };
 
+        let started = std::time::Instant::now();
         record_dispatched(
             &ToolDomain {
                 name: "godot_scene",
@@ -843,6 +893,9 @@ mod ledger_acceptance_tests {
             },
             tool_params::operation_of("godot_scene", "open")
                 .expect("scene.open is a catalogue row"),
+            &json!({"path": "res://scenes/main.tscn"}),
+            &Ok(json!({"opened": true})),
+            started,
         );
         record_dispatched(
             &ToolDomain {
@@ -851,6 +904,9 @@ mod ledger_acceptance_tests {
             },
             tool_params::operation_of("godot_docs_search", "ask")
                 .expect("docs_search.ask is a catalogue row"),
+            &json!({"question": "what is a Timer"}),
+            &Err(ToolFailure::new("docs_unavailable", "no index")),
+            started,
         );
 
         // SAFETY: as above.
@@ -858,10 +914,19 @@ mod ledger_acceptance_tests {
             Some(path) => unsafe { std::env::set_var(dispatch_ledger::LEDGER, path) },
             None => unsafe { std::env::remove_var(dispatch_ledger::LEDGER) },
         }
-        assert_eq!(
-            std::fs::read_to_string(&ledger).expect("the ledger the hook opened"),
-            "scene.open\ndocs_search.ask\n"
-        );
+        let lines: Vec<Value> = std::fs::read_to_string(&ledger)
+            .expect("the ledger the hook opened")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("a JSON line"))
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["op"], "scene.open");
+        assert_eq!(lines[0]["code"], Value::Null);
+        assert_eq!(lines[0]["params"]["path"], "res://scenes/main.tscn");
+        assert_eq!(lines[1]["op"], "docs_search.ask");
+        assert_eq!(lines[1]["code"], "docs_unavailable");
+        assert_eq!(lines[1]["message"], "no index");
+        assert!(lines[1]["ms"].is_u64());
     }
 }
 
@@ -872,7 +937,23 @@ fn run_one<R: Runtime>(
     operation: &Operation,
     params: Value,
 ) -> Result<Value, ToolFailure> {
-    record_dispatched(domain, operation);
+    let started = std::time::Instant::now();
+    #[cfg(all(test, feature = "godot-acceptance"))]
+    let recorded = params.clone();
+    #[cfg(not(all(test, feature = "godot-acceptance")))]
+    let recorded = Value::Null;
+    let answered = route_one(app, domain, operation, params);
+    record_dispatched(domain, operation, &recorded, &answered, started);
+    answered
+}
+
+/// The routing itself, apart from the ledger that watches it.
+fn route_one<R: Runtime>(
+    app: &AppHandle<R>,
+    domain: &ToolDomain,
+    operation: &Operation,
+    params: Value,
+) -> Result<Value, ToolFailure> {
     let op = operation.op;
     match operation.route() {
         tool_params::Answers::Addon(command) => {

@@ -1,0 +1,431 @@
+{
+    "$comment": "Asks for scripts/live-turn.mjs. `ops` is what a task aims at, not a promise the model will use them; scripts/tool-report.mjs next ranks tasks by how much their ops need a run.",
+    "tasks": [
+        {
+            "id": "scene-tour",
+            "fixture": "live-project",
+            "ops": [
+                "scene.list",
+                "scene.open",
+                "scene.get_tree",
+                "node.inspect",
+                "session.get_state"
+            ],
+            "task": "List the scenes in this project, open the main one, and tell me every node in it with its type. Then tell me the Player's position and the Label's text."
+        },
+        {
+            "id": "add-enemy",
+            "fixture": "live-project",
+            "ops": [
+                "scene.open",
+                "node.create_nodes",
+                "node.set_properties",
+                "scene.save",
+                "scene.get_tree"
+            ],
+            "task": "In the main scene add an Enemy node: a Node2D at position (400, 200) with a Sprite2D child named Body and a Label child that says \"enemy\". Save the scene and show me the resulting tree."
+        },
+        {
+            "id": "rename-reparent",
+            "fixture": "live-project",
+            "ops": ["scene.open", "node.rename", "node.reparent", "node.duplicate", "scene.save"],
+            "task": "In the main scene, rename Ticker to Clock, move the Timer directly under Main, duplicate the Player as Player2, and save. Tell me the final tree."
+        },
+        {
+            "id": "groups-and-delete",
+            "fixture": "live-project",
+            "ops": [
+                "node.add_to_group",
+                "node.remove_from_group",
+                "node.delete",
+                "scene.save",
+                "scene.get_tree"
+            ],
+            "task": "Put the Player in a group called actors and the Label in a group called ui. Then take the Label out of ui again and delete it entirely. Save and confirm what groups the Player has now."
+        },
+        {
+            "id": "signal-wiring",
+            "fixture": "live-project",
+            "ops": ["node.connect_signal", "node.disconnect_signal", "scene.save", "node.inspect"],
+            "task": "Connect the Timer's timeout signal to a method called _on_ticker_timeout on Main as a scene connection, save, and show me the connection. Then disconnect it again and save."
+        },
+        {
+            "id": "change-type",
+            "fixture": "live-project",
+            "ops": ["node.change_type", "node.inspect", "scene.save"],
+            "task": "Turn the Player node from a Node2D into a CharacterBody2D, keeping its script and position. Save and verify the type and position afterwards."
+        },
+        {
+            "id": "instantiate-scene",
+            "fixture": "live-project",
+            "ops": [
+                "scene.create",
+                "node.create_nodes",
+                "scene.save",
+                "scene.open",
+                "node.instantiate",
+                "scene.save_as"
+            ],
+            "task": "Create a new scene at res://scenes/coin.tscn with an Area2D root named Coin and a Sprite2D child. Save it. Then open the main scene, place two instances of the coin under Main at (100, 100) and (200, 100), and save the main scene as res://scenes/main_with_coins.tscn."
+        },
+        {
+            "id": "reload-discard",
+            "fixture": "live-project",
+            "ops": ["scene.open", "node.set_properties", "scene.reload", "node.inspect"],
+            "task": "Open the main scene, move the Player to (999, 999) without saving, then reload the scene from disk and tell me where the Player is now."
+        },
+        {
+            "id": "undo-redo",
+            "fixture": "live-project",
+            "ops": ["node.rename", "session.undo", "session.redo", "scene.get_tree"],
+            "task": "Rename the Label node to Title, then undo that rename, then redo it. After each step tell me the Label's current name from the scene tree."
+        },
+        {
+            "id": "tilemap-level",
+            "fixture": "live-project",
+            "ops": [
+                "resource.create_tileset",
+                "resource.describe_tileset",
+                "node.create_nodes",
+                "node.set_cells",
+                "node.get_cells",
+                "scene.save"
+            ],
+            "task": "assets/tiles.png is a 128x32 atlas of sixteen 16x16 tiles: row 0 is ground, brick, question block, spent block, pipe mouth left, pipe mouth right, pipe shaft left, pipe shaft right; row 1 is flag pole, pole ball, flag, castle brick, bush left, bush right, cloud left, cloud right. Cut it into a TileSet at res://assets/tiles.tres where ground and brick are solid, add a TileMapLayer named Ground to the main scene, paint a floor of ground tiles from x=0 to x=19 at y=10 with one brick at (5, 8), save, and read back what the layer holds."
+        },
+        {
+            "id": "draw-texture",
+            "fixture": "live-project",
+            "ops": [
+                "resource.create_texture",
+                "resource.list",
+                "node.create_nodes",
+                "node.set_properties",
+                "scene.save"
+            ],
+            "task": "The project has no player art. Draw a 32x32 PNG at res://assets/hero.png with a blue body and a yellow 8x8 head on a transparent background, then give the Player a Sprite2D child that shows it. Save and list the files under assets."
+        },
+        {
+            "id": "collision-shape",
+            "fixture": "live-project",
+            "ops": [
+                "resource.create_shape",
+                "node.create_nodes",
+                "node.set_properties",
+                "scene.save"
+            ],
+            "task": "Save a 24x24 rectangle collision shape at res://assets/player_shape.tres, give the Player a CollisionShape2D child that uses it, and save the scene."
+        },
+        {
+            "id": "file-housekeeping",
+            "fixture": "live-clutter",
+            "ops": [
+                "resource.list",
+                "script.list",
+                "resource.move",
+                "resource.delete",
+                "resource.rescan",
+                "script.open"
+            ],
+            "task": "List every file in the project with its size. There is an old save system script nobody uses; read it to confirm nothing references it, move it into a folder called res://legacy/, then delete it and make sure the editor filesystem is up to date."
+        },
+        {
+            "id": "script-edit-diagnostics",
+            "fixture": "live-project",
+            "ops": ["script.open", "script.edit", "script.diagnostics", "script.format"],
+            "task": "In scripts/player.gd add an exported variable jump_force of type float defaulting to 300.0, and a function jump() that prints the jump force. Make sure the file has no diagnostics afterwards and is formatted the way gdformat wants it."
+        },
+        {
+            "id": "script-save-whole",
+            "fixture": "live-project",
+            "ops": ["script.save", "script.diagnostics", "script.open", "script.close"],
+            "task": "Write a new script at res://scripts/coin.gd that extends Area2D, has an exported int value defaulting to 1, and prints \"collected\" in a _on_body_entered handler. Check it has no diagnostics, then close it."
+        },
+        {
+            "id": "symbols-and-hover",
+            "fixture": "live-project",
+            "ops": [
+                "script.document_symbols",
+                "script.workspace_symbols",
+                "script.hover",
+                "script.definition",
+                "script.declaration"
+            ],
+            "task": "List every function and variable declared in scripts/main.gd. Find where total_ticks is declared, and tell me what the hover documentation says for the Timer type used in that file. Then find every symbol in the whole project whose name contains tick."
+        },
+        {
+            "id": "references-highlights",
+            "fixture": "live-project",
+            "ops": ["script.references", "script.highlights", "script.open"],
+            "task": "In scripts/main.gd, how many places reference the _on_tick function, and on which lines? Also give me every highlight of total_ticks in that file."
+        },
+        {
+            "id": "completion-signature",
+            "fixture": "live-project",
+            "ops": ["script.completion", "script.signature_help", "script.open", "script.update"],
+            "task": "In scripts/main.gd, what completions does the language server offer right after typing `timer.` at the end of _ready? And what is the signature help for the print call inside _announce?"
+        },
+        {
+            "id": "rename-symbol",
+            "fixture": "live-project",
+            "ops": [
+                "script.prepare_rename",
+                "script.rename",
+                "script.apply_rename",
+                "script.diagnostics"
+            ],
+            "task": "Rename the function _announce in scripts/main.gd to _say_tick everywhere it is used, using the language server's rename so nothing is missed. Confirm there are no diagnostics afterwards."
+        },
+        {
+            "id": "settings-read",
+            "fixture": "live-project",
+            "ops": ["project.get_settings", "project.get_setting", "project.search_settings"],
+            "task": "What is this project's name, main scene, and window size? Also find every project setting whose name mentions vsync and tell me their values."
+        },
+        {
+            "id": "settings-write",
+            "fixture": "live-project",
+            "ops": ["project.set_setting", "project.get_setting", "project.reset_setting"],
+            "task": "Set the project's window width to 1280 and height to 720, then read them back. Then reset the max_fps setting to its default and tell me what it was before and what it is now."
+        },
+        {
+            "id": "editor-settings",
+            "fixture": "live-project",
+            "ops": [
+                "project.search_editor_settings",
+                "project.get_editor_setting",
+                "project.set_editor_setting"
+            ],
+            "task": "Find the editor settings about the text editor's indentation, read the indent type, set it to spaces, and read it back."
+        },
+        {
+            "id": "autoload",
+            "fixture": "live-project",
+            "ops": [
+                "script.save",
+                "project.set_autoload",
+                "project.list_autoloads",
+                "project.remove_autoload"
+            ],
+            "task": "Create a script res://scripts/game_state.gd extending Node with a var score := 0, register it as an autoload named GameState, list the autoloads to confirm, then remove it again and confirm the list is empty."
+        },
+        {
+            "id": "input-actions",
+            "fixture": "live-project",
+            "ops": [
+                "project.list_input_actions",
+                "project.set_input_action",
+                "project.remove_input_action",
+                "project.reset_input_action"
+            ],
+            "task": "Add an input action jump bound to the space key and the A gamepad button, and an action shoot bound to the left mouse button. List the actions to confirm. Then remove shoot, override ui_accept to the Enter key only, and finally reset ui_accept back to its built-in default."
+        },
+        {
+            "id": "plugins",
+            "fixture": "live-project",
+            "ops": ["project.list_plugins", "project.set_plugin_enabled"],
+            "task": "Which editor plugins does this project have, and which are enabled? If any is disabled, enable it and confirm."
+        },
+        {
+            "id": "run-and-capture",
+            "fixture": "live-project",
+            "ops": [
+                "runtime.run",
+                "runtime.get_state",
+                "runtime.capture",
+                "runtime.get_tree",
+                "runtime.stop"
+            ],
+            "task": "Run the game, take a screenshot after it has started, list the running scene tree, and stop the game. Tell me what the screenshot shows and what nodes were running."
+        },
+        {
+            "id": "run-inspect-wait",
+            "fixture": "live-project",
+            "ops": [
+                "runtime.run",
+                "runtime.wait",
+                "runtime.inspect_node",
+                "runtime.get_monitors",
+                "runtime.stop"
+            ],
+            "task": "Run the game, let it run for about 120 frames, then read the Player's travelled value and position, and the engine's FPS and object count monitors. Stop the game and report the numbers."
+        },
+        {
+            "id": "pause-resume-restart",
+            "fixture": "live-project",
+            "ops": [
+                "runtime.run",
+                "runtime.pause",
+                "runtime.get_tree",
+                "runtime.resume",
+                "runtime.restart",
+                "runtime.stop"
+            ],
+            "task": "Run the game, pause it, confirm from the tree that it is paused, resume it, then restart it from scratch and stop it. Report each state change."
+        },
+        {
+            "id": "input-drive",
+            "fixture": "live-project",
+            "ops": [
+                "project.set_input_action",
+                "script.edit",
+                "runtime.run",
+                "runtime.input",
+                "runtime.inspect_node",
+                "runtime.stop"
+            ],
+            "task": "Add an input action move_right on the D key and make the Player move 100 pixels per second to the right while it is held, in scripts/player.gd. Then run the game, hold D for about half a second, and prove from the Player's position that it moved."
+        },
+        {
+            "id": "logs-after-run",
+            "fixture": "live-project",
+            "ops": ["runtime.run", "runtime.wait", "runtime.stop", "logs.read"],
+            "task": "Run the game for about six seconds, stop it, and then tell me how many \"live tick\" lines the game printed and whether any warning appeared, quoting the warning."
+        },
+        {
+            "id": "debug-breakpoint",
+            "fixture": "live-project",
+            "ops": [
+                "debug.launch",
+                "debug.await_stop",
+                "debug.stack_trace",
+                "debug.scopes",
+                "debug.variables",
+                "debug.continue",
+                "debug.terminate"
+            ],
+            "task": "Put a breakpoint on the line inside _on_tick that assigns total_ticks in scripts/main.gd, launch the game under the debugger, wait for it to stop, and tell me the value of ticks and total_ticks from the locals. Continue once, read them again at the next stop, then terminate."
+        },
+        {
+            "id": "debug-stepping",
+            "fixture": "live-project",
+            "ops": [
+                "debug.set_breakpoints",
+                "debug.launch",
+                "debug.await_stop",
+                "debug.step_over",
+                "debug.step_in",
+                "debug.step_out",
+                "debug.stack_trace",
+                "debug.terminate"
+            ],
+            "task": "Break on the _announce call inside _on_tick in scripts/main.gd, launch under the debugger, and when it stops: step over one line and tell me the line, then on the next stop step into _announce and tell me the frame you are in, then step out and tell me where you land. Terminate afterwards."
+        },
+        {
+            "id": "debug-evaluate",
+            "fixture": "live-project",
+            "ops": [
+                "debug.launch",
+                "debug.await_stop",
+                "debug.evaluate",
+                "debug.threads",
+                "debug.status",
+                "debug.terminate"
+            ],
+            "task": "Launch the game under the debugger with a breakpoint on the push_warning line in scripts/main.gd. When it stops, evaluate the expressions ticks * 2 and TICK_MESSAGE, list the threads, report the adapter status, and terminate."
+        },
+        {
+            "id": "debug-pause-restart",
+            "fixture": "live-project",
+            "ops": [
+                "debug.launch",
+                "debug.pause",
+                "debug.stack_trace",
+                "debug.continue",
+                "debug.restart",
+                "debug.disconnect"
+            ],
+            "task": "Launch the game under the debugger with no breakpoints, pause it after it has run for a moment, tell me what the stack trace says while paused, continue, then restart the debuggee and finally disconnect, terminating the game."
+        },
+        {
+            "id": "debug-attach",
+            "fixture": "live-project",
+            "ops": [
+                "runtime.run",
+                "debug.attach",
+                "debug.set_breakpoints",
+                "debug.await_stop",
+                "debug.variables",
+                "debug.terminate"
+            ],
+            "task": "Run the game normally first. Then attach the debugger to the running game, set a breakpoint on the _announce call in scripts/main.gd, wait for it to stop, read the locals, and terminate."
+        },
+        {
+            "id": "breakpoint-lines",
+            "fixture": "live-project",
+            "ops": ["script.open", "debug.breakpoint_locations", "debug.set_breakpoints"],
+            "task": "For scripts/main.gd, tell me which of lines 1, 2, 12, 18 and 26 can hold a breakpoint, and set breakpoints on every one of them that can."
+        },
+        {
+            "id": "docs-question",
+            "fixture": "live-project",
+            "ops": ["docs_search.ask", "docs_search.search"],
+            "task": "Using the Godot documentation, explain in three sentences what CharacterBody2D.move_and_slide does and when to call it, and quote the passage you based that on. Also list the top three documentation passages about Timer.autostart."
+        },
+        {
+            "id": "session-restart",
+            "fixture": "live-project",
+            "ops": [
+                "session.status",
+                "session.stop",
+                "session.start",
+                "session.get_state",
+                "scene.open"
+            ],
+            "task": "Report the editor session's status and engine version. Then stop the editor session, start it again, and confirm it is ready by opening the main scene."
+        },
+        {
+            "id": "answer-dialog",
+            "fixture": "live-project",
+            "ops": [
+                "scene.open",
+                "node.set_properties",
+                "session.get_state",
+                "session.answer_dialog"
+            ],
+            "task": "Open the main scene and change the Label's text to \"dirty\" without saving. Then open scenes/main.tscn again from disk; if the editor puts up a dialog asking what to do with the unsaved changes, tell me its buttons and press the one that discards the changes."
+        },
+        {
+            "id": "score-feature",
+            "fixture": "live-score",
+            "ops": [
+                "script.open",
+                "script.edit",
+                "node.create_nodes",
+                "scene.save",
+                "runtime.run",
+                "runtime.wait",
+                "logs.read",
+                "runtime.stop"
+            ],
+            "task": "Add a score that goes up by 10 every second, shown in a Label at the top of the screen, and print the score each time it changes. Run the game for about three seconds and prove from the log that the score rose."
+        },
+        {
+            "id": "nomain-fix",
+            "fixture": "live-nomain",
+            "ops": [
+                "project.get_setting",
+                "scene.list",
+                "project.set_setting",
+                "runtime.run",
+                "runtime.capture",
+                "runtime.stop"
+            ],
+            "task": "This project does not run. Find out why, fix it so the game scene starts, run it to prove it, take a screenshot, and stop it."
+        },
+        {
+            "id": "pipeline-bug",
+            "fixture": "live-pipeline",
+            "ops": [
+                "script.open",
+                "script.diagnostics",
+                "script.edit",
+                "debug.launch",
+                "debug.await_stop",
+                "debug.variables",
+                "debug.terminate"
+            ],
+            "task": "The fighter script has a bug that shows up when the game runs. Find it using the debugger rather than by guessing, fix it, and show that the game now runs without stopping on an error."
+        }
+    ]
+}

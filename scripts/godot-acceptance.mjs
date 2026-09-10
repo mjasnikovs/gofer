@@ -58,7 +58,7 @@ if (listed.status !== 0) {
 const TIMES = resolve('src-tauri/target/godot-test-times.json')
 // Named after this run, because two lanes on one machine would otherwise truncate each other's
 // records and report operations as never run that the other process had just driven.
-const LEDGER = resolve(`src-tauri/target/godot-dispatch-ledger.${process.pid}.txt`)
+const LEDGER = resolve(`src-tauri/target/godot-dispatch-ledger.${process.pid}.jsonl`)
 const TOOL = resolve('protocol/schemas/v2/godot-tool.json')
 
 function recordedTimes() {
@@ -115,7 +115,12 @@ function operationsThatRan() {
                 + 'Nothing recorded an operation, so nothing proves any of them ran.'
         )
     }
-    const ran = new Set(written.split('\n').filter(Boolean))
+    const ran = new Set(
+        written
+            .split('\n')
+            .filter(Boolean)
+            .map(line => JSON.parse(line).op)
+    )
     if (ran.size === 0)
         throw new Error(
             `The dispatch ledger at ${LEDGER} is empty. The recording hook in ai_tools::run_one `

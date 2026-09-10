@@ -65,7 +65,9 @@ const NODE_COVERAGE_EXCLUDES = [
     'skills-worker.mjs',
     'bench-*.mjs',
     'ai-turn-harness.mjs',
-    'declared-domains.mjs'
+    'declared-domains.mjs',
+    'live-turn.mjs',
+    'tool-report.mjs'
 ]
     .map(name => `--exclude='scripts/${name}'`)
     .join(' ')
