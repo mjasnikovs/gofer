@@ -72,8 +72,13 @@ if (values.vulkan) {
 
 const out = resolve(runDir, 'turn.json')
 const ledger = resolve(runDir, 'ledger.jsonl')
+// The test binary has no Tauri resource directory, so the bundled sidecar is only reachable
+// through the override; without it every script.format answers formatter_unavailable.
+const sidecar = resolve('src-tauri/sidecar/gdformat')
+const formatter = process.env.GOFER_GDFORMAT ?? (existsSync(sidecar) ? sidecar : undefined)
 const env = virtualDisplayEnv({
     ...process.env,
+    ...(formatter ? {GOFER_GDFORMAT: formatter} : {}),
     GOFER_LIVE_TASK: task,
     GOFER_LIVE_OUT: out,
     GOFER_LIVE_FIXTURE: fixturePath,

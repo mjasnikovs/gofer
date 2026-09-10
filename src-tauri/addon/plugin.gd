@@ -1687,7 +1687,18 @@ func _project_set_plugin_enabled(params: Dictionary) -> Dictionary:
             "gofer_managed", "Disabling the Gofer plugin would sever the session carrying this call"
         )
     if not FileAccess.file_exists("res://addons/%s/plugin.cfg" % plugin):
-        return Params.error("plugin_not_found", "No plugin named '%s'" % plugin, {"plugin": plugin})
+        var known := PackedStringArray()
+        for entry in _project_list_plugins()["plugins"]:
+            known.append(str((entry as Dictionary)["name"]))
+        return Params.error(
+            "plugin_not_found",
+            (
+                "No plugin named '%s'. A plugin is named by its directory under res://addons/, "
+                + "not by the name in its plugin.cfg; the ones here are: %s"
+            )
+            % [plugin, ", ".join(known)],
+            {"plugin": plugin, "plugins": known}
+        )
     if EditorInterface.is_plugin_enabled(plugin) == enabled:
         return {"plugin": plugin, "enabled": enabled, "changed": false}
     EditorInterface.set_plugin_enabled(plugin, enabled)

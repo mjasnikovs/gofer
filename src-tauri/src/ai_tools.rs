@@ -646,7 +646,7 @@ fn whatever_the_dotted_name_points_at(
 ///
 /// Two refusals, because one sentence cannot be true of both. An `Exclusive` operation cannot share
 /// a call at all: it is the debugger, where the answer to one operation decides what the next one
-/// means. A `Repeat` operation may sit beside anything and may not appear twice — it takes no
+/// means. A `Repeat` operation may sit beside anything and may not appear twice in a row — it takes no
 /// parameters to vary, or it drives what the session owns exactly one of, and `run_in_order` walks
 /// the list, so the second entry either answers the first one's question again or acts on what it
 /// left behind.
@@ -679,17 +679,20 @@ fn refuse_a_list_that_holds_a_lone_operation(entries: &[Requested]) -> Result<()
                 });
             }
             Sharing::Repeat => {
-                if let Some(again) = entries
-                    .iter()
-                    .skip(index + 1)
-                    .position(|later| later.is_the_same_operation_as(entry))
+                // Only a repeat with nothing between counts: two live turns wrote
+                // `[set_autoload, list_autoloads, remove_autoload, list_autoloads]`, a read
+                // after each write, and were told the second read was the first one again.
+                let again = index + 1;
+                if entries
+                    .get(again)
+                    .is_some_and(|next| next.is_the_same_operation_as(entry))
                 {
-                    let again = index + 1 + again;
                     return Err(ToolFailure {
                         code: "op_repeated".to_owned(),
                         message: format!(
-                            "{} is in this call twice, at `ops[{index}]` and `ops[{again}]`. \
-                             {reason} Drop the second one; the rest of the list is fine.",
+                            "{} is in this call twice in a row, at `ops[{index}]` and \
+                             `ops[{again}]`. {reason} Drop the second one; the rest of the list \
+                             is fine.",
                             entry.named()
                         ),
                         retryable: false,
@@ -3594,6 +3597,18 @@ mod tests {
         gate("godot_session", &["start", "status"]).expect("start then report");
         gate("godot_session", &["get_state", "answer_dialog"]).expect("read then press");
         gate("godot_session", &["stop", "start"]).expect("stop then start");
+
+        gate(
+            "godot_project",
+            &[
+                "set_autoload",
+                "list_autoloads",
+                "remove_autoload",
+                "list_autoloads",
+            ],
+        )
+        .expect("a read after each write is two different questions");
+        gate("godot_session", &["undo", "get_state", "undo"]).expect("a read between two undos");
 
         let failure = gate("godot_session", &["undo", "undo"]).expect_err("one undo stack");
         assert_eq!(failure.code, "op_repeated");

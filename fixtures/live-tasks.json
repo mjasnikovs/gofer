@@ -426,6 +426,57 @@
                 "debug.terminate"
             ],
             "task": "The fighter script has a bug that shows up when the game runs. Find it using the debugger rather than by guessing, fix it, and show that the game now runs without stopping on an error."
+        },
+        {
+            "id": "definition-declaration",
+            "fixture": "live-project",
+            "ops": [
+                "script.open",
+                "script.definition",
+                "script.declaration",
+                "script.document_symbols"
+            ],
+            "task": "In scripts/main.gd, use the language server's go-to-definition on the _on_timeout reference inside _ready and tell me the line it is defined on. Then use go-to-declaration on TICK_MESSAGE where it is used inside _announce and tell me where it is declared. Give both as line numbers and quote the lines."
+        },
+        {
+            "id": "docs-ask",
+            "fixture": "live-project",
+            "ops": ["docs_search.ask"],
+            "task": "Ask the Godot documentation one question and give me its answer as one paragraph with a supporting quote: what does Timer.autostart do, and does it work for a Timer added at runtime?"
+        },
+        {
+            "id": "rename-check",
+            "fixture": "live-project",
+            "ops": ["script.open", "script.prepare_rename", "script.document_symbols"],
+            "task": "In scripts/main.gd, check with the language server whether the symbol total_ticks can be renamed, and tell me the range and placeholder it proposes. Do the same for the string literal \"live tick\". Do not rename anything."
+        },
+        {
+            "id": "script-list",
+            "fixture": "live-clutter",
+            "ops": ["script.list", "script.open"],
+            "task": "List only the GDScript files in this project with their sizes in bytes, largest first, and tell me which one nothing else references."
+        },
+        {
+            "id": "make-plugin",
+            "fixture": "live-project",
+            "ops": [
+                "script.save",
+                "resource.rescan",
+                "project.list_plugins",
+                "project.set_plugin_enabled"
+            ],
+            "task": "Create a minimal editor plugin at res://addons/hello/: a plugin.cfg naming it Hello with script plugin.gd, and plugin.gd that is a @tool script extending EditorPlugin and prints \"hello plugin\" in _enter_tree. Make sure the editor sees the new files, enable the plugin, and confirm from the plugin list that Hello is enabled."
+        },
+        {
+            "id": "dialog-on-run",
+            "fixture": "live-nomain",
+            "ops": [
+                "runtime.run",
+                "session.get_state",
+                "session.answer_dialog",
+                "project.set_setting"
+            ],
+            "task": "Run the game exactly as the project is now. If the editor puts up a dialog, tell me its title and buttons and dismiss it with the button that cancels. Then set the main scene to the one scene the project has and run it for real, and stop it."
         }
     ]
 }
