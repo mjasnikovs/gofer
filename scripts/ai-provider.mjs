@@ -22,6 +22,7 @@ import {openAICompletionsApi} from '@earendil-works/pi-ai/api/openai-completions
 import {openaiCodexProvider} from '@earendil-works/pi-ai/providers/openai-codex'
 import {createGodotTools} from './godot-tools.mjs'
 import {createGrepTool} from './ai-grep.mjs'
+import {readsADirectory} from './read-a-directory.mjs'
 import {turnContextText, withTurnContext} from './turn-context.mjs'
 import {
     abortableWait,
@@ -375,7 +376,7 @@ function contextMessage(message, model) {
 export function createAgentTools(workspacePath, domains, host, extra = [], model, frozen = []) {
     const env = createToolEnv(workspacePath)
     const confined = [
-        withoutPackedLiterals(withLineNumbers(createReadTool())),
+        readsADirectory(withoutPackedLiterals(withLineNumbers(createReadTool()))),
         createGrepTool(),
         createWriteTool(),
         createEditTool(),

@@ -19,6 +19,7 @@ import {createProgressGuard} from './progress-guard.mjs'
 import {toolStepLine} from './tool-target.mjs'
 import {confineTool} from './workspace-confinement.mjs'
 import {createGrepTool} from './ai-grep.mjs'
+import {readsADirectory} from './read-a-directory.mjs'
 import {withoutEmptyToolCalls} from './ai-transcript.mjs'
 
 export const SUBAGENT_TOOL_NAME = 'subagent'
@@ -237,7 +238,7 @@ function underCommandClock(tool, {timeoutMs, timers}) {
 }
 
 const CONFINED_CHILD_TOOLS = {
-    read: () => withLineNumbers(createReadTool()),
+    read: () => readsADirectory(withLineNumbers(createReadTool())),
     grep: createGrepTool,
     bash: createBashTool
 }

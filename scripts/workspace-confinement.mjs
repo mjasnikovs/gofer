@@ -62,6 +62,11 @@ const SEARCHING_TOOLS = ['grep']
 
 const EDITOR_OWNED_IN_SHELL = /\.(?:tscn|scn)(?![\w-])|(?:^|[\s"'/=])project\.godot(?![\w-])/u
 
+/// `cd` to somewhere still inside the workspace is a no-op the shell would have done anyway, and
+/// refusing it costs a whole call. Only one that climbs out is refused — and by the time this runs,
+/// a path under the workspace root has already been masked, so what is left is an escape.
+const CHANGES_DIRECTORY = /(?:^|[;&|]\s*)cd(?:\s+(?:[~/]|\.\.)|\s*$)/u
+
 const SLEEPS = /(?:^|[;&|]\s*)sleep(?:\s|$)/u
 
 const READ_ONLY_GIT = /^\s*git\s+(?:diff|status|log|show|blame|ls-files)(?:\s|$)/u
@@ -232,11 +237,20 @@ function staysUnder(root, token) {
     return true
 }
 
-export function validateBashCommand(command, temporaryRoot = tmpdir()) {
+/// The workspace root is a path a command may name.
+///
+/// A model writes the absolute path of the project it was given constantly: it is what the skill
+/// index and every error message hand it. Reading that as an escape refuses the call and teaches
+/// nothing, because the shell already runs there. So the root is masked exactly the way the OS's
+/// temporary directory is, and only for tokens that stay under it.
+export function validateBashCommand(command, temporaryRoot = tmpdir(), workspaceRoot = undefined) {
     if (typeof command !== 'string' || command.length === 0 || command.includes('\0'))
         throw new Error('Shell commands must be non-empty strings')
     const probed = blank(command, /\/dev\/(?:null|stdin|stdout|stderr|fd\/\d+)(?![\w-])/gu)
-    const scratched = withoutTemporaryPaths(probed, temporaryRoot)
+    const scratched = withoutTemporaryPaths(
+        workspaceRoot === undefined ? probed : withoutTemporaryPaths(probed, workspaceRoot),
+        temporaryRoot
+    )
     const measured = scratched.replace(
         /([^\s|;&]+)([^\S\n]+)\/+([^\S\n]+)(?=[\w$([.])/gu,
         (whole, left, before, after, at, text) =>
@@ -256,8 +270,11 @@ export function validateBashCommand(command, temporaryRoot = tmpdir()) {
                 + 'not its full path. Scratch output can go in the temporary directory the OS '
                 + 'gives you.'
         )
-    if (/(?:^|[;&|]\s*)cd(?:\s|$)/u.test(command))
-        throw new Error('Shell commands cannot change the workspace directory')
+    if (CHANGES_DIRECTORY.test(measured))
+        throw new Error(
+            'Shell commands cannot leave the workspace. The shell already runs in its root, so a '
+                + 'path is named from there — scripts/mario.gd, not its full path.'
+        )
     if (SLEEPS.test(command))
         throw new Error(
             'Shell commands cannot sleep. Sleeping here stops this process while the game carries '
@@ -314,7 +331,7 @@ export function confineTool(tool, workspacePath, frozen = []) {
             tool.name === 'bash' ? `${tool.description}${BASH_IS_CONFINED}` : tool.description,
         execute: async (id, params, signal, onUpdate, context) => {
             if (tool.name === 'bash') {
-                validateBashCommand(params.command)
+                validateBashCommand(params.command, undefined, workspacePath)
                 refuseFrozenShellWrite(params.command, frozen)
                 return tool.execute(id, withADeadline(params), signal, onUpdate, context)
             }

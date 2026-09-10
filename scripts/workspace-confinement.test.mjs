@@ -257,9 +257,17 @@ test('allows workspace shell commands and rejects every explicit escape form', a
         'cat ~/secret',
         'cat C:\\Users\\me\\.ssh\\id_rsa',
         'type C:/Users/me/secrets.txt',
-        'true; cd other'
+        'cd',
+        'cd ~',
+        'cd /',
+        'true; cd ..'
     ])
         await assert.rejects(tool.execute('2', {command}), /Shell|workspace/iu)
+
+    // Moving about inside the workspace is what the shell would have done anyway, and the escape
+    // rule above still refuses anything that climbs out from wherever it lands.
+    for (const command of ['cd scripts && ls', `cd ${current.path} && npm test`, 'ls'])
+        assert.deepEqual(await tool.execute('3', {command}), asRun(command))
 })
 
 test('says on the bash tool itself that it cannot leave the workspace', async context => {
