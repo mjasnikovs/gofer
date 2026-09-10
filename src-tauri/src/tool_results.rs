@@ -8,7 +8,7 @@
 //!
 //! Every field is read by serde and by nothing else, which is what the allow above is for.
 
-// GENERATED-BEGIN results sha256:64307a203aff7838
+// GENERATED-BEGIN results sha256:6f15a6b11d0eff52
 /// One node of a scene tree, and the nodes under it.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -995,6 +995,8 @@ pub struct GodotDebugSetBreakpointsResult {
 pub struct GodotDebugBreakpointLocationsResult {
     pub op: String,
     pub locations: Vec<GodotDebugBreakpointLocationsResultLocations>,
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]

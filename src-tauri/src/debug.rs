@@ -182,6 +182,9 @@ pub enum DebugResponse {
     },
     BreakpointLocations {
         locations: Vec<BreakpointLocation>,
+        /// Why the answered line is not the one asked about, when it is not.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     Launched {
         breakpoints: Vec<VerifiedBreakpoint>,
@@ -557,9 +560,11 @@ fn answer(request: DebugRequest) -> Result<DebugResponse, DapError> {
         }
         DebugRequest::BreakpointLocations { path, line } => {
             let absolute = resolve(&workspace, &path)?;
-            Ok(DebugResponse::BreakpointLocations {
-                locations: client.breakpoint_locations(&absolute, line)?,
-            })
+            let text = std::fs::read_to_string(&absolute).unwrap_or_default();
+            Ok(where_a_breakpoint_would_land(
+                client.breakpoint_locations(&absolute, line)?,
+                Moved::of(&text, line),
+            ))
         }
         DebugRequest::Launch {
             scene,
@@ -853,6 +858,7 @@ struct Moved {
 enum Left {
     Header(i64),
     Empty(i64),
+    Declaration(i64),
     Nowhere(i64),
 }
 
@@ -877,19 +883,23 @@ impl Moved {
                 },
             };
         }
-        if holds_no_statement(asked) {
-            return match next_line_that_runs_after_an_empty_one(text, line) {
-                Some(next) => Self {
-                    line: next,
-                    from: Some(Left::Empty(line)),
-                },
-                None => Self {
-                    line,
-                    from: Some(Left::Nowhere(line)),
-                },
-            };
+        let left = if holds_no_statement(asked) {
+            Left::Empty(line)
+        } else if declares_something(asked) && !runs(asked) {
+            Left::Declaration(line)
+        } else {
+            return Self { line, from: None };
+        };
+        match next_line_that_runs_after(text, line) {
+            Some(next) => Self {
+                line: next,
+                from: Some(left),
+            },
+            None => Self {
+                line,
+                from: Some(Left::Nowhere(line)),
+            },
         }
-        Self { line, from: None }
     }
 
     fn note(&self) -> Option<String> {
@@ -904,12 +914,37 @@ impl Moved {
                  verified and never hit. This one is on line {}, the next line that does.",
                 self.line
             ),
+            Left::Declaration(from) => format!(
+                "Line {from} is a declaration and never runs, so a breakpoint on it would be \
+                 verified and never hit. This one is on line {}, the next line that does.",
+                self.line
+            ),
             Left::Nowhere(from) => format!(
                 "Line {from} never runs and nothing after it does either, so this breakpoint is \
                  verified and will never hit. Name a line that holds a statement."
             ),
         })
     }
+}
+
+/// The adapter validates every line of a script, headers and declarations included, and
+/// `set_breakpoints` then moves the ones that never run: a live turn asked about five lines and was
+/// told all five hold a breakpoint, sixty milliseconds before three of them were moved. The
+/// answer is the line the breakpoint would be armed on, and why, so the two ops agree.
+fn where_a_breakpoint_would_land(
+    validated: Vec<BreakpointLocation>,
+    moved: Moved,
+) -> DebugResponse {
+    let note = moved.note();
+    let locations = if note.is_some() && !validated.is_empty() {
+        vec![BreakpointLocation {
+            line: moved.line,
+            end_line: None,
+        }]
+    } else {
+        validated
+    };
+    DebugResponse::BreakpointLocations { locations, note }
 }
 
 fn declares_a_function(text: &str) -> bool {
@@ -1012,12 +1047,10 @@ fn first_statement_of_function(text: &str, line: i64) -> Option<i64> {
 ///
 /// A `func` header met on the way is crossed into its body; every other declaration is walked
 /// past; an indented line is a body statement and counts unless it is `pass`.
-fn next_line_that_runs_after_an_empty_one(text: &str, line: i64) -> Option<i64> {
+fn next_line_that_runs_after(text: &str, line: i64) -> Option<i64> {
     let lines: Vec<&str> = text.lines().collect();
     let index = usize::try_from(line.checked_sub(1)?).ok()?;
-    if !holds_no_statement(lines.get(index)?) {
-        return None;
-    }
+    lines.get(index)?;
     for (found, next) in lines.iter().enumerate().skip(index + 1) {
         if holds_no_statement(next) {
             continue;
@@ -1365,6 +1398,48 @@ mod tests {
 
     /// Measured on 4.7.2, one breakpoint per launch: of these class-level lines only the `var`
     /// with an initialiser and the `static var` fire; `pass` in a body never does.
+    /// The adapter says every line is valid; the answer is where the breakpoint would go.
+    #[test]
+    fn breakpoint_locations_answer_the_line_set_breakpoints_would_arm() {
+        let script = "extends Node
+
+func _ready() -> void:
+	print(1)
+";
+        let validated = vec![BreakpointLocation {
+            line: 3,
+            end_line: None,
+        }];
+        let DebugResponse::BreakpointLocations { locations, note } =
+            where_a_breakpoint_would_land(validated.clone(), Moved::of(script, 3))
+        else {
+            panic!("a locations answer")
+        };
+        assert_eq!(locations[0].line, 4);
+        assert!(note.is_some_and(|note| note.contains("declares the function")));
+
+        let DebugResponse::BreakpointLocations { locations, note } =
+            where_a_breakpoint_would_land(validated, Moved::of(script, 4))
+        else {
+            panic!("a locations answer")
+        };
+        assert_eq!(
+            locations[0].line, 3,
+            "a line that runs keeps the adapter's answer"
+        );
+        assert!(note.is_none());
+
+        let DebugResponse::BreakpointLocations { locations, .. } =
+            where_a_breakpoint_would_land(Vec::new(), Moved::of(script, 3))
+        else {
+            panic!("a locations answer")
+        };
+        assert!(
+            locations.is_empty(),
+            "a line the adapter refused stays refused"
+        );
+    }
+
     #[test]
     fn a_breakpoint_walks_past_the_class_level_lines_that_never_run() {
         let script = "# header comment\nextends Node\n\nclass_name Probe\nsignal fired\nconst SPEED := 3\nenum State {A, B}\nvar counter := 0\nvar plain\n@onready var later := get_tree()\n@export var speed: float = 2.0\nstatic var shared := 1\n\nfunc _init() -> void:\n\tpass\n\nfunc _process(_delta: float) -> void:\n\tcounter += 1\n";
@@ -1375,6 +1450,24 @@ mod tests {
             "the header comment walks to the first initialiser"
         );
         assert_eq!(Moved::of(script, 3).line, 8);
+        let extends = Moved::of(script, 2);
+        assert_eq!(
+            extends.line, 8,
+            "`extends` never runs and walks like a blank line"
+        );
+        assert!(
+            extends
+                .note()
+                .is_some_and(|note| note.contains("is a declaration and never runs")),
+            "{:?}",
+            extends.note()
+        );
+        assert_eq!(Moved::of(script, 6).line, 8, "`const` never runs either");
+        assert_eq!(
+            Moved::of(script, 11).line,
+            12,
+            "an @export var with an initialiser never fires; the static var after it does"
+        );
         assert_eq!(
             Moved::of(script, 13).line,
             18,
@@ -1418,7 +1511,11 @@ mod tests {
             6,
             "a blank walks past the inline body to the first initialiser"
         );
-        assert_eq!(Moved::of(inline, 5).line, 5, "a class line is left alone");
+        assert_eq!(
+            Moved::of(inline, 5).line,
+            6,
+            "a class line is a declaration and walks to the first initialiser under it"
+        );
 
         let property =
             "extends Node\n\nvar hp: int:\n\tset(v):\n\t\thp = v\n\tget:\n\t\treturn hp\n";

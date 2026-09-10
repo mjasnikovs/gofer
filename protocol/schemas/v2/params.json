@@ -4283,6 +4283,12 @@
                             ]
                         },
                         "required": true
+                    },
+                    {
+                        "name": "note",
+                        "kind": "text",
+                        "required": false,
+                        "note": "Why the line answered is not the one asked about: a header, a blank line or a declaration never runs, and the breakpoint would land on the next line that does."
                     }
                 ]
             },

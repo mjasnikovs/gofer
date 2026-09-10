@@ -1861,6 +1861,12 @@ fn logs_domain(params: Value) -> Result<Value, ToolFailure> {
         "read",
         params,
     ))?;
+    // `editor` is the editor process, both its streams; `editorError` is its stderr alone. Every
+    // warning and error the engine prints is on stderr, and a live turn that asked for warnings on
+    // `editor` three ways was answered three empty pages and reported none had happened.
+    if query.source == Some(godot_session::LogSource::Editor) {
+        query.source = None;
+    }
     let wanted = query
         .limit
         .unwrap_or(godot_session::DEFAULT_LOG_PAGE)
@@ -3293,6 +3299,24 @@ mod tests {
         assert!(
             narrowed["entries"].as_array().is_some_and(Vec::is_empty),
             "a search that named a severity keeps it: {narrowed}"
+        );
+
+        godot_session::append_log(
+            godot_session::LogSource::EditorError,
+            "WARNING: Live test reached five ticks",
+        );
+        let on_the_editor = logs_domain(json!({"minSeverity": "warning", "source": "editor"}))
+            .expect("the warnings of the editor");
+        assert_eq!(
+            on_the_editor["entries"][0]["message"], "WARNING: Live test reached five ticks",
+            "`editor` is the whole editor process, and its warnings are on stderr: {on_the_editor}"
+        );
+        let on_stderr = logs_domain(json!({"minSeverity": "info", "source": "editorError"}))
+            .expect("stderr alone");
+        assert_eq!(
+            on_stderr["entries"].as_array().map(Vec::len),
+            Some(1),
+            "`editorError` is still stderr alone: {on_stderr}"
         );
         godot_session::clear_logs();
     }
