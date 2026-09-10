@@ -920,6 +920,23 @@ pub fn reparse_open_documents() {
     }
 }
 
+/// The text of a script as the language server holds it, or as the disk does when it is not open.
+///
+/// For the sentence that goes with an empty answer: a position that named nothing is worth a line
+/// saying what it did name, and only the text can say.
+pub fn document_text(path: &str) -> Option<String> {
+    let (client, workspace) = connection().ok()?;
+    if let Ok(uri) = godot_lsp::file_uri(&workspace, path)
+        && let Some((_, text)) = client
+            .open_documents()
+            .into_iter()
+            .find(|(held, _)| *held == uri)
+    {
+        return Some(text);
+    }
+    std::fs::read_to_string(workspace.root().join(path)).ok()
+}
+
 /// The language-server client already connected for the bound session, or nothing.
 ///
 /// Unlike [`connection`], this never opens one: it answers what is, for a caller whose work is

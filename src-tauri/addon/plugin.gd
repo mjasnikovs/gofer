@@ -3020,7 +3020,11 @@ func _node_create_nodes(params: Dictionary) -> Dictionary:
             return Params.error(
                 "invalid_node_type", UNCREATABLE_TYPES[node_type], {"type": node_type}
             )
-        var parent: Node = pending.get(parent_path, null)
+        # One spelling for a parent this call is still to create: `.`, `Enemy`, `Main/Enemy` and
+        # `/Main/Enemy` all name the same node, and a live turn was refused for writing the
+        # second under a first entry whose parent was `.` — the way the saved scene spells them.
+        var parent_key := _root_relative(parent_path)
+        var parent: Node = pending.get(parent_key, null)
         if parent == null:
             parent = _find_node(parent_path)
         if parent == null:
@@ -3034,7 +3038,7 @@ func _node_create_nodes(params: Dictionary) -> Dictionary:
             )
         node.name = node_name
         plan.append([parent, node, int(spec.get("index", -1)), node_type])
-        pending[parent_path + "/" + node_name] = node
+        pending[node_name if parent_key.is_empty() else parent_key + "/" + node_name] = node
 
     var undo := _begin_action("Create %d nodes" % plan.size())
     for step in plan:
@@ -4370,6 +4374,18 @@ func _find_node(raw: String) -> Node:
     if relative.begins_with(root.name + "/"):
         relative = relative.substr(root.name.length() + 1)
     return root.get_node_or_null(NodePath(relative))
+
+## A path the way `_find_node` reads it: relative to the edited root, and empty for the root.
+func _root_relative(raw: String) -> String:
+    var root := _edited_root()
+    var path := raw.strip_edges()
+    if root == null or path == "." or path == "" or path == root.name or path == "/" + root.name:
+        return ""
+    if path.begins_with("/"):
+        path = path.substr(1)
+    if path.begins_with(root.name + "/"):
+        path = path.substr(root.name.length() + 1)
+    return path
 
 func _node_path(node: Node) -> String:
     var root := _edited_root()

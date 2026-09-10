@@ -283,6 +283,19 @@ fn every_node_command_answers_from_the_edited_tree() {
         "Area2D"
     );
 
+    let nested = session.mutate(
+        "node.create_nodes",
+        json!({"nodes": [
+            {"parent": ".", "name": "Nest", "type": "Node2D"},
+            {"parent": "Nest", "name": "Leaf", "type": "Node2D"}
+        ]}),
+    );
+    assert_eq!(
+        nested["nodes"],
+        json!(["/Stage/Nest", "/Stage/Nest/Leaf"]),
+        "a parent this call creates is found under the spelling the saved scene uses: {nested}"
+    );
+
     session.mutate(
         "node.create",
         json!({"parent": "/Stage/Pickup", "name": "Shape", "type": "CollisionShape2D"}),

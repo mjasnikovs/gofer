@@ -3487,6 +3487,12 @@
                         "kind": "object",
                         "required": false,
                         "note": "Null where the server has nothing to say about that position."
+                    },
+                    {
+                        "name": "note",
+                        "kind": "text",
+                        "required": false,
+                        "note": "Present only when the server answered nothing: what is under the cursor, and where the names on that line start."
                     }
                 ]
             },
@@ -3648,6 +3654,12 @@
                             ]
                         },
                         "required": true
+                    },
+                    {
+                        "name": "note",
+                        "kind": "text",
+                        "required": false,
+                        "note": "Present only when the server answered nothing: what is under the cursor, and where the names on that line start."
                     }
                 ]
             },
@@ -3709,6 +3721,12 @@
                             ]
                         },
                         "required": true
+                    },
+                    {
+                        "name": "note",
+                        "kind": "text",
+                        "required": false,
+                        "note": "Present only when the server answered nothing: what is under the cursor, and where the names on that line start."
                     }
                 ]
             },
@@ -3775,6 +3793,12 @@
                             ]
                         },
                         "required": true
+                    },
+                    {
+                        "name": "note",
+                        "kind": "text",
+                        "required": false,
+                        "note": "Present only when the server answered nothing: what is under the cursor, and where the names on that line start."
                     }
                 ]
             },
@@ -3824,6 +3848,12 @@
                         },
                         "required": true,
                         "note": "The language server’s own payload, passed through unchanged."
+                    },
+                    {
+                        "name": "note",
+                        "kind": "text",
+                        "required": false,
+                        "note": "Present only when the server answered nothing: what is under the cursor, and where the names on that line start."
                     }
                 ]
             },

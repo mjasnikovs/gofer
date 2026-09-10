@@ -8,7 +8,7 @@
 //!
 //! Every field is read by serde and by nothing else, which is what the allow above is for.
 
-// GENERATED-BEGIN results sha256:6f15a6b11d0eff52
+// GENERATED-BEGIN results sha256:22c3b533a9e2a043
 /// One node of a scene tree, and the nodes under it.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -884,6 +884,8 @@ pub struct GodotScriptHoverResult {
     pub op: String,
     #[serde(default)]
     pub hover: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -907,6 +909,8 @@ pub struct GodotScriptSignatureHelpResult {
 pub struct GodotScriptDefinitionResult {
     pub op: String,
     pub locations: Vec<GodotScriptDefinitionResultLocations>,
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -914,6 +918,8 @@ pub struct GodotScriptDefinitionResult {
 pub struct GodotScriptDeclarationResult {
     pub op: String,
     pub locations: Vec<GodotScriptDeclarationResultLocations>,
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -921,6 +927,8 @@ pub struct GodotScriptDeclarationResult {
 pub struct GodotScriptReferencesResult {
     pub op: String,
     pub locations: Vec<GodotScriptReferencesResultLocations>,
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -928,6 +936,8 @@ pub struct GodotScriptReferencesResult {
 pub struct GodotScriptHighlightsResult {
     pub op: String,
     pub highlights: Vec<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]

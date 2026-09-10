@@ -1783,15 +1783,129 @@ fn script_domain<R: Runtime>(
             Ok(json!({"files": files}))
         }
         _ => {
+            let asked = params.clone();
             let request: ScriptRequest = from_tagged_params(op, params)?;
             let answered = to_value(script::call(request)?);
             Ok(if op == "completion" {
                 a_completion_the_model_can_read(answered)
+            } else if answer_names_nothing(op, &answered) {
+                with_where_the_cursor_was(answered, &asked, script::document_text)
             } else {
                 answered
             })
         }
     }
+}
+
+/// Whether a position-taking answer came back empty: no hover, no location, no highlight.
+fn answer_names_nothing(op: &str, answered: &Value) -> bool {
+    match op {
+        "hover" => answered.get("hover").is_none_or(|hover| {
+            hover.is_null() || hover["contents"].as_array().is_some_and(Vec::is_empty)
+        }),
+        "definition" | "declaration" | "references" => {
+            answered["locations"].as_array().is_some_and(Vec::is_empty)
+        }
+        "highlights" => answered["highlights"].as_array().is_some_and(Vec::is_empty),
+        _ => false,
+    }
+}
+
+/// An empty answer with a sentence about the position that earned it.
+///
+/// Four hovers on a blank line, two declarations on a `(` and a space, five rename probes: every
+/// one answered nothing and said nothing, and the model guessed the next column. The names on
+/// the line and where each starts is what lets it aim once.
+fn with_where_the_cursor_was(
+    mut answered: Value,
+    asked: &Value,
+    text_of: impl Fn(&str) -> Option<String>,
+) -> Value {
+    let Some(path) = asked["path"].as_str() else {
+        return answered;
+    };
+    let (Some(line), Some(character)) = (
+        asked["position"]["line"].as_u64(),
+        asked["position"]["character"].as_u64(),
+    ) else {
+        return answered;
+    };
+    let Some(text) = text_of(path) else {
+        return answered;
+    };
+    let note = where_the_cursor_is(&text, line, character);
+    if let Some(fields) = answered.as_object_mut() {
+        fields.insert("note".to_owned(), Value::String(note));
+    }
+    answered
+}
+
+fn where_the_cursor_is(text: &str, line: u64, character: u64) -> String {
+    let Some(row) = usize::try_from(line)
+        .ok()
+        .and_then(|index| text.lines().nth(index))
+    else {
+        return format!(
+            "Line {line} (0-based) is past the end of the file, which has {} lines.",
+            text.lines().count()
+        );
+    };
+    let names: Vec<(usize, &str)> = identifiers_on(row);
+    let under = row
+        .chars()
+        .nth(usize::try_from(character).unwrap_or(usize::MAX))
+        .map_or_else(
+            || "past the end of the line".to_owned(),
+            |found| {
+                names
+                    .iter()
+                    .find(|(start, name)| {
+                        let column = usize::try_from(character).unwrap_or(usize::MAX);
+                        column >= *start && column < start + name.len()
+                    })
+                    .map_or_else(
+                        || format!("'{found}', which is not part of a name"),
+                        |(_, name)| format!("inside `{name}`"),
+                    )
+            },
+        );
+    let where_names_start = if names.is_empty() {
+        "no names on that line".to_owned()
+    } else {
+        format!(
+            "the names on that line start at {}",
+            names
+                .iter()
+                .map(|(start, name)| format!("{name} {start}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    format!(
+        "Line {line} char {character} (0-based) is {under}; {where_names_start}. Positions count \
+         from 0, one less than the numbers script.open shows."
+    )
+}
+
+/// Every identifier on one line with the 0-based column it starts at.
+fn identifiers_on(row: &str) -> Vec<(usize, &str)> {
+    let mut found = Vec::new();
+    let mut start = None;
+    for (index, ch) in row.char_indices() {
+        let continues = ch.is_alphanumeric() || ch == '_';
+        match (start, continues) {
+            (None, true) if !ch.is_ascii_digit() => start = Some(index),
+            (Some(from), false) => {
+                found.push((from, &row[from..index]));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(from) = start {
+        found.push((from, &row[from..]));
+    }
+    found
 }
 
 /// Completion items as the model can use them: members first, and no `data`.
@@ -4526,5 +4640,71 @@ mod completion_trim_tests {
             json!({"op": "hover"}),
             "an answer without items is left alone"
         );
+    }
+}
+
+#[cfg(test)]
+mod cursor_note_tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_answer_says_what_was_under_the_cursor_and_where_the_names_start() {
+        let text = "extends Node2D\n\n\tprint(\"%s %d\" % [TICK_MESSAGE, ticks])\n";
+        let asked = json!({"path": "scripts/main.gd", "position": {"line": 2, "character": 6}});
+        let noted =
+            with_where_the_cursor_was(json!({"op": "locations", "locations": []}), &asked, |_| {
+                Some(text.to_owned())
+            });
+        let note = noted["note"].as_str().expect("a note");
+        assert!(note.starts_with("Line 2 char 6 (0-based) is '(', which is not part of a name; the names on that line start at print 1, s 9, d 12, TICK_MESSAGE 18, ticks 32"), "{note}");
+
+        let inside = with_where_the_cursor_was(
+            json!({"op": "locations", "locations": []}),
+            &json!({"path": "scripts/main.gd", "position": {"line": 2, "character": 20}}),
+            |_| Some(text.to_owned()),
+        );
+        assert!(
+            inside["note"]
+                .as_str()
+                .expect("a note")
+                .contains("is inside `TICK_MESSAGE`"),
+            "{inside}"
+        );
+
+        let beyond = with_where_the_cursor_was(
+            json!({"op": "hover", "hover": null}),
+            &json!({"path": "scripts/main.gd", "position": {"line": 9, "character": 0}}),
+            |_| Some(text.to_owned()),
+        );
+        assert!(
+            beyond["note"]
+                .as_str()
+                .expect("a note")
+                .contains("past the end of the file, which has 3 lines"),
+            "{beyond}"
+        );
+
+        let unread =
+            with_where_the_cursor_was(json!({"op": "hover", "hover": null}), &asked, |_| None);
+        assert!(unread.get("note").is_none(), "no text, no note: {unread}");
+
+        assert!(answer_names_nothing(
+            "hover",
+            &json!({"hover": {"contents": []}})
+        ));
+        assert!(answer_names_nothing("hover", &json!({"hover": null})));
+        assert!(!answer_names_nothing(
+            "hover",
+            &json!({"hover": {"contents": {"kind": "markdown", "value": "x"}}})
+        ));
+        assert!(answer_names_nothing(
+            "declaration",
+            &json!({"locations": []})
+        ));
+        assert!(!answer_names_nothing(
+            "references",
+            &json!({"locations": [{"path": "a"}]})
+        ));
+        assert!(!answer_names_nothing("completion", &json!({"items": []})));
     }
 }

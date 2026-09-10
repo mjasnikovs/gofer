@@ -52,9 +52,10 @@ export function withoutPictures(tool) {
                     {
                         type: 'text',
                         text:
-                            `[a ${String(part.mimeType ?? 'image')} you cannot see: this model `
-                            + 'takes text only. Ask the user about it, or capture the game and '
-                            + 'describe what you need from the answer.]'
+                            `[an ${String(part.mimeType ?? 'image')} you cannot see: this model `
+                            + 'takes text only. runtime.get_tree, runtime.inspect_node and '
+                            + 'logs.read say what the game is doing in text; if the picture '
+                            + 'itself matters, ask the user to look at it.]'
                     }
                 :   part
             )
