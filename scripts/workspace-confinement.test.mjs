@@ -30,6 +30,23 @@ function fakeTool(name) {
 
 const asRun = command => ({command, timeout: 120})
 
+test('lets a tool that names no path search the whole workspace', async context => {
+    const current = await workspace()
+    context.after(current.remove)
+
+    assert.deepEqual(
+        await confineTool(fakeTool('grep'), current.path).execute('1', {pattern: 'x'}),
+        {
+            pattern: 'x',
+            path: '.'
+        }
+    )
+    await assert.rejects(
+        confineTool(fakeTool('read'), current.path).execute('2', {}),
+        /non-empty strings/u
+    )
+})
+
 test('allows existing and new paths that remain in the workspace', async context => {
     const current = await workspace()
     context.after(current.remove)
@@ -728,4 +745,13 @@ test('lets nothing climb out of the temporary directory it allowed', async conte
         [`cat ${windows}/../secrets.txt`, windows]
     ])
         assert.throws(() => validateBashCommand(command, root), /workspace/iu, command)
+})
+
+test('a searching tool that names nothing at all searches the whole workspace', async context => {
+    const current = await workspace()
+    context.after(current.remove)
+    const tool = confineTool(fakeTool('grep'), current.path)
+
+    for (const path of [undefined, null, '', 'res://'])
+        assert.deepEqual(await tool.execute('1', {pattern: 'x', path}), {pattern: 'x', path: '.'})
 })

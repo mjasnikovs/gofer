@@ -169,7 +169,7 @@ function hangingModels() {
     }
 }
 
-test('the sub-agent holds read and bash, and is refused anything else', async context => {
+test('the sub-agent holds read, grep and bash, and is refused anything else', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
 
@@ -179,7 +179,7 @@ test('the sub-agent holds read and bash, and is refused anything else', async co
         tools.map(tool => tool.name),
         SUBAGENT_TOOL_NAMES
     )
-    assert.deepEqual(SUBAGENT_TOOL_NAMES, ['read', 'bash'])
+    assert.deepEqual(SUBAGENT_TOOL_NAMES, ['read', 'grep', 'bash'])
 
     assert.throws(
         () => assertChildTools([{name: 'read'}, {name: 'write'}, {name: 'edit'}]),
@@ -203,7 +203,7 @@ test('widening what a child MAY hold does not widen what the subagent tool DOES 
     context.after(() => env.cleanup())
     assert.deepEqual(
         tools.map(tool => tool.name),
-        ['read', 'bash']
+        ['read', 'grep', 'bash']
     )
 
     assert.ok(!CHILD_TOOL_NAMES.includes('web_fetch'))
@@ -687,9 +687,10 @@ test('the step list keeps the tool calls, and never the words between them', () 
     assert.equal(status.line, 'web_search: godot 4 signal')
 })
 
-test('every tool a child may hold is named, not just the two that were', () => {
+test('every tool a child may hold is named, not just the first few that were', () => {
     const ARGS = {
         read: {path: 'a.gd'},
+        grep: {pattern: 'func hit'},
         bash: {command: 'ls'},
         godot: {ops: [{op: 'docs_search.ask'}, {op: 'script.workspace_symbols'}]},
         web_search: {query: 'godot 4 signals'},
@@ -1203,7 +1204,10 @@ test('the three copies of the shipped bounds say the same numbers', async () => 
 })
 
 test('the child is told about every tool it holds, and about none it does not', () => {
-    assert.match(childSystemPrompt(), /You can read files and run shell commands\./u)
+    assert.match(
+        childSystemPrompt(),
+        /You can read files, search file contents with grep and run shell commands\./u
+    )
     assert.doesNotMatch(childSystemPrompt(), /docs_search|web_search/u)
 
     const researching = childSystemPrompt(['read', 'bash', 'godot'])
@@ -1271,4 +1275,12 @@ test('a child with no tools is told so in a sentence, not "You can nothing"', ()
     assert.doesNotMatch(toolless, /You can nothing/u)
     assert.doesNotMatch(toolless, /no write tool and no edit tool/u)
     assert.match(toolless, /You have no tools\./u)
+})
+
+test('every tool a child may hold is named in the sentence that lists them', () => {
+    for (const name of CHILD_TOOL_NAMES) {
+        assert.match(childSystemPrompt([name]), /You can [a-z]/u, `${name} contributes no sentence`)
+        assert.doesNotMatch(childSystemPrompt([name]), /You can \./u)
+    }
+    assert.match(childSystemPrompt(SUBAGENT_TOOL_NAMES), /search file contents/u)
 })

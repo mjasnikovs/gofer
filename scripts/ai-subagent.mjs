@@ -18,15 +18,16 @@ import {ASK_USER_TOOL_NAME, createAskUserTool} from './ai-ask.mjs'
 import {createProgressGuard} from './progress-guard.mjs'
 import {toolStepLine} from './tool-target.mjs'
 import {confineTool} from './workspace-confinement.mjs'
+import {createGrepTool} from './ai-grep.mjs'
 import {withoutEmptyToolCalls} from './ai-transcript.mjs'
 
 export const SUBAGENT_TOOL_NAME = 'subagent'
 
-export const CHILD_TOOL_NAMES = ['read', 'bash', 'godot', 'web_search', 'ask_user']
+export const CHILD_TOOL_NAMES = ['read', 'grep', 'bash', 'godot', 'web_search', 'ask_user']
 
-export const SUBAGENT_TOOL_NAMES = ['read', 'bash']
+export const SUBAGENT_TOOL_NAMES = ['read', 'grep', 'bash']
 
-export const DESIGN_TOOL_NAMES = ['read', 'bash', 'ask_user']
+export const DESIGN_TOOL_NAMES = ['read', 'grep', 'bash', 'ask_user']
 
 export const SUBAGENT_SETTINGS_DEFAULTS = {
     commandTimeoutMinutes: 5,
@@ -66,6 +67,7 @@ const MAX_REPORTED_STEPS = 12
 /// instead of the one that was sitting in its tool list.
 const CHILD_TOOL_SENTENCES = {
     read: 'read files',
+    grep: 'search file contents with grep',
     bash: 'run shell commands',
     godot:
         'search the Godot documentation with the godot tool, as docs_search.search, and ask the '
@@ -113,7 +115,7 @@ export function childSystemPrompt(toolNames = SUBAGENT_TOOL_NAMES) {
 
 const SUBAGENT_DESCRIPTION =
     'Delegate a bounded question to an isolated read-only agent and get back only its conclusion. '
-    + 'USE THIS FIRST, instead of running your own bash grep, find, ls or cat, whenever a question '
+    + 'USE THIS FIRST, instead of grepping and reading around yourself, whenever a question '
     + 'spans more than one file or means searching for code you have not already located. The '
     + 'material it reads never enters this conversation: doing the search yourself fills your '
     + 'context with raw output you will carry for the rest of the turn, where the sub-agent hands '
@@ -145,7 +147,7 @@ export function subagentFailure(reason, cause) {
     return (
         `The sub-agent did not answer: ${reason}. Nothing it read reached this conversation, so `
         + `treat the question as unanswered — ask again with a narrower, more specific question, or `
-        + `do the reading yourself with read and bash.${FAILURE_CODAS[cause] ?? ''}`
+        + `do the reading yourself with grep and read.${FAILURE_CODAS[cause] ?? ''}`
     )
 }
 
@@ -234,7 +236,11 @@ function underCommandClock(tool, {timeoutMs, timers}) {
     }
 }
 
-const CONFINED_CHILD_TOOLS = {read: () => withLineNumbers(createReadTool()), bash: createBashTool}
+const CONFINED_CHILD_TOOLS = {
+    read: () => withLineNumbers(createReadTool()),
+    grep: createGrepTool,
+    bash: createBashTool
+}
 
 /// The script operations that only ask a question. A child holds these and nothing else of that
 /// domain, because a research agent that could call `edit` or `save` would no longer be one.

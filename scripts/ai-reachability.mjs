@@ -20,6 +20,7 @@ const WORKSPACE_PROBES = [
         params: {path: PROBE_FILE, edits: [{oldText: PROBE_WRITTEN, newText: PROBE_EDITED}]}
     },
     {name: 'read', params: {path: PROBE_FILE}, answersWith: PROBE_EDITED},
+    {name: 'grep', params: {pattern: PROBE_EDITED, path: PROBE_FILE}, answersWith: PROBE_EDITED},
     {name: 'bash', params: {command: `cat ${PROBE_FILE}`}, answersWith: PROBE_EDITED}
 ]
 
@@ -105,7 +106,7 @@ async function probeLocalTool(tool, probe, signal, timeoutMs) {
 async function seedProbeFile(tools, workspacePath) {
     const held = new Set(tools.map(tool => tool.name))
     if (held.has('write')) return
-    if (!held.has('read') && !held.has('bash')) return
+    if (!held.has('read') && !held.has('bash') && !held.has('grep')) return
     await writeFile(join(workspacePath, PROBE_FILE), PROBE_EDITED).catch(() => undefined)
 }
 

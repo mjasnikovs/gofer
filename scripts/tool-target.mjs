@@ -31,6 +31,10 @@ export function toolTarget(name, args) {
     }
     if (name === 'subagent') return flatten(given.prompt)
     if (name === 'remember') return flatten(given.content)
+    if (name === 'grep') {
+        if (!given.pattern) return given.path
+        return given.path ? `${given.pattern} · ${given.path}` : given.pattern
+    }
     return given.path
 }
 

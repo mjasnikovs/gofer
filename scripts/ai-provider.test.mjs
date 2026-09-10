@@ -90,7 +90,7 @@ test('streams a Pi AI completion through the configured local provider', async c
         assert.equal(request.body.messages.at(-1).role, 'user')
         assert.deepEqual(
             request.body.tools.map(tool => tool.function.name),
-            ['read', 'write', 'edit', 'bash', 'subagent', 'web_search', 'web_fetch']
+            ['read', 'grep', 'write', 'edit', 'bash', 'subagent', 'web_search', 'web_fetch']
         )
     } finally {
         mock.server.close()

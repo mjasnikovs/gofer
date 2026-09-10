@@ -56,6 +56,10 @@ function spellingsOf(token) {
 
 const WRITING_TOOLS = ['write', 'edit']
 
+/// Tools whose path is optional, because their subject is the project rather than a file.
+/// Every other tool is refused without one: a read with no path is a malformed call.
+const SEARCHING_TOOLS = ['grep']
+
 const EDITOR_OWNED_IN_SHELL = /\.(?:tscn|scn)(?![\w-])|(?:^|[\s"'/=])project\.godot(?![\w-])/u
 
 const SLEEPS = /(?:^|[;&|]\s*)sleep(?:\s|$)/u
@@ -96,6 +100,16 @@ function withoutASearchGlob(command) {
 function isHandedToAWriter(command) {
     const [, ...downstream] = command.split(COMMAND_BREAK)
     return downstream.filter(part => part.trim() !== '').some(part => !READS_A_PIPE.test(part))
+}
+
+/// Any missing path, not only an absent one: a model spells an omitted optional field as null and
+/// as '' too, and `res://` alone is the project root written the way the editor writes it.
+function searchedPath(toolName, path) {
+    const named = worktreePath(path)
+    if (named === '' || named === undefined || named === null) {
+        return SEARCHING_TOOLS.includes(toolName) ? '.' : named
+    }
+    return named
 }
 
 function refuseEditorOwnedWrite(toolName, path) {
@@ -304,7 +318,7 @@ export function confineTool(tool, workspacePath, frozen = []) {
                 refuseFrozenShellWrite(params.command, frozen)
                 return tool.execute(id, withADeadline(params), signal, onUpdate, context)
             }
-            const resolved = {...params, path: worktreePath(params.path)}
+            const resolved = {...params, path: searchedPath(tool.name, params.path)}
             const named = await validateToolPath(workspacePath, resolved.path)
             refuseEditorOwnedWrite(tool.name, named)
             refuseFrozenWrite(tool.name, named, frozen)

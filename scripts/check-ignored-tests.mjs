@@ -23,4 +23,28 @@ for (const path of tracked.stdout.split('\0').filter(Boolean)) {
     }
 }
 
+// A node --test lane names its files by hand, so a new .test.mjs that nobody lists runs nowhere and
+// says nothing. Untracked files count: the gap should close when the file is written, not when it is
+// committed. Vitest and Playwright find their own by glob and need no listing.
+const listed = spawnSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], {
+    encoding: 'utf8'
+})
+if (listed.status !== 0) throw new Error(listed.stderr || 'Could not list files')
+
+const scripts = JSON.parse(await readFile('package.json', 'utf8')).scripts
+const named = new Set(
+    Object.values(scripts).flatMap(line => line.match(/[\w./-]+\.test\.mjs/gu) ?? [])
+)
+
+for (const path of listed.stdout.split('\0').filter(one => one.endsWith('.test.mjs'))) {
+    if (named.has(path)) continue
+    failures.push(`${path} is named by no package.json script, so nothing ever runs it`)
+}
+
+for (const path of named) {
+    if (!listed.stdout.split('\0').includes(path)) {
+        failures.push(`${path} is named by a package.json script but does not exist`)
+    }
+}
+
 if (failures.length > 0) throw new Error(failures.join('\n'))

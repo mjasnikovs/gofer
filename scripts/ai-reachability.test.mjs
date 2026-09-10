@@ -75,7 +75,7 @@ test('the workspace tools are proven against the workspace, not assumed', async 
             emit: () => undefined
         }),
         error => {
-            for (const name of ['read', 'write', 'edit', 'bash'])
+            for (const name of ['read', 'grep', 'write', 'edit', 'bash'])
                 assert.match(error.message, new RegExp(`- ${name}: `, 'u'))
             return true
         }
@@ -148,6 +148,23 @@ test('a workspace tool that answers without doing its work is caught by the next
         /- read: it answered without the text the probe wrote: expected reachable, got/u
     )
     assert.deepEqual(await readdir(workspace.path), [])
+})
+
+test('a grep that answers without finding the probe bytes is caught by name', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const pretending = {
+        name: 'grep',
+        execute: () => Promise.resolve({content: [{type: 'text', text: 'No matches found'}]})
+    }
+    const real = createAgentTools(workspace.path, undefined, undefined).tools.filter(tool =>
+        ['write', 'edit'].includes(tool.name)
+    )
+
+    await assert.rejects(
+        probeTools({tools: [...real, pretending], workspacePath: workspace.path}),
+        /- grep: it answered without the text the probe wrote/u
+    )
 })
 
 test('remembering is proved by the backend routing the name, not by the tool saying so', async () => {
