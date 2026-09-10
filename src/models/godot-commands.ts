@@ -7,7 +7,7 @@ export type GodotCommandSpec<Params extends GodotParams, Result extends GodotRes
     result: Result
 }>
 
-// GENERATED-BEGIN command-names sha256:657b7a18338343ec
+// GENERATED-BEGIN command-names sha256:1c2f0968612c6ace
 export type GodotCommandName =
     | 'session.get_state'
     | 'session.cancel'
@@ -101,6 +101,8 @@ export type GodotSetting = Readonly<{
     name: string
     value: GodotValue
     restartRequired?: boolean | undefined
+    means?: string | undefined
+    choices?: readonly string[] | undefined
 }>
 
 /** One property of a node in the edited scene, as the inspector would show it. */
@@ -294,7 +296,13 @@ export interface GodotCommandMap {
     >
     readonly 'project.get_setting': GodotCommandSpec<
         Readonly<{name: string}>,
-        Readonly<{name: string; value: GodotValue; restartRequired: boolean}>
+        Readonly<{
+            name: string
+            value: GodotValue
+            restartRequired: boolean
+            means?: string | undefined
+            choices?: readonly string[] | undefined
+        }>
     >
     readonly 'project.set_setting': GodotCommandSpec<
         Readonly<{name: string; value: GodotValue}>,
