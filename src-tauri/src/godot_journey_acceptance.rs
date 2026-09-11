@@ -1096,3 +1096,72 @@ fn a_session_nobody_subscribed_to_still_gets_the_rules_the_user_chose() {
         );
     }
 }
+
+/// A handler a script declares is connectable even when the node's instance was built while the
+/// script did not compile.
+///
+/// spawn-loop-5, live: `script.edit` wrote `_on_fire_timeout` into the player's script beside a
+/// `preload` of a scene the turn had not created yet, so the script did not compile; the turn then
+/// created that scene, reopened the main one — whose Player was instanced from the broken script —
+/// and connected a Timer's `timeout` to the handler. The addon re-read the script, which compiled
+/// now, and `has_method` on the node still said no: the node was holding the placeholder instance
+/// a script that fails to compile leaves behind, and a reload does not rebuild it. The refusal
+/// blamed an older instance and sent the turn to save and reload the scene. The compiled script's
+/// own method list is the fact that matters for a connection, and it is what decides now.
+#[test]
+fn a_handler_added_through_script_edit_is_connectable_after_the_scene_is_reopened() {
+    let journey = Journey::start();
+    let _worktree = journey.new_task();
+    journey.start_session();
+    journey.call("godot_scene", "open", json!({"path": SCENE_PATH}));
+    journey.call("godot_script", "open", json!({"paths": [PROBE_PATH]}));
+    let edited = journey.call(
+        "godot_script",
+        "edit",
+        json!({"files": [{"path": PROBE_PATH, "edits": [{
+            "oldText": "func _tick(amount: int) -> void:\n\tcounter += amount\n",
+            "newText": "const BULLET_SCENE := preload(\"res://bullet.tscn\")\n\n\nfunc _tick(amount: int) -> void:\n\tcounter += amount\n\n\nfunc _on_fire_timeout() -> void:\n\tget_parent().add_child(BULLET_SCENE.instantiate())\n",
+        }]}]}),
+    );
+    // The language server reports nothing for a preload of a file that is not there; the editor's
+    // own compile of the script is what fails, and it fails silently as far as the router can see.
+    assert_eq!(edited["files"][0]["published"], true, "{edited}");
+
+    journey.call(
+        "godot_scene",
+        "create",
+        json!({"path": "res://bullet.tscn", "rootType": "Node2D", "rootName": "Bullet"}),
+    );
+    journey.call("godot_scene", "save", json!({}));
+    journey.call("godot_scene", "open", json!({"path": SCENE_PATH}));
+    journey.call(
+        "godot_node",
+        "create_nodes",
+        json!({"nodes": [{"parent": SCENE_ROOT, "name": "FireTimer", "type": "Timer"}]}),
+    );
+    let connected = journey.try_call(
+        "godot_node",
+        Journey::one(
+            "connect_signal",
+            json!({
+                "node": format!("{SCENE_ROOT}/FireTimer"),
+                "signal": "timeout",
+                "method": "_on_fire_timeout",
+                "target": SCENE_ROOT,
+            }),
+        ),
+    );
+    assert!(
+        connected.is_ok(),
+        "a handler the script declares must be connectable: {} {}\n--- session output ---\n{}",
+        connected
+            .as_ref()
+            .err()
+            .map_or("", |failure| failure.code.as_str()),
+        connected
+            .as_ref()
+            .err()
+            .map_or("", |failure| failure.message.as_str()),
+        session_output()
+    );
+}

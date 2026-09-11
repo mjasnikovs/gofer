@@ -309,15 +309,6 @@ func _test_readback(params: GDScript, failures: Array[String]) -> void:
     if nothing.contains("waiting behind"):
         failures.append("a call that started nothing must not claim a launch is queued")
 
-    var stale := str(params.call("a_method_the_script_has_and_the_node_has_not", "_on_body_entered", ["_on_body_entered", "_ready"]))
-    for named in ["_on_body_entered", "older instance", "scene.save", "scene.reload"]:
-        if not stale.contains(named):
-            failures.append("a stale script instance must name %s" % named)
-    if not str(params.call("a_method_the_script_has_and_the_node_has_not", "_on_area_entered", ["_on_body_entered", "_ready"])).is_empty():
-        failures.append("a method the script does not declare is not a stale instance")
-    if not str(params.call("a_method_the_script_has_and_the_node_has_not", "", ["_ready"])).is_empty():
-        failures.append("no method named is not a stale instance")
-
     var main_again := str(params.call("also_the_main_scene", "res://main.tscn", "res://main.tscn"))
     for named in ["main scene", "application/run/main_scene", "project.set_setting"]:
         if not main_again.contains(named):

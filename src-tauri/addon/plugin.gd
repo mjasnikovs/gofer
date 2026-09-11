@@ -4030,7 +4030,7 @@ func _node_connect_signal(params: Dictionary) -> Dictionary:
     var recompiled := true
     if not target.has_method(method):
         recompiled = _reread_the_script_on(target)
-    if not target.has_method(method):
+    if not target.has_method(method) and not _the_script_declares(target, method):
         return {
             "_gofer_error": {
                 "code": "method_not_found",
@@ -4041,7 +4041,7 @@ func _node_connect_signal(params: Dictionary) -> Dictionary:
                         method,
                         signal_name,
                         (
-                            Params.where_a_method_would_be(target, method) if recompiled
+                            Params.where_a_method_would_be(target) if recompiled
                             else Params.why_the_editor_cannot_see_it(target, _autoloads_added_here)
                         )
                     ]
@@ -4312,6 +4312,23 @@ func _require_current_scene(scene: String) -> Dictionary:
             }
         }
     return {}
+
+## Whether the node's compiled script declares the method, whatever the node's instance says.
+##
+## A node instanced while its script did not compile — a `preload` of a scene written a call
+## later, measured live — carries a placeholder instance, and a reload that compiles now does not
+## rebuild it: `has_method` goes on answering no for a method the script plainly has. A connection
+## is stored by name and resolved when the game runs the compiled script, so the script's own
+## method list is the fact a connection turns on.
+func _the_script_declares(target: Node, method: String) -> bool:
+    var script: Variant = target.get_script()
+    if not (script is Script):
+        return false
+    for entry in (script as Script).get_script_method_list():
+        if str(entry.get("name", "")) == method:
+            return true
+    return false
+
 
 ## Re-reads a node's script from disk, so a method written a moment ago is one it has.
 ##

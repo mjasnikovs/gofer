@@ -565,33 +565,6 @@ static func after_a_dialog(launch_is_waiting: bool) -> String:
         + " and then send this again."
     )
 
-## What to say when the script has the method and the node does not, which reads as a contradiction.
-##
-## `node.connect_signal` refuses on `target.has_method(method)` — the **node's** view — and then
-## lists what the script declares, which is the **resource's** view. When the two disagree the
-## message says both in consecutive clauses and means neither:
-##
-## ```text
-## method_not_found: /Coin has no method _on_body_entered to receive body_entered.
-## Its script declares _on_body_entered.
-## ```
-##
-## Watched once, live, on a local Qwen3.8 turn writing a coin scene. Once is below the bar for a
-## repair — a repair guesses at what the caller meant — and a sentence that contradicts itself is
-## wrong at any count, so this is not a repair.
-##
-## What is actually true: the file and the script resource are up to date, and the node in the
-## edited scene is still holding an older instance of it. The turn found the way out for itself on
-## the next two calls — `godot_scene save`, then `godot_scene reload` — and that is what this says.
-static func a_method_the_script_has_and_the_node_has_not(method: String, named: Array) -> String:
-    if method.is_empty() or not named.has(method):
-        return ""
-    return (
-        ". Its script does declare %s — the node in the edited scene is still holding an older"
-        + " instance of that script, which is why it answers that it has no such method. Save the"
-        + " scene with scene.save and reload it with scene.reload, then connect."
-    ) % method
-
 ## What to add when the scene a caller is trying to create is the one the project starts with.
 ##
 ## `scene.create` refuses a path that already holds a scene, and says to open it or to save over it
@@ -1316,7 +1289,7 @@ static func why_the_editor_cannot_see_it(target: Node, added_here: Array[String]
 ## turns were told, twice each. It is true and it repairs nothing: the method belongs to whatever
 ## script is on the *target*, which defaults to the scene root rather than to the node emitting the
 ## signal, and the commonest reason there is no method is that there is no script on that node yet.
-static func where_a_method_would_be(target: Node, method: String = "") -> String:
+static func where_a_method_would_be(target: Node) -> String:
     var script: Variant = target.get_script()
     if script == null:
         return (
@@ -1336,9 +1309,6 @@ static func where_a_method_would_be(target: Node, method: String = "") -> String
             + "defaults to the scene root, so name it if the method lives elsewhere."
         )
     named.sort()
-    var stale := a_method_the_script_has_and_the_node_has_not(method, named)
-    if not stale.is_empty():
-        return stale
     if named.size() > 12:
         named = named.slice(0, 12)
     return (
