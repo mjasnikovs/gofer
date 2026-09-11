@@ -36,10 +36,46 @@ export function normaliseWhitespace(text) {
     return (text ?? '').replace(/\s+/gu, ' ').trim()
 }
 
+// A line holding nothing but dots or an ellipsis, optionally bracketed: the
+// mark a reader puts between two things it quoted and the material it skipped.
+const ELISION_LINE = /^\s*\[?\s*(?:\.\s*\.\s*\.*|\u2026)\s*\]?\s*$/u
+
+// Split a quote into the pieces an elision separates. One piece for an ordinary
+// quote, so nothing about the single-piece case changes.
+export function excerptPieces(excerpt) {
+    const pieces = [[]]
+    for (const line of (excerpt ?? '').split(/\r?\n/u)) {
+        if (ELISION_LINE.test(line)) pieces.push([])
+        else pieces[pieces.length - 1].push(line)
+    }
+    return pieces
+        .map(lines => normaliseWhitespace(lines.join(' ')))
+        .filter(piece => piece.length > 0)
+}
+
+// Every piece of the quote must be findable in what was retrieved.
+//
+// The reader is told to copy verbatim, and it does — but an answer that needs a
+// sentence from one passage and an example from another writes both and marks
+// the join with an ellipsis line. Checking the joined string as one needle finds
+// nothing, and the result was a verified quote reported as unsourced. Measured
+// 2026-09-11: an answer about Timer.autostart quoted a real _ready()/add_child
+// example and the real sentence "If true, the timer will start immediately when
+// it enters the scene tree.", and the warning sent the turn back for a second
+// search that cost 12 s and returned the same sentence.
+//
+// The pieces are NOT required to appear in the retrieved order. Passages arrive
+// in rerank order, which is not the order an answer reads them in, so an ordered
+// check would reject the very case this exists for. What survives is the claim
+// the warning actually makes: every word quoted here was read, not remembered.
+//
+// Only a whole line counts as an elision. An inline "..." is left alone, so a
+// quote cannot be split at a mark that came from the documentation itself.
 export function isExcerptInContent(excerpt, content) {
-    const needle = normaliseWhitespace(excerpt)
-    if (needle.length === 0) return false
-    return normaliseWhitespace(content).includes(needle)
+    const pieces = excerptPieces(excerpt)
+    if (pieces.length === 0) return false
+    const haystack = normaliseWhitespace(content)
+    return pieces.every(piece => haystack.includes(piece))
 }
 
 export function verifyExcerpt(excerpt, content) {

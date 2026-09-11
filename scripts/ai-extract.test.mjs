@@ -7,6 +7,7 @@ import {
     formatResultText,
     isAbstention,
     isCoverageMiss,
+    excerptPieces,
     isExcerptInContent,
     normaliseWhitespace,
     notCoveredSentence,
@@ -56,6 +57,35 @@ test('a whitespace-only quote verifies against nothing', () => {
     assert.equal(isExcerptInContent('a  b', 'x a b y'), true)
     assert.equal(isExcerptInContent('a b', 'x ab y'), false)
     assert.equal(normaliseWhitespace(' a \n b '), 'a b')
+})
+
+test('a quote that joins two retrieved passages across an elision is still sourced', () => {
+    // The Timer.autostart turn of 2026-09-11, shortened. Both halves are real
+    // retrieved text from two different chapters; the reader marked the join.
+    const content = [
+        '[Godot notifications]\nfunc _ready():\n    var t = Timer.new()\n    add_child(t)',
+        '[Timer]\nIf true, the timer will start immediately when it enters the scene tree.'
+    ].join('\n\n')
+    const excerpt = [
+        'func _ready():',
+        '    var t = Timer.new()',
+        '    add_child(t)',
+        '...',
+        'If true, the timer will start immediately when it enters the scene tree.'
+    ].join('\n')
+
+    assert.equal(isExcerptInContent(excerpt, content), true)
+    assert.equal(verifyExcerpt(excerpt, content).verified, true)
+    assert.deepEqual(excerptPieces('a\n…\nb'), ['a', 'b'])
+    assert.deepEqual(excerptPieces('a\n[...]\nb'), ['a', 'b'])
+})
+
+test('an elision does not excuse a half that was never retrieved', () => {
+    assert.equal(isExcerptInContent('a real line\n...\nan invented line', 'x a real line y'), false)
+    // Dots inside a line are the documentation's own, so they never split a quote.
+    assert.equal(isExcerptInContent('alpha ... omega', 'alpha beta omega'), false)
+    // A quote that is nothing but elisions verifies against nothing.
+    assert.equal(isExcerptInContent('...\n…', 'anything at all'), false)
 })
 
 test('the verdict carries what it checked, so a false can be diagnosed later', () => {
