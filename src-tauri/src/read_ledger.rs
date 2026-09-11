@@ -39,6 +39,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+/// The host call the worker's `read` tool makes after showing the model a whole file.
+pub const NOTED_READ_TOOL: &str = "noted_read";
+
 /// Every path this agent has read, and the hash it was given for it.
 fn ledger() -> &'static Mutex<HashMap<(PathBuf, String), String>> {
     static LEDGER: OnceLock<Mutex<HashMap<(PathBuf, String), String>>> = OnceLock::new();

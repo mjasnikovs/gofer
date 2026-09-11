@@ -222,6 +222,34 @@ pub(crate) fn probe(domain: &str) -> Result<Value, ToolFailure> {
     }
 }
 
+/// Arms a save over a file the worker's own `read` tool showed the model.
+///
+/// The router records a hash for every file it shows and fills `expectedHash` from that record,
+/// and a `read` runs in the worker, showing the file without the router seeing it. 94 of 195 live
+/// runs read a script that way, and every `file_conflict` a save ever met was over a file the model
+/// had been shown exactly so — one turn sent the same save twice into "a plain read does not arm a
+/// save" and gave up on the operation. The hash is taken from the disk now rather than sent: the
+/// read answered these bytes a moment ago, and a file that changes in between is a conflict the
+/// save should meet.
+fn note_a_read<R: Runtime>(app: &AppHandle<R>, params: &Value) -> Result<Value, ToolFailure> {
+    let Some(path) = params.get("path").and_then(Value::as_str) else {
+        return Err(ToolFailure::new(
+            "invalid_params",
+            "noted_read names the path the read showed",
+        ));
+    };
+    let path = path.strip_prefix("res://").unwrap_or(path);
+    let workspace = crate::active_workspace(app)?;
+    if workspace.resolve(path)?.is_dir() {
+        return Ok(json!({"noted": false}));
+    }
+    let hash = workspace.hash_of(path)?;
+    if let Some(hash) = &hash {
+        crate::read_ledger::remember(workspace.root(), path, hash);
+    }
+    Ok(json!({"noted": hash.is_some()}))
+}
+
 /// Answers one tool call by routing it to the handler the renderer uses for the same operation.
 pub fn dispatch<R: Runtime>(
     app: &AppHandle<R>,
@@ -301,6 +329,9 @@ fn route<R: Runtime>(
     }
     if request.tool == crate::remember::REMEMBER_TOOL {
         return crate::remember::remember(app, &request.params);
+    }
+    if request.tool == crate::read_ledger::NOTED_READ_TOOL {
+        return note_a_read(app, &request.params);
     }
     let within = CATALOG.iter().find(|domain| domain.name == request.tool);
     if within.is_none() && request.tool != GODOT_TOOL {
@@ -4331,6 +4362,59 @@ mod tests {
             "the content did not change, only where it lives, so the record follows the file"
         );
         crate::read_ledger::forget_worktree(&root);
+    }
+
+    /// A read the worker made arms the save the router later checks, as the router's own would.
+    ///
+    /// The regression: `read scripts/player.gd`, then `script.save` over it, refused as a file
+    /// the agent had not been shown — and sent again unchanged, because from where the model sat
+    /// it had been shown the file.
+    #[test]
+    fn a_read_the_worker_made_arms_the_save_over_what_it_showed() {
+        let directory = TempDir::new().expect("temporary application data");
+        let workspace_path = directory.path().join("workspace");
+        std::fs::create_dir(&workspace_path).expect("create workspace");
+        let storage =
+            crate::storage::ProjectStorage::open(&directory.path().join("data"), &workspace_path)
+                .expect("open project storage");
+        let app = unattended_app();
+        app.manage(crate::storage::StorageSlot::new(Ok(storage)));
+        let workspace = crate::active_workspace(app.handle()).expect("the task worktree");
+        let script = "extends Node2D\n";
+        workspace
+            .write("scripts/player.gd", script, None)
+            .expect("write the script");
+        crate::read_ledger::forget_worktree(workspace.root());
+
+        let noted = dispatch(
+            app.handle(),
+            ToolRequest {
+                tool: crate::read_ledger::NOTED_READ_TOOL.to_owned(),
+                params: json!({"path": "res://scripts/player.gd"}),
+            },
+        )
+        .expect("note the read");
+        assert_eq!(noted["noted"], true, "{noted}");
+        assert_eq!(
+            crate::read_ledger::recall(workspace.root(), "scripts/player.gd").as_deref(),
+            Some(files::hash_text(script).as_str()),
+            "the record is keyed the way a save names the file, scheme off"
+        );
+
+        let listing = dispatch(
+            app.handle(),
+            ToolRequest {
+                tool: crate::read_ledger::NOTED_READ_TOOL.to_owned(),
+                params: json!({"path": "scripts"}),
+            },
+        )
+        .expect("a directory read is not a file shown");
+        assert_eq!(listing["noted"], false, "{listing}");
+        assert!(
+            crate::read_ledger::recall(workspace.root(), "scripts").is_none(),
+            "a directory holds no hash to arm a save with"
+        );
+        crate::read_ledger::forget_worktree(workspace.root());
     }
 
     /// A record that outlives its file must not refuse every save of that path forever.

@@ -790,6 +790,51 @@
                 "debug.terminate"
             ],
             "task": "Launch the pipeline game under the debugger with a breakpoint on the return line of _floor_damage in scripts/fighter.gd. When it stops, report every frame on the stack, the value of amount in the top frame, the value of after_resistance in the take_damage frame below it, and evaluate minimum_damage * 2. Step out once and say which frame you are in. Terminate."
+        },
+        {
+            "id": "evaluate-running",
+            "fixture": "live-project",
+            "ops": [
+                "runtime.run",
+                "debug.attach",
+                "debug.evaluate",
+                "debug.set_breakpoints",
+                "debug.await_stop",
+                "debug.disconnect",
+                "runtime.stop"
+            ],
+            "task": "Run the game and attach the debugger while it keeps running. Evaluate total_ticks in the running game and tell me what came back. If the debugger cannot answer while the game runs, get the value the way it can, then disconnect and stop the game."
+        },
+        {
+            "id": "rewrite-script",
+            "fixture": "live-project",
+            "ops": [
+                "script.open",
+                "script.save",
+                "script.diagnostics",
+                "runtime.run",
+                "runtime.wait",
+                "runtime.inspect_node",
+                "runtime.stop"
+            ],
+            "task": "Rewrite scripts/player.gd as a whole new file rather than editing lines: keep what it does, but call the distance variable distance instead of travelled and make speed default to 48.0. Check the diagnostics, then run the game for a second and read the distance to prove it moves."
+        },
+        {
+            "id": "broken-run",
+            "fixture": "live-broken",
+            "ops": [
+                "runtime.run",
+                "runtime.get_state",
+                "logs.read",
+                "debug.stack_trace",
+                "script.open",
+                "script.edit",
+                "runtime.restart",
+                "runtime.wait",
+                "runtime.inspect_node",
+                "runtime.stop"
+            ],
+            "task": "This game breaks the moment it starts. Run it, find out from the editor what breaks and where, fix the script so it starts cleanly, and run it again to prove the Player moves for two seconds. Then stop it."
         }
     ]
 }
