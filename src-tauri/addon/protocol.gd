@@ -372,18 +372,35 @@ static func decode(value: Variant) -> Dictionary:
                 return decode_failed("A Resource value requires a non-empty path")
             var resource := load(path)
             if resource == null:
-                return decode_failed(
-                    (
-                        "Resource %s could not be loaded. A file written into the worktree from "
-                        + "outside the editor is not one until `resource.rescan` names it."
-                    ) % path
-                )
+                return decode_failed(_why_the_resource_did_not_load(path))
             return decoded(resource)
         "Callable", "Signal", "RID", "Object":
             return decode_failed(
                 "A %s points at something live in this process, which no value can carry" % kind
             )
     return decode_failed("Value type '%s' is not supported" % kind)
+
+## Why `load` answered null, told apart by what is on disk.
+##
+## One message said "rescan" for all three, and a live turn rescanned four times over a .tres the
+## editor could not parse — the parse error sat in the editor output the whole time.
+static func _why_the_resource_did_not_load(path: String) -> String:
+    if not FileAccess.file_exists(path):
+        return (
+            "Resource %s could not be loaded: there is no file at that path. resource.list names "
+            + "every file the project has."
+        ) % path
+    if not ResourceLoader.exists(path):
+        return (
+            "Resource %s could not be loaded. A file written into the worktree from outside the "
+            + "editor is not one until `resource.rescan` names it."
+        ) % path
+    return (
+        "Resource %s is on disk and the editor could not load it, which is what a file it cannot "
+        + "parse looks like. logs.read with minSeverity error and contains %s shows the line it "
+        + "stopped at; fix the file, then set the property again."
+    ) % [path, path]
+
 
 ## Decodes a packed array from a plain JSON array of its element's own payloads.
 ##

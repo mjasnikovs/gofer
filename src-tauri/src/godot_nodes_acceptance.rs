@@ -920,3 +920,55 @@ fn an_exported_node_reference_is_wired_by_the_path_it_is_saved_as() {
         "the wired reference is missing from:\n{saved}"
     );
 }
+
+/// A resource the editor cannot parse is named as that, not as one waiting for a rescan.
+///
+/// A live turn wrote a StyleBoxFlat .tres with a `Gradient` the text loader does not accept and
+/// set it four times: every refusal said `resource.rescan`, it rescanned every time, and the parse
+/// error sat in the editor output throughout. Driven on the real editor: a broken file and a
+/// missing one, and what each refusal says.
+#[test]
+fn a_resource_the_editor_cannot_parse_is_refused_as_that_rather_than_as_unscanned() {
+    let mut session = Session::start();
+    session.mutate(
+        "scene.create",
+        json!({"path": "res://styled.tscn", "rootType": "Node2D"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"parent": "/styled", "name": "Bar", "type": "ProgressBar"}),
+    );
+    std::fs::write(
+        session.worktree.join("broken.tres"),
+        "[gd_resource type=\"StyleBoxFlat\" format=3]\n\n[resource]\nbg_color = Gradient(1)\n",
+    )
+    .expect("write the broken resource");
+    session.call("resource.rescan", json!({}));
+
+    let styled = |path: &str| {
+        json!({
+            "node": "/styled/Bar",
+            "property": "theme_override_styles/fill",
+            "value": {"type": "Resource", "value": {"path": path}}
+        })
+    };
+    let broken = session
+        .try_mutate("node.set_property", styled("res://broken.tres"))
+        .expect_err("a resource the editor cannot parse must not be set");
+    assert!(
+        broken.contains("could not load it") && broken.contains("logs.read"),
+        "the refusal must send the caller to the parse error: {broken}"
+    );
+    assert!(
+        !broken.contains("rescan"),
+        "a file the editor has already scanned is not waiting for a rescan: {broken}"
+    );
+
+    let missing = session
+        .try_mutate("node.set_property", styled("res://nowhere.tres"))
+        .expect_err("a resource that is not on disk must not be set");
+    assert!(
+        missing.contains("no file at that path") && missing.contains("resource.list"),
+        "a missing file is named as missing: {missing}"
+    );
+}
