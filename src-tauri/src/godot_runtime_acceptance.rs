@@ -52,7 +52,7 @@ const INJECTED_DEVICE: i64 = 7777;
 /// game standing still with nothing to say about it, and that is exactly what injected input did:
 /// `project.set_input_action` binds on the physical key and the helper built events with only
 /// `keycode`, so no action Gofer registered could ever be driven by input Gofer injected.
-const PROBE_SCRIPT: &str = "extends Node2D\n\nconst INJECTED_DEVICE := 7777\nconst PROBE_ACTION := \"acceptance_probe_action\"\n\nvar presses := 0\nvar actions := 0\nvar last_source := \"none\"\nvar launch_args := \"\"\n\n@onready var label: Label = $Label\n\nfunc _ready() -> void:\n\tlaunch_args = \"|\".join(OS.get_cmdline_user_args())\n\t_refresh()\n\n# Only the test's own input counts. Anything the desktop delivers to this window carries a device\n# the engine assigned, never this one, so a stray keystroke cannot change the assertions.\nfunc _input(event: InputEvent) -> void:\n\tif InputMap.has_action(PROBE_ACTION) and event.is_action_pressed(PROBE_ACTION):\n\t\tactions += 1\n\tif event.device != INJECTED_DEVICE:\n\t\treturn\n\tif event is InputEventKey and event.pressed and not event.echo:\n\t\t_record(\"key\")\n\telif event is InputEventMouseButton and event.pressed:\n\t\t_record(\"mouse\")\n\telif event is InputEventJoypadButton and event.pressed:\n\t\t_record(\"gamepad\")\n\nfunc _record(source: String) -> void:\n\tpresses += 1\n\tlast_source = source\n\t_refresh()\n\nfunc _refresh() -> void:\n\tlabel.text = \"presses: %d (%s)\" % [presses, last_source]\n";
+const PROBE_SCRIPT: &str = "extends Node2D\n\nconst INJECTED_DEVICE := 7777\nconst PROBE_ACTION := \"acceptance_probe_action\"\n\nvar presses := 0\nvar actions := 0\nvar polled_just := 0\nvar polled_held := 0\nvar last_source := \"none\"\nvar launch_args := \"\"\n\n@onready var label: Label = $Label\n\nfunc _ready() -> void:\n\tlaunch_args = \"|\".join(OS.get_cmdline_user_args())\n\t_refresh()\n\n# What a CharacterBody2D script does: poll the action in physics rather than handle the event.\nfunc _physics_process(_delta: float) -> void:\n\tif InputMap.has_action(PROBE_ACTION) and Input.is_action_just_pressed(PROBE_ACTION):\n\t\tpolled_just += 1\n\tif InputMap.has_action(PROBE_ACTION) and Input.is_action_pressed(PROBE_ACTION):\n\t\tpolled_held += 1\n\n# Only the test's own input counts. Anything the desktop delivers to this window carries a device\n# the engine assigned, never this one, so a stray keystroke cannot change the assertions.\nfunc _input(event: InputEvent) -> void:\n\tif InputMap.has_action(PROBE_ACTION) and event.is_action_pressed(PROBE_ACTION):\n\t\tactions += 1\n\tif event.device != INJECTED_DEVICE:\n\t\treturn\n\tif event is InputEventKey and event.pressed and not event.echo:\n\t\t_record(\"key\")\n\telif event is InputEventMouseButton and event.pressed:\n\t\t_record(\"mouse\")\n\telif event is InputEventJoypadButton and event.pressed:\n\t\t_record(\"gamepad\")\n\nfunc _record(source: String) -> void:\n\tpresses += 1\n\tlast_source = source\n\t_refresh()\n\nfunc _refresh() -> void:\n\tlabel.text = \"presses: %d (%s)\" % [presses, last_source]\n";
 
 /// The fixture scene with the probe script attached. Written into the copied worktree: the
 /// checked-in fixture deliberately stays free of scripts so the Node journeys see a project that
@@ -328,6 +328,16 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
         1,
         "an injected key must fire the Input Map action bound to that key, or a level built with \
          these tools cannot be played by them"
+    );
+    assert_eq!(
+        probe_count(&session, "polled_just"),
+        1,
+        "a script that polls is_action_just_pressed in physics, as every CharacterBody2D does, \
+         has to see the press once"
+    );
+    assert!(
+        probe_count(&session, "polled_held") >= 1,
+        "and is_action_pressed has to read true for at least one physics frame"
     );
 
     let stray = session.call(

@@ -344,8 +344,12 @@ func _op_input(params: Dictionary) -> Dictionary:
     var events: Array = decoded["events"]
     if events.is_empty():
         return _failure("invalid_params", "runtime.input requires at least one event")
+    # One event per physics frame. A press and its release parsed in the same instant were never
+    # held for any physics step: a script polling is_action_pressed there read false every time,
+    # and a live turn rewrote a working jump around it.
     for event in events:
         Input.parse_input_event(event)
+        await get_tree().physics_frame
     await get_tree().process_frame
     await get_tree().process_frame
     await RenderingServer.frame_post_draw

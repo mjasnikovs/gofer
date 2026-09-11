@@ -965,7 +965,9 @@ func _runtime_stop() -> void:
 ## the game has produced pixels.
 func _runtime_launch(id: String, restart: bool, scene: String, args: PackedStringArray) -> void:
     var playing := EditorInterface.is_playing_scene()
-    if playing and not restart:
+    # A game halted at an error is worth nothing to keep: four of four live turns that met
+    # runtime_broke ran again without stopping first and were refused for it.
+    if playing and not restart and not _runtime_broke:
         _respond_error(id, "already_running", "The project is already running; stop it or use runtime.restart", true)
         return
     if not scene.is_empty() and not FileAccess.file_exists(scene):

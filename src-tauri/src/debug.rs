@@ -543,7 +543,8 @@ fn saying_what_has_not_been_reached(error: DapError, asked: Option<u64>) -> DapE
     let said = if armed.is_empty() {
         " No breakpoint is set, so nothing here stops the game on a line and this wait had only \
          an error or a pause to return on. Set one with set_breakpoints on the line you want \
-         to watch, then wait again."
+         to watch, then wait again. If the wait was to prove the game runs on without \
+         stopping, this is that proof; runtime.wait runs frames without waiting for a stop."
             .to_owned()
     } else {
         format!(

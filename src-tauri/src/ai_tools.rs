@@ -1807,6 +1807,8 @@ fn script_domain<R: Runtime>(
                 a_completion_the_model_can_read(answered)
             } else if answer_names_nothing(op, &answered) {
                 with_where_the_cursor_was(answered, &asked, script::document_text)
+            } else if op == "prepare_rename" {
+                with_the_placeholder_the_range_holds(answered, &asked, script::document_text)
             } else {
                 answered
             })
@@ -1853,6 +1855,48 @@ fn with_where_the_cursor_was(
     let note = where_the_cursor_is(&text, line, character);
     if let Some(fields) = answered.as_object_mut() {
         fields.insert("note".to_owned(), Value::String(note));
+    }
+    answered
+}
+
+/// Godot's server answers a rename check with the range and no placeholder; one live turn in
+/// three then invented one. The text inside the range is the placeholder, and it is read here.
+fn with_the_placeholder_the_range_holds(
+    mut answered: Value,
+    asked: &Value,
+    text_of: impl Fn(&str) -> Option<String>,
+) -> Value {
+    if answered["renameable"] != true || answered.get("placeholder").is_some() {
+        return answered;
+    }
+    let (Some(line), Some(from), Some(to)) = (
+        answered["range"]["start"]["line"].as_u64(),
+        answered["range"]["start"]["character"].as_u64(),
+        answered["range"]["end"]["character"].as_u64(),
+    ) else {
+        return answered;
+    };
+    if answered["range"]["end"]["line"].as_u64() != Some(line) {
+        return answered;
+    }
+    let Some(text) = asked["path"].as_str().and_then(&text_of) else {
+        return answered;
+    };
+    let Some(row) = usize::try_from(line)
+        .ok()
+        .and_then(|index| text.lines().nth(index))
+    else {
+        return answered;
+    };
+    let held: String = row
+        .chars()
+        .skip(usize::try_from(from).unwrap_or(usize::MAX))
+        .take(usize::try_from(to.saturating_sub(from)).unwrap_or(0))
+        .collect();
+    if let Some(fields) = answered.as_object_mut()
+        && !held.is_empty()
+    {
+        fields.insert("placeholder".to_owned(), Value::String(held));
     }
     answered
 }
@@ -4740,5 +4784,34 @@ mod cursor_note_tests {
             &json!({"locations": [{"path": "a"}]})
         ));
         assert!(!answer_names_nothing("completion", &json!({"items": []})));
+    }
+
+    #[test]
+    fn a_rename_check_without_a_placeholder_reads_it_off_the_range() {
+        let text = "extends Node2D\n\nvar total_ticks := 0\n";
+        let asked = json!({"path": "scripts/main.gd", "position": {"line": 2, "character": 6}});
+        let filled = with_the_placeholder_the_range_holds(
+            json!({"op": "prepareRename", "renameable": true,
+                "range": {"start": {"line": 2, "character": 4}, "end": {"line": 2, "character": 15}}}),
+            &asked,
+            |_| Some(text.to_owned()),
+        );
+        assert_eq!(filled["placeholder"], "total_ticks", "{filled}");
+        let refused = with_the_placeholder_the_range_holds(
+            json!({"op": "prepareRename", "renameable": false}),
+            &asked,
+            |_| Some(text.to_owned()),
+        );
+        assert!(refused.get("placeholder").is_none(), "{refused}");
+        let kept = with_the_placeholder_the_range_holds(
+            json!({"op": "prepareRename", "renameable": true, "placeholder": "given",
+                "range": {"start": {"line": 2, "character": 4}, "end": {"line": 2, "character": 15}}}),
+            &asked,
+            |_| Some(text.to_owned()),
+        );
+        assert_eq!(
+            kept["placeholder"], "given",
+            "the server's own placeholder wins"
+        );
     }
 }
