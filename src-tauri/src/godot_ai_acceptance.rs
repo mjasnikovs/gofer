@@ -913,6 +913,18 @@ fn a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits() {
     );
     call("godot_debug", json!({"ops": [{"op": "step_over"}]}))
         .expect("step_over answers on a stopped debuggee");
+    // Under ten parallel editors the step lands after the continue below is answered, the game
+    // halts on it for real, and the pause's wait truthfully answers `step`. Waiting here is what
+    // the contract tells the model to do after every step.
+    let stepped_over = call(
+        "godot_debug",
+        json!({"ops": [{"op": "await_stop", "timeoutMs": 60000}]}),
+    )
+    .expect("the step over lands somewhere");
+    assert!(
+        !stepped_over["ops"][0]["result"]["stopped"].is_null(),
+        "continue needs a debuggee that is stopped again: {stepped_over}"
+    );
 
     call("godot_debug", json!({"ops": [{"op": "continue"}]})).expect("the game runs on");
     let after = call(
@@ -2301,4 +2313,67 @@ fn a_restart_of_a_game_halted_at_a_step_stops_again() {
         "{again}"
     );
     let _ = call("godot_debug", json!({"ops": [{"op": "terminate"}]}));
+}
+
+/// A game the editor plays after a debug game was terminated runs free of the debug breakpoints.
+///
+/// Measured on 4.7.2: a `set_breakpoints` with no lines sent after `terminate` is answered with
+/// an empty list and changes nothing in the editor, and the next `runtime.run` broke on the line
+/// the launch had set. A live turn did exactly that, twice, and read its own stale error tail
+/// for the cause. The editor's copies are released before the terminate; Gofer's record stays
+/// for the next launch, which re-sends it.
+#[test]
+fn a_run_after_a_terminated_debug_game_does_not_inherit_its_breakpoint() {
+    let session = start_session();
+    let app = mock_app();
+    let data = TempDir::new().expect("temporary application data");
+    let storage = crate::storage::ProjectStorage::open(data.path(), &session.worktree)
+        .expect("open project storage");
+    app.manage(crate::storage::StorageSlot::new(Ok(storage)));
+    let call = |tool: &str, params: Value| {
+        ai_tools::dispatch(
+            app.handle(),
+            ai_tools::ToolRequest {
+                tool: tool.to_owned(),
+                params,
+            },
+        )
+    };
+    call(
+        "godot_debug",
+        json!({"ops": [{"op": "launch", "playArgs": ["--headless"],
+            "breakpoints": [{"path": PROBE_PATH, "lines": [BREAK_LINE]}]}]}),
+    )
+    .expect("launch");
+    call(
+        "godot_debug",
+        json!({"ops": [{"op": "await_stop", "timeoutMs": 60000}]}),
+    )
+    .expect("the first stop");
+    call("godot_debug", json!({"ops": [{"op": "terminate"}]})).expect("terminate");
+    assert_eq!(
+        crate::debug::armed_breakpoints(),
+        vec![PROBE_PATH.to_owned()],
+        "Gofer's own record outlives the game, for the next launch to re-send"
+    );
+    call(
+        "godot_debug",
+        json!({"ops": [{"op": "set_breakpoints", "path": PROBE_PATH, "lines": []}]}),
+    )
+    .expect("a clear after the terminate is still accepted");
+
+    call(
+        "godot_runtime",
+        json!({"ops": [{"op": "run", "playArgs": ["--headless"]}]}),
+    )
+    .expect("the editor plays the game on its own");
+    let waited = call(
+        "godot_runtime",
+        json!({"ops": [{"op": "wait", "ms": 1500}]}),
+    )
+    .expect("a game free of the debug breakpoint runs its frames");
+    assert_eq!(waited["ops"][0]["result"]["exited"], false, "{waited}");
+    let state = call("godot_runtime", json!({"ops": [{"op": "get_state"}]})).expect("state");
+    assert_eq!(state["ops"][0]["result"]["broke"], false, "{state}");
+    let _ = call("godot_runtime", json!({"ops": [{"op": "stop"}]}));
 }

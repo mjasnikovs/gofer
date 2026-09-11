@@ -307,6 +307,20 @@ pub(crate) fn where_the_breakpoints_are() -> Vec<String> {
         .collect()
 }
 
+/// Takes Gofer's breakpoints out of the editor while the debuggee is still there to take them.
+///
+/// Measured on 4.7.2: a `setBreakpoints` with no lines sent after `terminate` is answered and
+/// changes nothing in the editor, and the next plain run breaks on the line the launch had set.
+/// Sent before the terminate it takes. Gofer's own record stays, because a launch or a restart
+/// re-sends it; only the editor's copy goes, so a game the editor plays on its own runs free.
+fn release_the_editors_breakpoints(client: &DapClient, workspace: &Workspace) {
+    for source in source_breakpoints_still_armed() {
+        if let Ok(absolute) = resolve(workspace, &source.path) {
+            let _ = client.set_breakpoints(&absolute, &[]);
+        }
+    }
+}
+
 /// The armed breakpoints as a launch takes them, so a restart re-sends every one.
 fn source_breakpoints_still_armed() -> Vec<SourceBreakpoints> {
     ARMED_BREAKPOINTS
@@ -703,6 +717,7 @@ fn answer(request: DebugRequest) -> Result<DebugResponse, DapError> {
             Ok(DebugResponse::Acknowledged)
         }
         DebugRequest::Terminate => {
+            release_the_editors_breakpoints(&client, &workspace);
             let terminated = client.terminate();
             DEBUGGER_HOLDS_A_GAME.store(false, Ordering::Relaxed);
             crate::godot_dap::note_the_debuggee_is_running();
@@ -710,6 +725,7 @@ fn answer(request: DebugRequest) -> Result<DebugResponse, DapError> {
             Ok(DebugResponse::Acknowledged)
         }
         DebugRequest::Disconnect { terminate_debuggee } => {
+            release_the_editors_breakpoints(&client, &workspace);
             let disconnected = client.disconnect(terminate_debuggee.unwrap_or(true));
             DEBUGGER_HOLDS_A_GAME.store(false, Ordering::Relaxed);
             crate::godot_dap::note_the_debuggee_is_running();
