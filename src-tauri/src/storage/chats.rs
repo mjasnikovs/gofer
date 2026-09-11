@@ -1001,4 +1001,54 @@ mod tests {
             b"hi"
         );
     }
+
+    /// The key order the model wrote is part of the prompt.
+    ///
+    /// `serde_json` sorts object keys unless `preserve_order` is on, so a transcript that had
+    /// been through storage came back with every tool call's arguments alphabetised. The bytes
+    /// differ from what the server already holds, and on a recurrent model that costs a rollback
+    /// to the last checkpoint: one recorded turn re-read from token 20971 of 49662 because
+    /// `{"pattern","path","glob","ignoreCase"}` came back as `{"glob","ignoreCase","path","pattern"}`.
+    #[test]
+    fn a_stored_tool_call_keeps_the_key_order_the_model_wrote() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        let written = serde_json::json!({
+            "role": "assistant",
+            "content": [{
+                "type": "toolCall",
+                "name": "grep",
+                "arguments": {
+                    "pattern": "lives",
+                    "path": "scripts",
+                    "glob": "*.gd",
+                    "ignoreCase": true
+                }
+            }]
+        });
+        let chat = StoredChat {
+            task_id: None,
+            messages: vec![StoredMessage {
+                id: 1,
+                sender: "user".to_owned(),
+                text: "Find it".to_owned(),
+                timestamp: 10,
+                attachments: Vec::new(),
+                extra: serde_json::Map::new(),
+            }],
+            agent_messages: vec![written.clone()],
+        };
+
+        storage.chats().save(&chat).expect("save chat");
+
+        let loaded = storage.chats().load(None).expect("load chat");
+        let sent = serde_json::to_string(&loaded.agent_messages[0]).expect("serialise");
+        assert_eq!(sent, serde_json::to_string(&written).expect("serialise"));
+        assert!(
+            sent.contains(
+                r#"{"pattern":"lives","path":"scripts","glob":"*.gd","ignoreCase":true}"#
+            ),
+            "storage alphabetised the arguments: {sent}"
+        );
+    }
 }

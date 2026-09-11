@@ -1388,6 +1388,8 @@ mod tests {
     /// `edits` instead of standing beside it in `files`. It was answered `missing field oldText`,
     /// which names no operation, no parameter and no position — serde was the first thing to look
     /// inside a `list`, because the kind stops at the outermost bracket.
+    ///
+    /// The key named is the first one the entry carries, which is the first one the model wrote.
     #[test]
     fn a_nested_entry_is_refused_where_it_sits_rather_than_by_serde() {
         let refused = message(
@@ -1404,7 +1406,7 @@ mod tests {
             }),
         );
         assert!(
-            refused.contains("`files[0].edits[1]` has no `edits` key"),
+            refused.contains("`files[0].edits[1]` has no `path` key"),
             "the failure must name the entry that is wrong: {refused}"
         );
         assert!(

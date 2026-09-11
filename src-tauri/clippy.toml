@@ -1,0 +1,5 @@
+# `ToolFailure` carries a `serde_json::Value`, and `serde_json` runs with `preserve_order` here so
+# that a transcript keeps the key order the model wrote. That makes `Value` an IndexMap rather than
+# a BTreeMap and pushes the error past clippy's 128-byte default, on 235 call sites that were fine
+# the day before. The lint is about moving bytes, and the bytes in question are two dozen.
+large-error-threshold = 192

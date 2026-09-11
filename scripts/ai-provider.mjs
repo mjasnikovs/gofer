@@ -23,7 +23,7 @@ import {openaiCodexProvider} from '@earendil-works/pi-ai/providers/openai-codex'
 import {createGodotTools} from './godot-tools.mjs'
 import {createGrepTool} from './ai-grep.mjs'
 import {readsADirectory} from './read-a-directory.mjs'
-import {turnContextText, withTurnContext} from './turn-context.mjs'
+import {carriedText, carryTurnContext, turnContextText, withTurnContext} from './turn-context.mjs'
 import {
     abortableWait,
     createToolEnv,
@@ -643,7 +643,11 @@ export async function runAgent({
     }
     const stored = Array.isArray(agentMessages) ? agentMessages : []
     const entry = isRetry ? retryEntry(stored, promptMessage) : {messages: stored, continues: false}
-    const rolledBack = entry.messages
+    const turnText = turnContextText(
+        {memoryContext, sessionContext, inventory},
+        carriedText(entry.messages)
+    )
+    const rolledBack = entry.continues ? carryTurnContext(entry.messages, turnText) : entry.messages
     const isRebuilt = rolledBack.length === 0 && messages.length > 1
     const previousMessages =
         isRebuilt ?
@@ -685,13 +689,11 @@ export async function runAgent({
             signal
         )
         emit(compactionEnd())
-        return compacted.messages
+        return carryTurnContext(compacted.messages, turnText)
     }
 
     let transcript
-    const turnText = turnContextText({memoryContext, sessionContext, inventory})
     const prompt = await promptWithSkills(env, workspacePath, systemPrompt, disabledSkills)
-    const turnAnchor = {}
     const agent = new Agent({
         initialState: {
             systemPrompt: prompt,
@@ -707,8 +709,7 @@ export async function runAgent({
             return {context: {...context, messages: transcript.replaceWith(compacted)}}
         },
         convertToLlm,
-        transformContext: async messages =>
-            withTurnContext(withoutEmptyToolCalls(messages), turnText, turnAnchor),
+        transformContext: async messages => withoutEmptyToolCalls(messages),
         streamFn: (nextModel, context, options) =>
             models.streamSimple(nextModel, context, {...options, ...streamOptions}),
         shouldStopAfterTurn: () => guard.verdict() !== undefined,
@@ -738,7 +739,7 @@ export async function runAgent({
         resume:
             entry.continues && !isRebuilt ?
                 () => agent.continue()
-            :   () => agent.prompt(contextMessage(promptMessage, model))
+            :   () => agent.prompt(withTurnContext(contextMessage(promptMessage, model), turnText))
     }
 
     const unsubscribe = agent.subscribe(event => {

@@ -2632,3 +2632,84 @@ test('an operation refused for naming no parameters is gone from the next reques
         'only the call that worked is still there'
     )
 })
+
+/**
+ * The prompt cache survives only while an earlier request is a byte-exact prefix of a later one.
+ * Anything a turn adds to a message it did not store rewrites that message for the next turn, and
+ * the server re-prefills from the first byte that moved. On a recurrent model with no context
+ * checkpoints that is the whole conversation, every turn.
+ */
+test('what one turn sent stays a prefix of what the next turn sends', async context => {
+    const mock = startScriptedServer([{text: 'Built'}, {text: 'Coloured'}])
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const url = await baseUrl(context, mock.server)
+
+    const asked = {sender: 'user', text: 'Build the level', timestamp: 1}
+    const first = await runAgent({
+        settings: servedBy(url),
+        messages: [asked],
+        workspacePath: workspace.path,
+        sessionContext: 'Godot session: offline',
+        inventory: 'scripts/player.gd',
+        emit: () => undefined
+    })
+
+    await runAgent({
+        settings: servedBy(url),
+        messages: [
+            asked,
+            {sender: 'assistant', text: 'Built', timestamp: 2},
+            {sender: 'user', text: 'Now colour it', timestamp: 3}
+        ],
+        agentMessages: first.agentMessages,
+        workspacePath: workspace.path,
+        sessionContext: 'Godot session: running',
+        inventory: 'scripts/player.gd\nscripts/enemy.gd',
+        emit: () => undefined
+    })
+
+    const [before, after] = mock.bodies.map(body => body.messages)
+    assert.deepEqual(
+        after.slice(0, before.length),
+        before,
+        'the second turn resent an earlier message with different bytes in it'
+    )
+})
+
+/** The inventory is the git index. A copy per turn fills the context window in ten of them. */
+test('a file list the conversation already carries is not sent again', async context => {
+    const mock = startScriptedServer([{text: 'Built'}, {text: 'Coloured'}])
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const url = await baseUrl(context, mock.server)
+
+    const inventory = 'The project’s tracked files:\nscripts/player.gd\nscripts/enemy.gd'
+    const asked = {sender: 'user', text: 'Build the level', timestamp: 1}
+    const first = await runAgent({
+        settings: servedBy(url),
+        messages: [asked],
+        workspacePath: workspace.path,
+        sessionContext: 'Godot session: offline',
+        inventory,
+        emit: () => undefined
+    })
+
+    await runAgent({
+        settings: servedBy(url),
+        messages: [
+            asked,
+            {sender: 'assistant', text: 'Built', timestamp: 2},
+            {sender: 'user', text: 'Now colour it', timestamp: 3}
+        ],
+        agentMessages: first.agentMessages,
+        workspacePath: workspace.path,
+        sessionContext: 'Godot session: running',
+        inventory,
+        emit: () => undefined
+    })
+
+    const sent = JSON.stringify(mock.bodies[1].messages).split('scripts/enemy.gd').length - 1
+    assert.equal(sent, 1, 'the second turn sent the whole file list over again')
+    assert.ok(JSON.stringify(mock.bodies[1].messages).includes('Godot session: running'))
+})

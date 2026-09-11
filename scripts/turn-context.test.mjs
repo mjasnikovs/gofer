@@ -1,6 +1,6 @@
 import {deepEqual, equal} from 'node:assert/strict'
 import {test} from 'node:test'
-import {turnContextText, withTurnContext} from './turn-context.mjs'
+import {carriedText, carryTurnContext, turnContextText, withTurnContext} from './turn-context.mjs'
 
 test('the three blocks are sent in the order the prompt describes them', () => {
     equal(
@@ -28,129 +28,127 @@ test('a turn that knows none of it sends nothing rather than an empty heading', 
     equal(turnContextText({memoryContext: '', sessionContext: '', inventory: ''}), undefined)
 })
 
-test('the context goes on the last thing the user said', () => {
-    deepEqual(
-        withTurnContext(
-            [
-                {role: 'user', content: 'first'},
-                {role: 'assistant', content: 'an answer'},
-                {role: 'user', content: 'second'},
-                {role: 'toolResult', content: 'a result'}
-            ],
-            'CONTEXT'
-        ),
-        [
-            {role: 'user', content: 'first'},
-            {role: 'assistant', content: 'an answer'},
-            {role: 'user', content: 'second\n\nCONTEXT'},
-            {role: 'toolResult', content: 'a result'}
-        ]
-    )
+test('the context goes on the question the turn was asked', () => {
+    deepEqual(withTurnContext({role: 'user', content: 'second'}, 'CONTEXT'), {
+        role: 'user',
+        content: 'second\n\nCONTEXT'
+    })
 })
 
 test('a message carrying pictures keeps them where they were', () => {
     deepEqual(
         withTurnContext(
-            [
-                {
-                    role: 'user',
-                    content: [
-                        {type: 'text', text: 'look'},
-                        {type: 'image', data: 'x'}
-                    ]
-                }
-            ],
-            'CONTEXT'
-        ),
-        [
             {
                 role: 'user',
                 content: [
                     {type: 'text', text: 'look'},
-                    {type: 'image', data: 'x'},
-                    {type: 'text', text: 'CONTEXT'}
+                    {type: 'image', data: 'x'}
                 ]
-            }
-        ]
+            },
+            'CONTEXT'
+        ),
+        {
+            role: 'user',
+            content: [
+                {type: 'text', text: 'look'},
+                {type: 'image', data: 'x'},
+                {type: 'text', text: 'CONTEXT'}
+            ]
+        }
     )
 })
 
 test('a message whose content is neither words nor parts is left alone', () => {
-    deepEqual(withTurnContext([{role: 'user', content: undefined}], 'CONTEXT'), [
-        {role: 'user', content: undefined}
-    ])
-})
-
-test('a transcript compaction left with no prompt is given one, in a fixed place', () => {
-    deepEqual(withTurnContext([{role: 'compactionSummary', content: 'earlier'}], 'CONTEXT'), [
-        {role: 'user', content: 'CONTEXT'},
-        {role: 'compactionSummary', content: 'earlier'}
-    ])
-
-    const anchor = {}
-    const head = {role: 'compactionSummary', content: 'earlier'}
-    deepEqual(withTurnContext([head], 'CONTEXT', anchor).slice(0, 2), [
-        {role: 'user', content: 'CONTEXT'},
-        head
-    ])
-    deepEqual(
-        withTurnContext([head, {role: 'toolResult', content: 'a result'}], 'CONTEXT', anchor).slice(
-            0,
-            2
-        ),
-        [{role: 'user', content: 'CONTEXT'}, head]
-    )
+    deepEqual(withTurnContext({role: 'user', content: undefined}, 'CONTEXT'), {
+        role: 'user',
+        content: undefined
+    })
 })
 
 test('nothing to say, and nothing to say it to, are both left untouched', () => {
-    const messages = [{role: 'user', content: 'hi'}]
-    equal(withTurnContext(messages, undefined), messages)
-    equal(withTurnContext(messages, ''), messages)
+    const message = {role: 'user', content: 'hi'}
+    equal(withTurnContext(message, undefined), message)
+    equal(withTurnContext(message, ''), message)
     equal(withTurnContext(undefined, 'CONTEXT'), undefined)
 })
 
-test('the stored messages are not written to', () => {
-    const stored = [{role: 'user', content: 'hi'}]
-    const sent = withTurnContext(stored, 'CONTEXT')
-    equal(stored[0].content, 'hi')
-    equal(sent[0].content, 'hi\n\nCONTEXT')
+test('the question it was handed is not written to', () => {
+    const asked = {role: 'user', content: 'hi'}
+    equal(withTurnContext(asked, 'CONTEXT').content, 'hi\n\nCONTEXT')
+    equal(asked.content, 'hi')
 })
 
-test('a second question mid-turn does not move the block off the first', () => {
-    const anchor = {}
-    const asked = {role: 'user', content: 'Build the level'}
-    const first = [asked]
-    deepEqual(withTurnContext(first, 'CONTEXT', anchor), [
-        {role: 'user', content: 'Build the level\n\nCONTEXT'}
-    ])
-
-    const later = [
-        asked,
-        {role: 'toolResult', content: 'a result'},
-        {role: 'user', content: 'Fix it'}
-    ]
-    deepEqual(withTurnContext(later, 'CONTEXT', anchor), [
-        {role: 'user', content: 'Build the level\n\nCONTEXT'},
-        {role: 'toolResult', content: 'a result'},
-        {role: 'user', content: 'Fix it'}
-    ])
-})
-
-test('a compaction that replaced the messages anchors afresh', () => {
-    const anchor = {}
-    withTurnContext([{role: 'user', content: 'Build the level'}], 'CONTEXT', anchor)
+test('a transcript that arrived without the block is given it, on its question', () => {
     deepEqual(
-        withTurnContext(
+        carryTurnContext(
             [
-                {role: 'compactionSummary', content: 'earlier'},
-                {role: 'user', content: 'Fix it'}
+                {role: 'user', content: 'Build the level'},
+                {role: 'assistant', content: 'Starting'}
             ],
-            'CONTEXT',
-            anchor
+            'CONTEXT'
         ),
         [
-            {role: 'compactionSummary', content: 'earlier'},
-            {role: 'user', content: 'Fix it\n\nCONTEXT'}
+            {role: 'user', content: 'Build the level\n\nCONTEXT'},
+            {role: 'assistant', content: 'Starting'}
         ]
     )
+})
+
+/** A second copy is the rewrite the whole design exists to avoid: the prefix has to stay put. */
+test('a transcript that already carries the block is handed back untouched', () => {
+    const messages = [
+        {role: 'user', content: 'Build the level\n\nCONTEXT'},
+        {role: 'assistant', content: 'Starting'}
+    ]
+    equal(carryTurnContext(messages, 'CONTEXT'), messages)
+})
+
+test('a transcript with no question left to carry it is left alone', () => {
+    const messages = [{role: 'compactionSummary', content: 'earlier'}]
+    equal(carryTurnContext(messages, 'CONTEXT'), messages)
+    equal(carryTurnContext(messages, undefined), messages)
+    equal(carryTurnContext(undefined, 'CONTEXT'), undefined)
+})
+
+test('the file list is not sent a second time when the conversation already carries it', () => {
+    const carried = 'Build the level\n\nEditor: offline\n\nTRACKED\na.gd\nb.gd'
+    equal(
+        turnContextText(
+            {sessionContext: 'Editor: running', inventory: 'TRACKED\na.gd\nb.gd'},
+            carried
+        ),
+        'Editor: running'
+    )
+})
+
+/** The session line flips back and forth, so an older copy of it says nothing about now. */
+test('the session line is sent again even when the same words are already up there', () => {
+    equal(
+        turnContextText({sessionContext: 'Editor: offline'}, 'Editor: offline'),
+        'Editor: offline'
+    )
+})
+
+test('a file list that has changed is sent', () => {
+    equal(
+        turnContextText({inventory: 'TRACKED\na.gd\nb.gd'}, 'TRACKED\na.gd'),
+        'TRACKED\na.gd\nb.gd'
+    )
+})
+
+test('a question that came with pictures still reads as the words in it', () => {
+    equal(
+        carriedText([
+            {
+                role: 'user',
+                content: [
+                    {type: 'text', text: 'look'},
+                    {type: 'image', data: 'x'}
+                ]
+            },
+            {role: 'assistant', content: undefined}
+        ]),
+        'look'
+    )
+    equal(carriedText(undefined), '')
 })
