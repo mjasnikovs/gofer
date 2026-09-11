@@ -835,6 +835,24 @@
                 "runtime.stop"
             ],
             "task": "This game breaks the moment it starts. Run it, find out from the editor what breaks and where, fix the script so it starts cleanly, and run it again to prove the Player moves for two seconds. Then stop it."
+        },
+        {
+            "id": "hud-layout",
+            "fixture": "live-project",
+            "ops": ["node.create_nodes", "node.set_properties", "scene.save"],
+            "task": "Add a HUD to the main scene: a health bar, the score and a minimap."
+        },
+        {
+            "id": "title-screen",
+            "fixture": "live-project",
+            "ops": [
+                "scene.create",
+                "node.create_nodes",
+                "node.set_properties",
+                "scene.save",
+                "project.set_setting"
+            ],
+            "task": "Make a title screen scene for this game that uses the art in assets/, and make it the scene the game starts on."
         }
     ]
 }

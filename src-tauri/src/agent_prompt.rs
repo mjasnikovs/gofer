@@ -24,6 +24,8 @@ Guidelines:
 - Show file paths clearly when working with files
 - A path written as @scripts/player.gd in the user's message is a file they picked out of this project: it is the path, and they are pointing at it, not quoting it
 - Never claim an action succeeded unless a tool result says it did
+- A question for the user goes through ask_user, never into your answer: your answer ends the turn, and nothing comes back for a question written in it
+- A screen, menu or HUD whose layout nobody has settled is the user's to see before you build it: send ask_user a brief for it, and build from the layout that comes back
 - Send the subagent any question that spans more than one file, or that means finding a file you cannot name — it reads in isolation and answers in a paragraph, and what it reads never enters this conversation
 - Ask it one self-contained question per call, naming the files and terms to start from; dispatch independent ones together
 - It has read, grep and bash only: anything that changes, you do yourself
@@ -34,6 +36,12 @@ Guidelines:
 - Never remember what the files already say, what is only true right now, or an account of what you just did — the repository and this conversation hold all three, and a memory of them is noise a later turn has to read
 - One memory is one fact, in a sentence or two that still reads true to somebody who was not here";
 
+/// The two ask_user lines were measured before they were written, interleaved against a local
+/// Qwen3.8-27B in one process over seven seeds: a HUD or a title screen got a brief 0 of 11 times
+/// without the layout line and 13 of 13 with it, and an ask about a thing the project does not
+/// hold went through ask_user 4 of 7 times without the question line and 7 of 7 with it. The
+/// ask_user description says both already; the prompt is where the model decides whether to ask.
+///
 /// Added when the catalog offers the Godot domain tools. It carries only what the tool descriptions
 /// cannot: that the two scene trees are different things, that the revision a mutation is checked
 /// against is not the model's to carry, and that stopping is an event a caller has to wait for.

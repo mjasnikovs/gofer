@@ -22,7 +22,9 @@ const DELEGATING_DESCRIPTION =
     + 'designer drafts the layout, puts it in front of them, reads what they say and revises it until '
     + 'they agree it, and you are handed the agreed layout written down: the regions, where each '
     + 'sits, its size and the spacing between them. That is what you build from. You never write the '
-    + 'markup and you never see the drafts. Send a brief only for a layout nobody has settled yet — '
+    + "markup and you never see the drafts. The designer draws with the project's own art and fonts "
+    + 'when the brief names them by res:// path, so name the files that belong in the layout. '
+    + 'Send a brief only for a layout nobody has settled yet — '
     + 'not to confirm one that is already decided, and not to ask one question about one measurement.'
 
 const DRAFTING_DESCRIPTION =
