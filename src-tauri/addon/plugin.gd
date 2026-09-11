@@ -3820,6 +3820,20 @@ func _node_set_cells(params: Dictionary) -> Dictionary:
         var source_id := -1
         var atlas := Vector2i(-1, -1)
         var alternative := -1
+        # A source or an alternative with no atlas is a paint missing its tile, not an erase: a
+        # live turn sent forty such cells, was answered painted: 0, erased: 40, and read the
+        # empty layer back thirty-four times before its budget ran out.
+        if (cell.has("source") or cell.has("alternative")) and cell.get("atlas") == null:
+            return Params.error(
+                "invalid_params",
+                (
+                    "The cells entry at (%d, %d) names a source and no atlas, so it cannot "
+                    + "paint: send atlas as [column, row] to paint a tile, or an entry with x and "
+                    + "y alone to erase the cells it covers."
+                )
+                % [origin.x, origin.y],
+                {"x": origin.x, "y": origin.y}
+            )
         if cell.has("atlas") and cell["atlas"] != null:
             var named: Variant = cell["atlas"]
             if typeof(named) != TYPE_ARRAY or (named as Array).size() != 2:

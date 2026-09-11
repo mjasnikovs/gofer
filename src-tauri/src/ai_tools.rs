@@ -2152,6 +2152,9 @@ fn is_gofers_own_addon_talking(line: &str) -> bool {
     line.contains("(res://addons/gofer/")
         || line.contains("texture_2d_get") && line.contains("/dummy/")
         || line.starts_with("ERROR: Parameter \"t\" is null")
+        // The header above every backtrace, the addon's included; a game's own frames follow
+        // theirs and say where they are without it.
+        || line == "GDScript backtrace (most recent call first):"
 }
 
 /// The same question asked of a whole page, which is what the tests drive.
