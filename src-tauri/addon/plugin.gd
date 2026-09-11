@@ -1121,7 +1121,7 @@ func _runtime_forward(id: String, op: String, params: Dictionary) -> void:
             _respond_error(id, "runtime_not_running", _why_no_helper_answers(), true)
         return
     if _runtime_broke and RuntimeQueue.PROCESS_AWAITING_OPS.has(op):
-        _respond_error(id, "runtime_broke", "The game is paused in the debugger, so it runs no frames and this call would wait forever. get_tree, inspect_node and get_monitors all answer while it is paused. debug.continue lets it go, and debug.stack_trace says where it is stopped. If it stopped while starting, what stopped it is in the session output - read that, stop the game with runtime.stop, fix it, and run again", true)
+        _respond_error(id, "runtime_broke", "The game is paused in the debugger, so it runs no frames and this call would wait forever. get_tree, inspect_node and get_monitors all answer while it is paused. debug.continue lets it go, and debug.stack_trace says where it is stopped. If it stopped while starting, what stopped it is in the session output - read that, fix it, and run again; runtime.run restarts a halted game by itself", true)
         return
     _runtime_pending.append({
         "id": id,
@@ -1169,7 +1169,7 @@ func _on_runtime_debugger_session_breaked(session_id: int) -> void:
     _fail_pending(
         ["run"],
         "runtime_broke",
-        "The game stopped at an error while starting and is paused in the debugger, and stays there until runtime.stop ends it; read the error in the session output, stop the game, fix what the error names, and run again",
+        "The game stopped at an error while starting and is paused in the debugger; read the error in the session output, fix what it names, and run again - runtime.run restarts a halted game by itself, no stop is needed first",
     )
 
 ## The debugger has resumed the game. It can answer again, and a game that is only being watched

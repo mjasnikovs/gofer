@@ -8,7 +8,7 @@
 //!
 //! Every field is read by serde and by nothing else, which is what the allow above is for.
 
-// GENERATED-BEGIN results sha256:3a4af2a3f8d1a68d
+// GENERATED-BEGIN results sha256:f4ab6426d74bebc4
 /// One node of a scene tree, and the nodes under it.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -785,6 +785,8 @@ pub struct RuntimeWaitResult {
     #[serde(default)]
     pub ms: Option<i64>,
     pub exited: bool,
+    #[serde(default)]
+    pub uptime_ms: Option<i64>,
 }
 
 #[derive(Debug, serde::Deserialize)]

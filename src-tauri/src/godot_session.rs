@@ -1694,7 +1694,7 @@ fn the_games_own_scripts_did_not_compile(facts: &SessionFacts) -> Option<String>
         "The game's own scripts did not compile — the errors below are the engine refusing to run \
          them, not a slow start. Waiting for the helper and reading get_state again will not change \
          that, and stopping and running again reaches the same place. Fix what the errors name and \
-         run once more."
+         run once more; runtime.run restarts a halted game by itself."
             .to_owned(),
     )
 }

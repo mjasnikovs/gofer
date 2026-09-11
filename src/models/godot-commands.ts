@@ -7,7 +7,7 @@ export type GodotCommandSpec<Params extends GodotParams, Result extends GodotRes
     result: Result
 }>
 
-// GENERATED-BEGIN command-names sha256:1c2f0968612c6ace
+// GENERATED-BEGIN command-names sha256:cbfebab3c4281cf4
 export type GodotCommandName =
     | 'session.get_state'
     | 'session.cancel'
@@ -689,7 +689,12 @@ export interface GodotCommandMap {
     >
     readonly 'runtime.wait': GodotCommandSpec<
         Readonly<{frames?: number | undefined; ms?: number | undefined}>,
-        Readonly<{frames?: number | undefined; ms?: number | undefined; exited: boolean}>
+        Readonly<{
+            frames?: number | undefined
+            ms?: number | undefined
+            exited: boolean
+            uptimeMs?: number | undefined
+        }>
     >
     readonly 'runtime.pause': GodotCommandSpec<NoGodotParams, Readonly<{paused: boolean}>>
     readonly 'runtime.resume': GodotCommandSpec<NoGodotParams, Readonly<{paused: boolean}>>

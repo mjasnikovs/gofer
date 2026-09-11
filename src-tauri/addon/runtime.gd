@@ -267,7 +267,16 @@ func _op_wait(params: Dictionary) -> Dictionary:
             break
         await get_tree().process_frame
         frames += 1
-    return _succeed({"frames": frames, "ms": Time.get_ticks_msec() - started, "exited": false})
+    # `uptimeMs` is the game's own clock: a turn that thought for three seconds between a run and
+    # its first wait read positions five seconds in and took them for one and a half.
+    return _succeed(
+        {
+            "frames": frames,
+            "ms": Time.get_ticks_msec() - started,
+            "uptimeMs": Time.get_ticks_msec(),
+            "exited": false,
+        }
+    )
 
 ## Freezes the running game, or lets it go again.
 ##

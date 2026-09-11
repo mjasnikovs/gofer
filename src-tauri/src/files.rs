@@ -157,9 +157,9 @@ impl FileError {
     fn conflict(path: &str, expected: Option<&str>, actual: Option<&str>) -> Self {
         let message = match (expected, actual) {
             (None, Some(_)) => format!(
-                "{path} exists and this agent has not been shown what it holds. Nothing was \
-                 written. Open it with `script.open` — a plain `read` does not record what \
-                 it showed you — then save."
+                "{path} exists, and a plain `read` does not arm a save over it. Nothing was \
+                 written. Open it with `script.open`, which records what it showed you, then \
+                 save."
             ),
             (Some(_), None) => format!(
                 "{path} no longer exists on disk. Nothing was written. Save it again to create the \
@@ -1153,7 +1153,7 @@ mod tests {
 
         let omitted = workspace.write("a.gd", "two", None).expect_err("exists");
         assert!(
-            omitted.message.contains("has not been shown what it holds"),
+            omitted.message.contains("does not arm a save"),
             "an unread file must not be reported as an outside change: {}",
             omitted.message
         );

@@ -5343,6 +5343,12 @@
                         "kind": "flag",
                         "required": true,
                         "note": "True when the game was already gone, which is the answer a wait was run for."
+                    },
+                    {
+                        "name": "uptimeMs",
+                        "kind": "int",
+                        "required": false,
+                        "note": "The game's own clock, milliseconds since it started; absent when the game had exited."
                     }
                 ]
             },
