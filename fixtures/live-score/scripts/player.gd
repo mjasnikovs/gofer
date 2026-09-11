@@ -1,6 +1,6 @@
 extends Node2D
 
-@onready var scoreboard: Node2D = get_parent()
+@onready var scoreboard: Scoreboard = get_parent()
 
 var ticks := 0
 

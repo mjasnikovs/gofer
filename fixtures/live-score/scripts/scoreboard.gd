@@ -1,3 +1,4 @@
+class_name Scoreboard
 extends Node2D
 
 

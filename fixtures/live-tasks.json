@@ -418,14 +418,20 @@
             "fixture": "live-pipeline",
             "ops": [
                 "script.open",
-                "script.diagnostics",
-                "script.edit",
                 "debug.launch",
+                "debug.set_breakpoints",
                 "debug.await_stop",
+                "debug.stack_trace",
                 "debug.variables",
-                "debug.terminate"
+                "debug.evaluate",
+                "script.edit",
+                "debug.terminate",
+                "runtime.run",
+                "runtime.wait",
+                "runtime.inspect_node",
+                "runtime.stop"
             ],
-            "task": "The fighter script has a bug that shows up when the game runs. Find it using the debugger rather than by guessing, fix it, and show that the game now runs without stopping on an error."
+            "task": "The fighter takes far too much damage when the game runs: the scene sets armour to 10, and it still dies within seconds. Find where the damage goes wrong with the debugger rather than by guessing — a breakpoint inside take_damage and the values in its frame — fix it, and show with two health readings a few seconds apart that the fighter now survives."
         },
         {
             "id": "definition-declaration",
