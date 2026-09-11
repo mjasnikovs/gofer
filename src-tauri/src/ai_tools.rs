@@ -2199,6 +2199,9 @@ fn is_gofers_own_addon_talking(line: &str) -> bool {
         // The header above every backtrace, the addon's included; a game's own frames follow
         // theirs and say where they are without it.
         || line == "GDScript backtrace (most recent call first):"
+        // The editor's breakpoint store has no entry for a file until Gofer's first
+        // set_breakpoints writes one, and says so as an error.
+        || line.contains("Couldn't find the given section") && line.contains("key \"state\"")
 }
 
 /// The same question asked of a whole page, which is what the tests drive.

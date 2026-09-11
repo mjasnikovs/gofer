@@ -967,7 +967,7 @@ func _runtime_launch(id: String, restart: bool, scene: String, args: PackedStrin
     var playing := EditorInterface.is_playing_scene()
     # A game halted at an error is worth nothing to keep: four of four live turns that met
     # runtime_broke ran again without stopping first and were refused for it.
-    if playing and not restart and not _runtime_broke:
+    if playing and not restart and _runtime_ready and not _runtime_broke:
         _respond_error(id, "already_running", "The project is already running; stop it or use runtime.restart", true)
         return
     if not scene.is_empty() and not FileAccess.file_exists(scene):
@@ -3830,10 +3830,12 @@ func _node_set_cells(params: Dictionary) -> Dictionary:
                 "invalid_params",
                 (
                     "The cells entry at (%d, %d) names a source and no atlas, so it cannot "
-                    + "paint: send atlas as [column, row] to paint a tile, or an entry with x and "
-                    + "y alone to erase the cells it covers."
+                    + "paint. Send it with the tile named, as "
+                    + "{\"x\": %d, \"y\": %d, \"width\": %d, \"height\": %d, \"atlas\": [0, 0]} "
+                    + "for the tile at column 0, row 0 - resource.describe_tileset lists every "
+                    + "[column, row] the tileset holds - or send x and y alone to erase."
                 )
-                % [origin.x, origin.y],
+                % [origin.x, origin.y, origin.x, origin.y, width, height],
                 {"x": origin.x, "y": origin.y}
             )
         if cell.has("atlas") and cell["atlas"] != null:

@@ -631,7 +631,10 @@ fn anchor_not_found(at: &str, path: &str, text: &str, old_text: &str) -> LspErro
     }
     let start = haystack.starts[first];
     let last = first + needle.text.len() - 1;
-    let held = &text[start..haystack.ends[last]];
+    // From the start of the line, not of the match: a quote that dropped the first line's
+    // indentation was anchored on three times in one live turn, and refused three times.
+    let quoted_from = text[..start].rfind('\n').map_or(0, |newline| newline + 1);
+    let held = &text[quoted_from..haystack.ends[last]];
     let first_line = line_of(start);
     let last_line = line_of(haystack.starts[last]);
     if held.len() > MAX_NEAR_MISS_BYTES {
