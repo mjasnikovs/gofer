@@ -889,7 +889,10 @@ const MAX_INVENTORY_BYTES: usize = 64 * 1024;
 /// assets are not what a task is about, and a worker shown them reads them.
 ///
 /// Gofer's own paths are cut for the same reason: a worker asked how the project works read
-/// `addons/gofer/runtime_queue.gd`, which is Gofer's plumbing and never the task.
+/// `addons/gofer/runtime_queue.gd`, which is Gofer's plumbing and never the task. Every other
+/// addon is cut here too, and only here: a third-party addon is vendored source the task is not
+/// about, and one test framework can be three quarters of the listing. What a task *changed* under
+/// `addons/` still shows, because an edit there is the user's work even when the file is not.
 ///
 /// A worktree Git does not know about answers nothing, which leaves the workers exactly as they were
 /// before this existed.
@@ -898,7 +901,9 @@ pub fn tracked_files(workspace: &Path) -> Option<String> {
     let kept = listed
         .lines()
         .map(str::trim_end)
-        .filter(|path| !path.is_empty() && !is_never_the_users_work(path))
+        .filter(|path| {
+            !path.is_empty() && !is_never_the_users_work(path) && !path.starts_with("addons/")
+        })
         .collect::<Vec<_>>()
         .join("\n");
     (!kept.is_empty()).then(|| bounded_inventory(&kept))
@@ -1771,12 +1776,14 @@ mod tests {
     }
 
     /// The brief's CONTEXT worker read `addons/gofer/runtime_queue.gd` off this listing and spent
-    /// its steps on Gofer's own plumbing.
+    /// its steps on Gofer's own plumbing. A vendored test framework costs more still: gdUnit4 alone
+    /// was 516 of one project's 776 paths.
     #[test]
-    fn the_inventory_leaves_out_gofer_s_own_files() {
+    fn the_inventory_leaves_out_gofer_s_own_files_and_every_other_addon() {
         let repository = repository();
         for path in [
             "addons/gofer/runtime_queue.gd",
+            "addons/gdUnit4/src/GdUnitAssert.gd",
             ".gofer/checks/boss.gd",
             "player/player.gd",
         ] {
@@ -1791,7 +1798,7 @@ mod tests {
 
         assert!(inventory.contains("player/player.gd"), "{inventory}");
         assert!(inventory.contains("project.godot"), "{inventory}");
-        assert!(!inventory.contains("addons/gofer"), "{inventory}");
+        assert!(!inventory.contains("addons/"), "{inventory}");
         assert!(!inventory.contains(".gofer/"), "{inventory}");
     }
 
