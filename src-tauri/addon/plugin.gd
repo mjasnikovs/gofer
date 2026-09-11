@@ -4384,9 +4384,11 @@ func _node_not_found_error(raw: String) -> Dictionary:
         and path != root_path
         and not path.begins_with(root_path + "/")
     ):
+        # The walk is the fact a caller needs — which ancestor exists and what is under it — and
+        # a live turn sent the same relative path three times before an absolute one earned it.
         message = (
-            "%s. Every node path here starts at the scene's own root, which is %s."
-        ) % [message, root_path]
+            "%s. Every node path here starts at the scene's own root, which is %s.%s"
+        ) % [message, root_path, _as_far_as_the_path_goes(root_path + "/" + path)]
     else:
         message += _as_far_as_the_path_goes(path)
     return {

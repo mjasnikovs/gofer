@@ -965,8 +965,22 @@ fn route_one<R: Runtime>(
                 godot_session::a_game_the_debugger_has_halted(op)?;
             }
             let answered = rpc(app, command, params);
+            // A script that preloads a scene this call just wrote keeps its "does not exist"
+            // diagnostic until the server parses it again: a live turn read that error twice
+            // over a file the game was already running.
             if answered.is_ok()
-                && matches!(command, "project.set_autoload" | "project.remove_autoload")
+                && matches!(
+                    command,
+                    "project.set_autoload"
+                        | "project.remove_autoload"
+                        | "scene.create"
+                        | "scene.save"
+                        | "scene.save_as"
+                        | "resource.rescan"
+                        | "resource.create_texture"
+                        | "resource.create_shape"
+                        | "resource.create_tileset"
+                )
             {
                 crate::script::reparse_open_documents();
             }
@@ -1322,6 +1336,7 @@ fn resource_domain<R: Runtime>(
 /// worktree edit must not fail because no editor is bound to it.
 fn tell_the_editor_the_worktree_moved<R: Runtime>(app: &AppHandle<R>) {
     let _ = rpc(app, "resource.rescan", json!({}));
+    crate::script::reparse_open_documents();
 }
 
 /// Resolves every path a gated call names before the user is asked about it. Outside-worktree
@@ -2113,7 +2128,10 @@ fn is_the_editors_progress_bar(line: &str) -> bool {
 /// [`godot_session::read_logs`] and shows the user their editor's output as their editor wrote it.
 fn a_line_a_model_can_read(entry: &godot_session::LogEntry) -> Option<Value> {
     let message = without_terminal_colour(&entry.message);
-    if message.trim().is_empty() || is_the_editors_progress_bar(message.trim()) {
+    if message.trim().is_empty()
+        || is_the_editors_progress_bar(message.trim())
+        || is_gofers_own_addon_talking(message.trim())
+    {
         return None;
     }
     Some(json!({
@@ -2123,6 +2141,17 @@ fn a_line_a_model_can_read(entry: &godot_session::LogEntry) -> Option<Value> {
         "message": message,
         "timestamp": entry.timestamp,
     }))
+}
+
+/// A line Gofer's own addon put in the log, which is never about the model's game.
+///
+/// The headless editor cannot draw the thumbnail `EditorInterface.save_scene` asks for, and says
+/// so as an engine error with a GDScript backtrace whose every frame is in `res://addons/gofer/`.
+/// Two live turns read that as their game failing and spent a page of the log on it.
+fn is_gofers_own_addon_talking(line: &str) -> bool {
+    line.contains("(res://addons/gofer/")
+        || line.contains("texture_2d_get") && line.contains("/dummy/")
+        || line.starts_with("ERROR: Parameter \"t\" is null")
 }
 
 /// The same question asked of a whole page, which is what the tests drive.
