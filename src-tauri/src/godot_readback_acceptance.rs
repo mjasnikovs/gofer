@@ -1025,6 +1025,15 @@ fn every_configuration_command_answers_from_godot() {
         tail.starts_with("setting_not_found") && tail.contains("application/run/main_scene"),
         "the tail of a registered name is that setting, not a new one: {tail}"
     );
+    let read_by_tail = session.error(
+        "project.get_setting",
+        json!({"name": "run/main_scene"}),
+        None,
+    );
+    assert!(
+        read_by_tail.contains("application/run/main_scene"),
+        "a read names the near miss the way a write does: {read_by_tail}"
+    );
 
     session.call(
         "project.set_setting",

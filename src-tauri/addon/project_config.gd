@@ -106,15 +106,7 @@ static func get_setting(params: Dictionary) -> Dictionary:
     if name.is_empty():
         return Params.error("invalid_params", "project.get_setting requires name")
     if not ProjectSettings.has_setting(name):
-        return Params.error(
-            "setting_not_found",
-            (
-                "Project setting '%s' does not exist. project.search_settings takes the words you "
-                + "would say — every one of them has to be in the name, in any order — and answers "
-                + "the names that are really there."
-            ) % name,
-            {"name": name}
-        )
+        return _setting_not_found(name)
     var answer := {
         "name": name,
         "value": Protocol.encode(ProjectSettings.get_setting(name)),
@@ -146,14 +138,8 @@ static func set_setting(params: Dictionary) -> Dictionary:
             {"name": name, "expected": type_string(declared)}
         )
     var existed := ProjectSettings.has_setting(name)
-    if not existed:
-        var meant := _setting_meant(name)
-        if not meant.is_empty():
-            return Params.error(
-                "setting_not_found",
-                "There is no project setting '%s'. Did you mean '%s'?" % [name, meant],
-                {"name": name, "didYouMean": meant}
-            )
+    if not existed and not _setting_meant(name).is_empty():
+        return _setting_not_found(name)
     ProjectSettings.set_setting(name, fitted["value"])
     var failure := save_project_or_error()
     if not failure.is_empty():
@@ -177,6 +163,29 @@ static func set_setting(params: Dictionary) -> Dictionary:
 ## `run/main_scene` for `application/run/main_scene`: a live turn wrote the tail of a real name,
 ## was answered `created: true`, read the phantom back, and spent twelve calls on a game that
 ## still would not start. A name a registered setting ends with is that setting, not a new one.
+## The refusal for a name Godot does not have, with the near miss when there is one.
+##
+## Only the write used to offer it; a read said to search instead, and a live turn asked for
+## `run/main_scene` twice in one night — once to read it, once to write it — and was pointed at
+## `application/run/main_scene` only the second time.
+static func _setting_not_found(name: String) -> Dictionary:
+    var meant := _setting_meant(name)
+    if not meant.is_empty():
+        return Params.error(
+            "setting_not_found",
+            "There is no project setting '%s'. Did you mean '%s'?" % [name, meant],
+            {"name": name, "didYouMean": meant}
+        )
+    return Params.error(
+        "setting_not_found",
+        (
+            "Project setting '%s' does not exist. project.search_settings takes the words you "
+            + "would say — every one of them has to be in the name, in any order — and answers "
+            + "the names that are really there."
+        ) % name,
+        {"name": name}
+    )
+
 static func _setting_meant(name: String) -> String:
     if name.contains("."):
         var candidate := name.replace(".", "/")
@@ -196,15 +205,7 @@ static func reset_setting(params: Dictionary) -> Dictionary:
     if name.is_empty():
         return Params.error("invalid_params", "project.reset_setting requires name")
     if not ProjectSettings.has_setting(name):
-        return Params.error(
-            "setting_not_found",
-            (
-                "Project setting '%s' does not exist. project.search_settings takes the words you "
-                + "would say — every one of them has to be in the name, in any order — and answers "
-                + "the names that are really there."
-            ) % name,
-            {"name": name}
-        )
+        return _setting_not_found(name)
     var typed := Params.reserved_setting_command(name)
     if not typed.is_empty():
         return Params.error(
