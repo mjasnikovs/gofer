@@ -4888,7 +4888,7 @@
         {
             "tool": "godot_debug",
             "op": "restart",
-            "summary": "Restarts the debuggee with the last launch arguments.",
+            "summary": "Restarts the debuggee with the last launch arguments and its breakpoints, and answers like the launch it is.",
             "alone": {
                 "scope": "exclusive",
                 "why": "One debuggee, driven in order: each answer decides what the next call means."
@@ -4901,6 +4901,23 @@
                         "name": "op",
                         "kind": "text",
                         "required": true
+                    },
+                    {
+                        "name": "breakpoints",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "shape",
+                            "shape": "godotVerifiedBreakpoint"
+                        },
+                        "required": true
+                    },
+                    {
+                        "name": "armed",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "text"
+                        },
+                        "required": false
                     }
                 ]
             },

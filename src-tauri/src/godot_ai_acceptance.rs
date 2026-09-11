@@ -2302,7 +2302,17 @@ fn a_restart_of_a_game_halted_at_a_step_stops_again() {
         "{stepped}"
     );
 
-    call("godot_debug", json!({"ops": [{"op": "restart"}]})).expect("restart the halted game");
+    let restarted =
+        call("godot_debug", json!({"ops": [{"op": "restart"}]})).expect("restart the halted game");
+    assert_eq!(
+        restarted["ops"][0]["result"]["op"], "launched",
+        "a restart answers like the launch it is: {restarted}"
+    );
+    assert_eq!(
+        restarted["ops"][0]["result"]["armed"],
+        json!([format!("{PROBE_PATH}:{BREAK_LINE}")]),
+        "and names the breakpoints it re-armed: {restarted}"
+    );
     let again = call(
         "godot_debug",
         json!({"ops": [{"op": "await_stop", "timeoutMs": 60000}]}),
@@ -2376,4 +2386,77 @@ fn a_run_after_a_terminated_debug_game_does_not_inherit_its_breakpoint() {
     let state = call("godot_runtime", json!({"ops": [{"op": "get_state"}]})).expect("state");
     assert_eq!(state["ops"][0]["result"]["broke"], false, "{state}");
     let _ = call("godot_runtime", json!({"ops": [{"op": "stop"}]}));
+}
+
+/// A wait for frames that the debugger interrupts is answered at the break, not at its deadline.
+///
+/// A live turn pressed the key that reached its own breakpoint and waited twenty seconds to be
+/// told the game had stopped. The press was delivered; the addon knew the game had broken the
+/// moment it did.
+#[test]
+fn a_wait_the_debugger_interrupts_is_answered_at_the_break() {
+    let session = start_session();
+    let app = mock_app();
+    let data = TempDir::new().expect("temporary application data");
+    let storage = crate::storage::ProjectStorage::open(data.path(), &session.worktree)
+        .expect("open project storage");
+    app.manage(crate::storage::StorageSlot::new(Ok(storage)));
+    let call = |tool: &str, params: Value| {
+        ai_tools::dispatch(
+            app.handle(),
+            ai_tools::ToolRequest {
+                tool: tool.to_owned(),
+                params,
+            },
+        )
+    };
+    call("godot_debug", json!({"ops": [{"op": "launch"}]})).expect("launch with nothing armed");
+    // The launch answers when the process starts; the helper announces itself a little later,
+    // and there is no event for it on this side, so the state is read until it says ready.
+    let booting = std::time::Instant::now();
+    let drawing = loop {
+        let waited = call(
+            "godot_runtime",
+            json!({"ops": [{"op": "wait", "frames": 5}]}),
+        );
+        if let Ok(answer) = &waited
+            && answer["ops"][0]["result"]["exited"] == false
+        {
+            break answer.clone();
+        }
+        assert!(
+            booting.elapsed() < std::time::Duration::from_secs(60),
+            "the helper never announced itself: {waited:?}"
+        );
+    };
+    assert_eq!(drawing["ops"][0]["result"]["exited"], false, "{drawing}");
+    let armed = call(
+        "godot_debug",
+        json!({"ops": [{"op": "set_breakpoints", "path": PROBE_PATH, "lines": [BREAK_LINE]}]}),
+    )
+    .expect("arm a line that runs every frame");
+    assert_eq!(
+        armed["ops"][0]["result"]["breakpoints"][0]["verified"], true,
+        "{armed}"
+    );
+    let started = std::time::Instant::now();
+    let interrupted = call(
+        "godot_runtime",
+        json!({"ops": [{"op": "wait", "ms": 20000}]}),
+    )
+    .expect_err("a wait the break interrupts is refused");
+    assert_eq!(interrupted.code, "runtime_broke", "{}", interrupted.message);
+    assert!(
+        interrupted
+            .message
+            .contains("stopped the game while this call was waiting"),
+        "{}",
+        interrupted.message
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "answered at the break, not at the deadline: {:?}",
+        started.elapsed()
+    );
+    let _ = call("godot_debug", json!({"ops": [{"op": "terminate"}]}));
 }

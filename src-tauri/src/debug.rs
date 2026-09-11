@@ -702,7 +702,10 @@ fn answer(request: DebugRequest) -> Result<DebugResponse, DapError> {
                 client.restart()?;
                 DEBUGGER_HOLDS_A_GAME.store(true, Ordering::Relaxed);
                 crate::godot_dap::note_the_debuggee_is_running();
-                return Ok(DebugResponse::Acknowledged);
+                return Ok(DebugResponse::Launched {
+                    breakpoints: Vec::new(),
+                    armed: where_the_breakpoints_are(),
+                });
             };
             if holds_a_game() {
                 let _ = client.terminate();
@@ -713,8 +716,7 @@ fn answer(request: DebugRequest) -> Result<DebugResponse, DapError> {
                 scene.as_deref(),
                 play_args,
                 source_breakpoints_still_armed(),
-            )?;
-            Ok(DebugResponse::Acknowledged)
+            )
         }
         DebugRequest::Terminate => {
             release_the_editors_breakpoints(&client, &workspace);

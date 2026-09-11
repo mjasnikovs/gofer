@@ -752,6 +752,38 @@
                 "runtime.stop"
             ],
             "task": "Create a res://scenes/npc.tscn whose root is a Node2D with an exported String property display_name and a Label child that shows it on ready. Place three NPC instances in the main scene named Bob, Alice and Kim with display_name set to their names. Run the game and prove from the running nodes that each Label shows the right name."
+        },
+        {
+            "id": "debug-on-input",
+            "fixture": "live-project",
+            "ops": [
+                "script.edit",
+                "project.set_input_action",
+                "debug.launch",
+                "debug.await_stop",
+                "runtime.input",
+                "debug.stack_trace",
+                "debug.variables",
+                "debug.continue",
+                "debug.terminate"
+            ],
+            "task": "Add a jump() function to scripts/player.gd that sets a jumped flag and prints \"jumped\", called when a new input action jump (Space) is just pressed. Launch the game under the debugger with a breakpoint on the print inside jump(), press Space so it fires, and when it stops report the stack frames and the value of jumped. Then continue and terminate."
+        },
+        {
+            "id": "stack-variables",
+            "fixture": "live-pipeline",
+            "ops": [
+                "script.open",
+                "debug.launch",
+                "debug.await_stop",
+                "debug.stack_trace",
+                "debug.scopes",
+                "debug.variables",
+                "debug.evaluate",
+                "debug.step_out",
+                "debug.terminate"
+            ],
+            "task": "Launch the pipeline game under the debugger with a breakpoint on the return line of _floor_damage in scripts/fighter.gd. When it stops, report every frame on the stack, the value of amount in the top frame, the value of after_resistance in the take_damage frame below it, and evaluate minimum_damage * 2. Step out once and say which frame you are in. Terminate."
         }
     ]
 }

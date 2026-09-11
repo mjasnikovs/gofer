@@ -1111,7 +1111,9 @@ func _why_no_helper_answers() -> String:
 ## the caller can start the game and retry, so the error is retryable.
 func _runtime_forward(id: String, op: String, params: Dictionary) -> void:
     if not _runtime_ready or _runtime_session_id < 0:
-        if RuntimeQueue.EXIT_ANSWERING_OPS.has(op):
+        # A wait sent before the helper announced answered `exited: true` about a game that was
+        # still booting; only a game the editor is no longer playing has exited.
+        if RuntimeQueue.EXIT_ANSWERING_OPS.has(op) and not EditorInterface.is_playing_scene():
             _respond_result(id, {"exited": true})
         else:
             _respond_error(id, "runtime_not_running", _why_no_helper_answers(), true)
@@ -1161,6 +1163,7 @@ func _on_runtime_debugger_session_breaked(session_id: int) -> void:
     if session_id != _runtime_session_id:
         return
     _runtime_broke = true
+    _fail_the_frames_nobody_will_draw()
     _fail_pending(
         ["run"],
         "runtime_broke",
@@ -1198,6 +1201,27 @@ func _end_the_waits_their_game_outlived() -> void:
 
 ## Answers and drops every pending entry of the named kinds; the rest stay waiting. Every caller
 ## here is retryable: the game is gone or paused, and the caller can start one and ask again.
+## A request waiting for frames when the debugger takes the game will never get them: a live
+## turn pressed the key that reached its own breakpoint and waited out twenty seconds to be told
+## the game had stopped. The press was delivered; only the answer was owed, and this is it.
+func _fail_the_frames_nobody_will_draw() -> void:
+    var kept: Array[Dictionary] = []
+    for pending in _runtime_pending:
+        if pending["kind"] == "game" and RuntimeQueue.PROCESS_AWAITING_OPS.has(pending["op"]):
+            _respond_error(
+                pending["id"],
+                "runtime_broke",
+                (
+                    "The debugger stopped the game while this call was waiting for frames: what "
+                    + "the call sent was delivered, and the game halted before it could answer. "
+                    + "debug.stack_trace says where it stopped; debug.continue lets it run on."
+                ),
+                true
+            )
+        else:
+            kept.append(pending)
+    _runtime_pending = kept
+
 func _fail_pending(kinds: Array, code: String, message: String) -> void:
     var kept: Array[Dictionary] = []
     for pending in _runtime_pending:
