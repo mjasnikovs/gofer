@@ -477,6 +477,27 @@ fn what_a_timed_out_evaluate_usually_means(expression: &str, failure: DapError) 
     failure
 }
 
+/// Refuses an evaluate while the game runs, before the adapter spends five seconds not answering.
+///
+/// Godot's adapter does not refuse an evaluate against a running game either: it waits for a frame
+/// that never comes and answers `Timeout reached`, and the sentence added to that timeout blames a
+/// breakpoint and a pause. One live turn attached to a running game, evaluated straight away, and
+/// was told about a breakpoint it had never set. The adapter's own `stopped` and `continued`
+/// events say which state the game is in, so a running one is named as the reason here.
+fn refusing_an_evaluate_of_a_running_game(debuggee_is_stopped: bool) -> Result<(), DapError> {
+    if debuggee_is_stopped {
+        return Ok(());
+    }
+    Err(DapError::new(
+        "not_stopped",
+        "The game is running, and evaluate reads the frame it is stopped in, so nothing answers \
+         until it stops. Set a breakpoint on a line the game reaches with set_breakpoints, wait \
+         for it with await_stop, then evaluate there. A pause is not enough: it stops the game \
+         between frames, with no frame to evaluate in.",
+    )
+    .retryable())
+}
+
 /// Answers one debugger request, and notices in the answer that the game it was holding is gone.
 pub fn call(request: DebugRequest) -> Result<DebugResponse, DapError> {
     let answered = answer(request);
@@ -649,11 +670,14 @@ fn answer(request: DebugRequest) -> Result<DebugResponse, DapError> {
         DebugRequest::Evaluate {
             expression,
             frame_id,
-        } => Ok(DebugResponse::Evaluate {
-            result: client
-                .evaluate(&expression, frame_id)
-                .map_err(|failure| what_a_timed_out_evaluate_usually_means(&expression, failure))?,
-        }),
+        } => {
+            refusing_an_evaluate_of_a_running_game(crate::godot_dap::debuggee_is_stopped())?;
+            Ok(DebugResponse::Evaluate {
+                result: client.evaluate(&expression, frame_id).map_err(|failure| {
+                    what_a_timed_out_evaluate_usually_means(&expression, failure)
+                })?,
+            })
+        }
         DebugRequest::Continue { thread_id } => Ok(DebugResponse::Continued {
             all_threads: client.continue_execution(thread_id.unwrap_or(MAIN_THREAD_ID))?,
         }),
@@ -1251,6 +1275,25 @@ mod tests {
     /// Measured against the pinned 4.7.2 in `godot_dap_acceptance`, which drives a real game:
     /// after a pause, `stackTrace` answers `[]` and `evaluate` answers a timeout. A live turn met
     /// both, read nothing into either, and abandoned the debugger.
+    /// An evaluate against a running game is refused by name, before the adapter times it out.
+    #[test]
+    fn an_evaluate_of_a_running_game_is_refused_before_the_adapter_waits_on_it() {
+        let refused = refusing_an_evaluate_of_a_running_game(false).expect_err("a running game");
+        assert_eq!(refused.code, "not_stopped");
+        assert!(refused.retryable, "stopping the game is what fixes it");
+        assert!(
+            refused.message.contains("set_breakpoints") && refused.message.contains("await_stop"),
+            "the way onward is named: {}",
+            refused.message
+        );
+        assert!(
+            !refused.message.contains("has a breakpoint in it"),
+            "a breakpoint nobody set is not blamed: {}",
+            refused.message
+        );
+        assert!(refusing_an_evaluate_of_a_running_game(true).is_ok());
+    }
+
     #[test]
     fn an_empty_stack_and_a_timed_out_evaluate_both_say_a_pause_is_not_a_break() {
         assert!(

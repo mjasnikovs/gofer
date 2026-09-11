@@ -841,7 +841,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:be3394ac30a69ab3
+// GENERATED-BEGIN operations sha256:4960c59ef2ad7c55
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -1817,7 +1817,7 @@ pub const GODOT_DEBUG_OPERATIONS: &[Operation] = &[
     op(
         "godot_debug",
         "evaluate",
-        "Evaluates an expression in a frame.",
+        "Evaluates an expression in the frame the game is stopped in; a running game is refused as not_stopped, and a pause gives no frame either.",
         Answers::Rust,
         &[need("expression", Text), opt("frameId", Int)],
     ),

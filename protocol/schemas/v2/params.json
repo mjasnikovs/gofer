@@ -4693,7 +4693,7 @@
         {
             "tool": "godot_debug",
             "op": "evaluate",
-            "summary": "Evaluates an expression in a frame.",
+            "summary": "Evaluates an expression in the frame the game is stopped in; a running game is refused as not_stopped, and a pause gives no frame either.",
             "params": [
                 {
                     "name": "expression",
