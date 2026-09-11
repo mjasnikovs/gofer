@@ -36,7 +36,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
@@ -1101,14 +1101,27 @@ fn read_loop(
 /// Maintained here rather than in `debug.rs` because [`dispatch`] is the one place every adapter
 /// event passes through. `debug.rs` reads events only while something is waiting for a stop, so a
 /// `stopped` that arrives with nobody waiting sits in a queue and would be seen late or not at all.
-static DEBUGGEE_IS_STOPPED: AtomicBool = AtomicBool::new(false);
+static DEBUGGEE_STATE: AtomicU8 = AtomicU8::new(DEBUGGEE_RUNNING);
+
+const DEBUGGEE_RUNNING: u8 = 0;
+/// Halted inside a script: a breakpoint, a step, an exception — there is a frame to read.
+const DEBUGGEE_IN_A_FRAME: u8 = 1;
+/// Halted by a pause, which stops the game between frames and leaves none to read.
+const DEBUGGEE_PAUSED: u8 = 2;
 
 /// No request is waiting to start a run. Request sequence numbers start at 1, so zero is free.
 const NO_BOUNDARY: u64 = 0;
 
 /// Whether the debuggee is halted, as far as the adapter's events have said.
 pub fn debuggee_is_stopped() -> bool {
-    DEBUGGEE_IS_STOPPED.load(Ordering::Relaxed)
+    DEBUGGEE_STATE.load(Ordering::Relaxed) != DEBUGGEE_RUNNING
+}
+
+/// Whether the halt is a pause, which leaves no frame: measured on 4.7.2, `stackTrace` answers
+/// `[]` after one and every `evaluate` waits out its timeout. The reason at a pause is `paused`,
+/// and Godot echoes an empty `exception` behind it — see [`StoppedDetails::is_a_pauses_echo`].
+pub fn debuggee_is_paused() -> bool {
+    DEBUGGEE_STATE.load(Ordering::Relaxed) == DEBUGGEE_PAUSED
 }
 
 /// Records that the debuggee is running again.
@@ -1119,7 +1132,24 @@ pub fn debuggee_is_stopped() -> bool {
 /// failure mode this must not have, because it would refuse a call that could have been answered.
 /// Clearing twice costs nothing; clearing never costs a working call.
 pub(crate) fn note_the_debuggee_is_running() {
-    DEBUGGEE_IS_STOPPED.store(false, Ordering::Relaxed);
+    DEBUGGEE_STATE.store(DEBUGGEE_RUNNING, Ordering::Relaxed);
+}
+
+/// Which halt a `stopped` event announces, read the way [`StoppedDetails`] reads it.
+fn how_the_debuggee_halted(body: Option<&Value>) -> u8 {
+    let reason = body
+        .and_then(|body| body.get("reason"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let text = body
+        .and_then(|body| body.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if reason == "paused" || (reason == "exception" && text.is_empty()) {
+        DEBUGGEE_PAUSED
+    } else {
+        DEBUGGEE_IN_A_FRAME
+    }
 }
 
 fn dispatch(shared: &Arc<Mutex<Shared>>, next_seq: &AtomicU64, marks: &Marks, message: Value) {
@@ -1156,7 +1186,10 @@ fn dispatch(shared: &Arc<Mutex<Shared>>, next_seq: &AtomicU64, marks: &Marks, me
                     // A stop is proof the new debuggee exists, for an adapter that answers the
                     // request that started it later than that.
                     open_the_run_that_is_already_stopped(&marks.run, &marks.run_boundary);
-                    DEBUGGEE_IS_STOPPED.store(true, Ordering::Relaxed);
+                    DEBUGGEE_STATE.store(
+                        how_the_debuggee_halted(message.get("body")),
+                        Ordering::Relaxed,
+                    );
                 }
                 "continued" => note_the_debuggee_is_running(),
                 "terminated" | "exited" => {
@@ -1293,6 +1326,34 @@ fn write_message(writer: &mut TcpStream, message: &Value) -> Result<(), DapError
 
 #[cfg(test)]
 mod tests {
+    /// A pause and its empty exception echo leave no frame; every other stop is inside one.
+    #[test]
+    fn a_pause_and_its_echo_are_told_apart_from_a_stop_in_a_frame() {
+        use super::{DEBUGGEE_IN_A_FRAME, DEBUGGEE_PAUSED, how_the_debuggee_halted};
+        let halted = |body: serde_json::Value| how_the_debuggee_halted(Some(&body));
+        assert_eq!(
+            halted(serde_json::json!({"reason": "paused"})),
+            DEBUGGEE_PAUSED
+        );
+        assert_eq!(
+            halted(serde_json::json!({"reason": "exception", "text": ""})),
+            DEBUGGEE_PAUSED
+        );
+        assert_eq!(
+            halted(serde_json::json!({"reason": "exception", "text": "Invalid call"})),
+            DEBUGGEE_IN_A_FRAME
+        );
+        assert_eq!(
+            halted(serde_json::json!({"reason": "breakpoint"})),
+            DEBUGGEE_IN_A_FRAME
+        );
+        assert_eq!(
+            halted(serde_json::json!({"reason": "step"})),
+            DEBUGGEE_IN_A_FRAME
+        );
+        assert_eq!(how_the_debuggee_halted(None), DEBUGGEE_IN_A_FRAME);
+    }
+
     use super::*;
     use std::net::TcpListener;
     use std::path::PathBuf;
