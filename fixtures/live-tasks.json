@@ -699,6 +699,59 @@
                 "runtime.stop"
             ],
             "task": "Add an AnimationPlayer to the main scene with an animation named fade that takes the Label's modulate alpha from 1 to 0 over one second, and play it on ready. Run the game, read the Label's modulate at about half a second and again after the animation is over, and prove it faded."
+        },
+        {
+            "id": "custom-signal",
+            "fixture": "live-project",
+            "ops": [
+                "script.edit",
+                "script.save",
+                "node.create_nodes",
+                "node.set_properties",
+                "scene.save",
+                "runtime.run",
+                "runtime.wait",
+                "logs.read",
+                "runtime.stop"
+            ],
+            "task": "Declare a custom signal tick_reached(count) on Main that is emitted from _on_tick, and add a Counter node with its own script that connects to that signal in code and prints \"counter saw N\". Run the game for three seconds and prove from the log that Counter saw ticks 1, 2 and 3."
+        },
+        {
+            "id": "wall-stop",
+            "fixture": "live-project",
+            "ops": [
+                "resource.create_tileset",
+                "node.create_nodes",
+                "node.set_cells",
+                "node.change_type",
+                "resource.create_shape",
+                "node.set_properties",
+                "script.edit",
+                "project.set_input_action",
+                "scene.save",
+                "runtime.run",
+                "runtime.input",
+                "runtime.inspect_node",
+                "runtime.stop"
+            ],
+            "task": "Cut assets/tiles.png (16x16 tiles, 8 across, 2 down, top-left is ground and the one right of it is brick) into a solid TileSet, paint a floor of ground at y=14 from x=0 to x=30 and a wall of brick at x=12 from y=10 to y=13. Make the Player a CharacterBody2D standing on the floor at x=64 with a 14x22 rectangle shape, moving right at 150 px/s while D is held. Run the game, hold D for three seconds, and prove with the Player's position that it stopped at the wall instead of passing through it."
+        },
+        {
+            "id": "scene-instances-props",
+            "fixture": "live-project",
+            "ops": [
+                "scene.create",
+                "node.create_nodes",
+                "script.save",
+                "scene.save",
+                "scene.open",
+                "node.instantiate",
+                "node.set_properties",
+                "runtime.run",
+                "runtime.inspect_node",
+                "runtime.stop"
+            ],
+            "task": "Create a res://scenes/npc.tscn whose root is a Node2D with an exported String property display_name and a Label child that shows it on ready. Place three NPC instances in the main scene named Bob, Alice and Kim with display_name set to their names. Run the game and prove from the running nodes that each Label shows the right name."
         }
     ]
 }

@@ -307,6 +307,22 @@ pub(crate) fn where_the_breakpoints_are() -> Vec<String> {
         .collect()
 }
 
+/// The armed breakpoints as a launch takes them, so a restart re-sends every one.
+fn source_breakpoints_still_armed() -> Vec<SourceBreakpoints> {
+    ARMED_BREAKPOINTS
+        .lock()
+        .map(|armed| {
+            armed
+                .iter()
+                .map(|(path, lines)| SourceBreakpoints {
+                    path: path.clone(),
+                    lines: lines.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Records what a `set_breakpoints` asked for, and forgets a file it asked for none in.
 fn note_the_armed_breakpoints(path: &str, lines: &[i64]) {
     let Ok(mut armed) = ARMED_BREAKPOINTS.lock() else {
@@ -663,9 +679,27 @@ fn answer(request: DebugRequest) -> Result<DebugResponse, DapError> {
             })
         }
         DebugRequest::Restart => {
-            client.restart()?;
-            DEBUGGER_HOLDS_A_GAME.store(true, Ordering::Relaxed);
-            crate::godot_dap::note_the_debuggee_is_running();
+            // Godot's own `restart` re-runs the game and never announces the stop the new game
+            // hits: measured on 4.7.2, a game halted at a step, restarted, broke on its
+            // breakpoint again with the adapter sending `process` and `output` and no `stopped`,
+            // and the next wait ran its full course. Two live turns lost 65 s to it. Terminate
+            // and a fresh launch — the same breakpoints re-sent — is what announces the stop.
+            let Some((scene, play_args)) = client.last_launch() else {
+                client.restart()?;
+                DEBUGGER_HOLDS_A_GAME.store(true, Ordering::Relaxed);
+                crate::godot_dap::note_the_debuggee_is_running();
+                return Ok(DebugResponse::Acknowledged);
+            };
+            if holds_a_game() {
+                let _ = client.terminate();
+            }
+            launch(
+                &client,
+                &workspace,
+                scene.as_deref(),
+                play_args,
+                source_breakpoints_still_armed(),
+            )?;
             Ok(DebugResponse::Acknowledged)
         }
         DebugRequest::Terminate => {

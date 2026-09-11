@@ -2244,3 +2244,61 @@ fn a_script_is_read_again_once_an_autoload_declares_the_name_it_uses() {
         "once the autoload declares it, the script that uses it is clean: {after}"
     );
 }
+
+/// A restart of a game halted at a step stops again, and the wait after it says so.
+///
+/// Godot's own `restart` re-ran the game and never announced the stop the new game hit: the
+/// adapter sent `process` and `output` and no `stopped`, while `get_state` read `broke: true` and
+/// `stack_trace` listed the frames. Two live turns waited 65 s on it. This is the live shape,
+/// with no terminate before the restart, and it is answered by terminating and launching afresh.
+#[test]
+fn a_restart_of_a_game_halted_at_a_step_stops_again() {
+    let session = start_session();
+    let app = mock_app();
+    let data = TempDir::new().expect("temporary application data");
+    let storage = crate::storage::ProjectStorage::open(data.path(), &session.worktree)
+        .expect("open project storage");
+    app.manage(crate::storage::StorageSlot::new(Ok(storage)));
+    let call = |tool: &str, params: Value| {
+        ai_tools::dispatch(
+            app.handle(),
+            ai_tools::ToolRequest {
+                tool: tool.to_owned(),
+                params,
+            },
+        )
+    };
+    call(
+        "godot_debug",
+        json!({"ops": [{"op": "launch", "playArgs": ["--headless"],
+            "breakpoints": [{"path": PROBE_PATH, "lines": [BREAK_LINE]}]}]}),
+    )
+    .expect("launch");
+    call(
+        "godot_debug",
+        json!({"ops": [{"op": "await_stop", "timeoutMs": 60000}]}),
+    )
+    .expect("the first stop");
+    call("godot_debug", json!({"ops": [{"op": "step_over"}]})).expect("step over");
+    let stepped = call(
+        "godot_debug",
+        json!({"ops": [{"op": "await_stop", "timeoutMs": 60000}]}),
+    )
+    .expect("the step lands");
+    assert_eq!(
+        stepped["ops"][0]["result"]["stopped"]["reason"], "step",
+        "{stepped}"
+    );
+
+    call("godot_debug", json!({"ops": [{"op": "restart"}]})).expect("restart the halted game");
+    let again = call(
+        "godot_debug",
+        json!({"ops": [{"op": "await_stop", "timeoutMs": 60000}]}),
+    )
+    .expect("the restarted game stops on the same breakpoint, and the wait is told");
+    assert_eq!(
+        again["ops"][0]["result"]["stopped"]["reason"], "breakpoint",
+        "{again}"
+    );
+    let _ = call("godot_debug", json!({"ops": [{"op": "terminate"}]}));
+}

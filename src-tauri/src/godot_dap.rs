@@ -737,6 +737,21 @@ impl DapClient {
 
     /// Relaunches the game with the arguments of the last launch or attach, nested the way
     /// Godot's restart handler expects (`arguments.arguments`).
+    /// The scene and play arguments of the last launch, or `None` after an attach, which has
+    /// nothing to launch again.
+    pub fn last_launch(&self) -> Option<(Option<String>, Vec<String>)> {
+        let held = self.launch_arguments.lock().ok()?.clone()?;
+        let scene = held.get("scene")?.as_str().map(str::to_owned);
+        let play_args = held
+            .get("playArgs")?
+            .as_array()?
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        Some((scene, play_args))
+    }
+
     pub fn restart(&self) -> Result<(), DapError> {
         let arguments = self
             .launch_arguments
