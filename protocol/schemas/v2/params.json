@@ -4494,6 +4494,12 @@
                         "shape": "godotStoppedDetails",
                         "required": false,
                         "note": "Null when the debuggee ended before it stopped."
+                    },
+                    {
+                        "name": "note",
+                        "kind": "text",
+                        "required": false,
+                        "note": "Present when the wait ran out with no breakpoint set: nothing could have stopped the game, and it ran on."
                     }
                 ]
             },

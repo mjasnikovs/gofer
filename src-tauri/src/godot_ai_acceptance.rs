@@ -1076,10 +1076,19 @@ fn a_debugger_turn_meets_what_a_live_turn_met() {
         "godot_debug",
         json!({"ops": [{"op": "await_stop", "timeoutMs": 3000}]}),
     );
-    match after {
-        Err(failure) => assert_eq!(failure.code, "stop_timeout", "{}", failure.message),
-        Ok(answer) => panic!("nothing stops a game running freely, yet the wait answered {answer}"),
-    }
+    // Nothing is armed, so the wait running its course is the proof, answered as one: no stop,
+    // and a note saying why there could not have been one.
+    let after = after.expect("a wait with nothing armed answers rather than fails");
+    assert!(
+        after["ops"][0]["result"]["stopped"].is_null(),
+        "nothing stops a game running freely: {after}"
+    );
+    assert!(
+        after["ops"][0]["result"]["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("no breakpoint is set")),
+        "{after}"
+    );
 
     let stopped = call("godot_runtime", json!({"ops": [{"op": "stop"}]}))
         .expect("the runtime stops the game the debugger launched");

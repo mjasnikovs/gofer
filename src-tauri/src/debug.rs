@@ -223,6 +223,9 @@ pub enum DebugResponse {
     },
     Stopped {
         stopped: Option<StoppedDetails>,
+        /// Why there is no stop, when the wait ran out with nothing armed that could have made one.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
 }
 
@@ -496,7 +499,7 @@ pub fn call(request: DebugRequest) -> Result<DebugResponse, DapError> {
 /// arrives, and there is nowhere else to look for it.
 fn answer_says_the_game_ended(answer: &DebugResponse) -> bool {
     match answer {
-        DebugResponse::Stopped { stopped } => stopped.is_none(),
+        DebugResponse::Stopped { stopped, .. } => stopped.is_none(),
         DebugResponse::Stepped { outcome } => matches!(outcome, StepOutcome::Terminated),
         _ => false,
     }
@@ -682,16 +685,32 @@ fn answer(request: DebugRequest) -> Result<DebugResponse, DapError> {
                     .min(MAX_STOP_TIMEOUT_MS),
             );
             let events = events.lock().map_err(|_| poisoned())?;
-            Ok(DebugResponse::Stopped {
-                stopped: client
-                    .await_stop(&events, thread_id.unwrap_or(MAIN_THREAD_ID), timeout)
-                    .map_err(|error| {
-                        saying_what_has_not_been_reached(
-                            saying_the_wait_was_the_callers_own(error, timeout_ms),
-                            timeout_ms,
-                        )
-                    })?,
-            })
+            match client.await_stop(&events, thread_id.unwrap_or(MAIN_THREAD_ID), timeout) {
+                Ok(stopped) => Ok(DebugResponse::Stopped {
+                    stopped,
+                    note: None,
+                }),
+                // A wait with nothing armed that ran its course is the proof a turn asked for —
+                // "it runs on without stopping" — and one turn paid four timeouts, 80 s, to be
+                // told so as failures.
+                Err(error)
+                    if error.code == "stop_timeout" && where_the_breakpoints_are().is_empty() =>
+                {
+                    Ok(DebugResponse::Stopped {
+                        stopped: None,
+                        note: Some(format!(
+                            "Nothing stopped in {timeout:?}: no breakpoint is set, so nothing here \
+                             stops the game on a line, and it ran on the whole time. Set one with \
+                             set_breakpoints to watch a line; runtime.wait runs frames without \
+                             waiting for a stop."
+                        )),
+                    })
+                }
+                Err(error) => Err(saying_what_has_not_been_reached(
+                    saying_the_wait_was_the_callers_own(error, timeout_ms),
+                    timeout_ms,
+                )),
+            }
         }
         DebugRequest::Restart => {
             // Godot's own `restart` re-runs the game and never announces the stop the new game
@@ -1328,7 +1347,10 @@ mod tests {
         };
 
         for ended in [
-            super::DebugResponse::Stopped { stopped: None },
+            super::DebugResponse::Stopped {
+                stopped: None,
+                note: None,
+            },
             super::DebugResponse::Stepped {
                 outcome: super::StepOutcome::Terminated,
             },
@@ -1342,6 +1364,7 @@ mod tests {
         for alive in [
             super::DebugResponse::Stopped {
                 stopped: Some(stop.clone()),
+                note: None,
             },
             super::DebugResponse::Stepped {
                 outcome: super::StepOutcome::SteppedOut { stop: stop.clone() },

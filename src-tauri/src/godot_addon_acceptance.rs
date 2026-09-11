@@ -803,8 +803,7 @@ fn the_addon_builds_a_tile_level_from_an_atlas() {
         Some(session.revision()),
     );
     assert!(
-        forgotten.starts_with("invalid_params")
-            && forgotten.contains("names a source and no atlas"),
+        forgotten.starts_with("invalid_params") && forgotten.contains("names no atlas"),
         "a source with no atlas is a paint missing its tile, not an erase: {forgotten}"
     );
 

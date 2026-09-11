@@ -3829,8 +3829,8 @@ func _node_set_cells(params: Dictionary) -> Dictionary:
             return Params.error(
                 "invalid_params",
                 (
-                    "The cells entry at (%d, %d) names a source and no atlas, so it cannot "
-                    + "paint. Send it with the tile named, as "
+                    "The cells entry at (%d, %d) names no atlas, so it cannot paint. Send it "
+                    + "with the tile named, as "
                     + "{\"x\": %d, \"y\": %d, \"width\": %d, \"height\": %d, \"atlas\": [0, 0]} "
                     + "for the tile at column 0, row 0 - resource.describe_tileset lists every "
                     + "[column, row] the tileset holds - or send x and y alone to erase."
