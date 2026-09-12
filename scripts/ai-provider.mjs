@@ -65,6 +65,7 @@ import {toolTarget} from './tool-target.mjs'
 import {withoutPackedLiterals} from './scene-text.mjs'
 import {withLineNumbers} from './numbered-read.mjs'
 import {notesTheRead} from './noted-read.mjs'
+import {forwardsScriptsToTheServer} from './script-forwarding.mjs'
 import {confineTool} from './workspace-confinement.mjs'
 import {readableProviderError} from './provider-error.mjs'
 import {piThinkingLevel} from './thinking-level.mjs'
@@ -387,7 +388,7 @@ export function createAgentTools(workspacePath, domains, host, extra = [], model
             workspacePath
         ),
         ...[createGrepTool(), createWriteTool(), createEditTool(), createBashTool()].map(tool =>
-            confineTool(tool, workspacePath, frozen)
+            forwardsScriptsToTheServer(confineTool(tool, workspacePath, frozen), host)
         )
     ]
     const guard = createProgressGuard()

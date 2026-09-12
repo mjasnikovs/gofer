@@ -60,7 +60,7 @@ const GODOT_PROMPT: &str = r#"Godot engine (a Gofer-managed editor, reached thro
 
 Editing the project:
 - Scenes and project.godot belong to the editor: change them with the scene, node and project operations, never by writing the file as text — the write, edit and bash tools refuse those paths
-- GDScript belongs to the language server: the write and edit tools refuse a .gd, because a file written behind the server leaves Godot running the old code
+- GDScript belongs to the language server: an edit or write of a .gd is carried out as script.edit or script.save, because a file written behind the server leaves Godot running the old code
 {typing}- Never guess a script filename: script.list names every script in the project, and is the call to make before opening, reading or writing one whose path you were not given
 - Every other file is yours to write
 - Create a script with script.save, then script.diagnostics on the same path — a script that does not parse stops its scene from loading, and the language server is the only thing that says so immediately
