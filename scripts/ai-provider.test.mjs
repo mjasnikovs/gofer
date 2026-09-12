@@ -37,6 +37,8 @@ import {
     toolStep,
     withoutProbes
 } from './ai-turn-harness.mjs'
+import {scratchLine} from './turn-context.mjs'
+import {scratchDirectory} from './workspace-confinement.mjs'
 
 test('carries the task through to the request, so a server can route it to its own cache', async context => {
     const mock = startServer()
@@ -123,7 +125,10 @@ test('sends image-only prompts as OpenAI image content', async context => {
 
         assert.deepEqual(mock.request().body.messages.at(-1), {
             role: 'user',
-            content: [{type: 'image_url', image_url: {url: 'data:image/png;base64,aGk='}}]
+            content: [
+                {type: 'image_url', image_url: {url: 'data:image/png;base64,aGk='}},
+                {type: 'text', text: scratchLine(scratchDirectory(workspace.path))}
+            ]
         })
     } finally {
         mock.server.close()
@@ -158,7 +163,8 @@ test('sends mixed text and image prompts without dropping either part', async co
         role: 'user',
         content: [
             {type: 'text', text: 'Describe this image'},
-            {type: 'image_url', image_url: {url: 'data:image/png;base64,aGk='}}
+            {type: 'image_url', image_url: {url: 'data:image/png;base64,aGk='}},
+            {type: 'text', text: scratchLine(scratchDirectory(workspace.path))}
         ]
     })
 })
@@ -494,16 +500,17 @@ test('the system prompt reaches the model as it arrived, and this turn’s own d
     }
 
     const godot = {tools: catalog, host: {call: () => Promise.resolve({})}}
+    const scratch = `\n\n${scratchLine(scratchDirectory(workspace.path))}`
 
     const bare = await sent({})
     assert.equal(bare.system, 'Be brief. Never mention cats.')
-    assert.equal(bare.prompt, 'Hello')
+    assert.equal(bare.prompt, `Hello${scratch}`)
 
     const withMemory = await sent({...godot, memoryContext: 'The player is a cat.'})
     assert.equal(withMemory.system, 'Be brief. Never mention cats.')
     assert.equal(
         withMemory.prompt,
-        'Hello\n\nRelevant persistent project memory:\nThe player is a cat.'
+        `Hello\n\nRelevant persistent project memory:\nThe player is a cat.${scratch}`
     )
 
     const withSession = await sent({
@@ -517,6 +524,7 @@ test('the system prompt reaches the model as it arrived, and this turn’s own d
         'Hello'
             + '\n\nRelevant persistent project memory:\nThe player is a cat.'
             + '\n\nEditor session: ready. Godot 4.7.2.'
+            + scratch
     )
 
     const withInventory = await sent({
@@ -531,16 +539,17 @@ test('the system prompt reaches the model as it arrived, and this turn’s own d
         'Hello'
             + '\n\nRelevant persistent project memory:\nThe player is a cat.'
             + '\n\nEditor session: ready. Godot 4.7.2.'
+            + scratch
             + "\n\nThe project's tracked files:\nscripts/player.gd"
     )
 
     assert.deepEqual(await sent({sessionContext: undefined}), {
         system: 'Be brief. Never mention cats.',
-        prompt: 'Hello'
+        prompt: `Hello${scratch}`
     })
     assert.deepEqual(await sent({inventory: undefined}), {
         system: 'Be brief. Never mention cats.',
-        prompt: 'Hello'
+        prompt: `Hello${scratch}`
     })
 })
 

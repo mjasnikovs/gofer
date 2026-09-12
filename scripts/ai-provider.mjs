@@ -66,7 +66,7 @@ import {withoutPackedLiterals} from './scene-text.mjs'
 import {withLineNumbers} from './numbered-read.mjs'
 import {notesTheRead} from './noted-read.mjs'
 import {forwardsScriptsToTheServer} from './script-forwarding.mjs'
-import {confineTool} from './workspace-confinement.mjs'
+import {confineTool, ensureScratchDirectory} from './workspace-confinement.mjs'
 import {readableProviderError} from './provider-error.mjs'
 import {piThinkingLevel} from './thinking-level.mjs'
 import {piModel} from './pi-model.mjs'
@@ -652,8 +652,9 @@ export async function runAgent({
     }
     const stored = Array.isArray(agentMessages) ? agentMessages : []
     const entry = isRetry ? retryEntry(stored, promptMessage) : {messages: stored, continues: false}
+    const scratchPath = await ensureScratchDirectory(workspacePath)
     const turnText = turnContextText(
-        {memoryContext, sessionContext, inventory},
+        {memoryContext, sessionContext, scratchPath, inventory},
         carriedText(entry.messages)
     )
     const rolledBack = entry.continues ? carryTurnContext(entry.messages, turnText) : entry.messages

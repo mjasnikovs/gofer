@@ -1,6 +1,17 @@
-import {readFile, realpath} from 'node:fs/promises'
+import {createHash} from 'node:crypto'
+import {mkdir, readFile, realpath} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
-import {basename, dirname, extname, isAbsolute, normalize, relative, resolve, sep} from 'node:path'
+import {
+    basename,
+    dirname,
+    extname,
+    isAbsolute,
+    join,
+    normalize,
+    relative,
+    resolve,
+    sep
+} from 'node:path'
 
 import {nearMiss, refusedAnchorIndex} from './anchor-near-miss.mjs'
 import {refuseFrozenShellWrite, refuseFrozenWrite} from './frozen-paths.mjs'
@@ -145,12 +156,43 @@ async function nearestExistingAncestor(root, path) {
     return root
 }
 
-async function validateToolPath(workspacePath, path) {
+/// Where a workspace's scratch files live: one directory per project, outside it, under the
+/// temporary directory the OS gives. Keyed by the project's path so two projects never share one,
+/// and so the same project gets the same directory in every conversation, which is what lets the
+/// path be told to the model as a fact rather than looked up.
+export function scratchDirectory(workspacePath) {
+    const key = createHash('sha256').update(resolve(workspacePath)).digest('hex').slice(0, 12)
+    return join(tmpdir(), 'gofer', 'scratch', key)
+}
+
+export async function ensureScratchDirectory(workspacePath) {
+    const path = scratchDirectory(workspacePath)
+    await mkdir(path, {recursive: true})
+    return path
+}
+
+async function isInScratch(scratchPath, target) {
+    const root = await realpath(scratchPath).catch(() => resolve(scratchPath))
+    if (!isInside(root, resolve(root, target))) return false
+    const existing = await nearestExistingAncestor(root, resolve(root, target))
+    return isInside(root, existing)
+}
+
+const OUTSIDE =
+    'Tool path is outside the workspace. Project files are named from the project root, and '
+    + 'scratch files go in the scratch directory named at the start of the conversation.'
+
+/// The project-relative spelling of a tool path, or `undefined` for one in the scratch directory,
+/// which no project rule applies to.
+async function validateToolPath(workspacePath, scratchPath, path) {
     if (typeof path !== 'string' || path.length === 0 || path.includes('\0'))
         throw new Error('Tool paths must be non-empty strings')
     const root = await realpath(workspacePath)
     const target = resolve(root, path)
-    if (!isInside(root, target)) throw new Error('Tool path is outside the workspace')
+    if (!isInside(root, target)) {
+        if (await isInScratch(scratchPath, target)) return undefined
+        throw new Error(OUTSIDE)
+    }
     const existing = await nearestExistingAncestor(root, target)
     if (!isInside(root, existing)) throw new Error('Tool path resolves outside the workspace')
     return relative(root, target)
@@ -337,8 +379,8 @@ export function validateBashCommand(command, temporaryRoot = tmpdir(), workspace
             `Shell commands take paths relative to the workspace, and \`${pathAt(command, escaping.index)}\` `
                 + 'is an absolute path or one that climbs out. The shell already runs in the '
                 + 'workspace root, so name the file the way the project does — scripts/mario.gd, '
-                + 'not its full path. Scratch output can go in the temporary directory the OS '
-                + 'gives you.'
+                + 'not its full path. Scratch output goes in the scratch directory named at the '
+                + 'start of the conversation.'
         )
     if (CHANGES_DIRECTORY.test(measured))
         throw new Error(
@@ -387,8 +429,8 @@ async function withTheRegionTheFileHolds(workspacePath, toolName, params, error)
 const BASH_IS_CONFINED =
     ' It runs in the project root and can reach nothing outside it: every path in the command is'
     + ' relative to that root, and an absolute path, or one that climbs out with .. or ~, is'
-    + ' refused before the command runs. Scratch output is the exception: a path under the'
-    + ' temporary directory the OS gives you is allowed, and nothing there is part of the project.'
+    + ' refused before the command runs. Scratch output is the exception: the scratch directory'
+    + ' named at the start of the conversation is allowed, and nothing there is part of the project.'
     + " Searching files is the grep tool's job, not this one's: a shell grep over a scene,"
     + ' project.godot or a skill is refused.'
 
@@ -398,7 +440,12 @@ function withADeadline(params) {
     return params?.timeout === undefined ? {...params, timeout: SHELL_DEADLINE_SECONDS} : params
 }
 
-export function confineTool(tool, workspacePath, frozen = []) {
+export function confineTool(
+    tool,
+    workspacePath,
+    frozen = [],
+    scratchPath = scratchDirectory(workspacePath)
+) {
     return {
         ...tool,
         description:
@@ -410,9 +457,11 @@ export function confineTool(tool, workspacePath, frozen = []) {
                 return tool.execute(id, withADeadline(params), signal, onUpdate, context)
             }
             const resolved = {...params, path: searchedPath(tool.name, params.path)}
-            const named = await validateToolPath(workspacePath, resolved.path)
-            refuseEditorOwnedWrite(tool.name, named)
-            refuseFrozenWrite(tool.name, named, frozen)
+            const named = await validateToolPath(workspacePath, scratchPath, resolved.path)
+            if (named !== undefined) {
+                refuseEditorOwnedWrite(tool.name, named)
+                refuseFrozenWrite(tool.name, named, frozen)
+            }
             return tool
                 .execute(id, resolved, signal, onUpdate, context)
                 .catch(async error =>

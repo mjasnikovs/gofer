@@ -2,6 +2,7 @@ import {createServer} from 'node:http'
 import {mkdir, mkdtemp, rm, writeFile} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
+import {scratchDirectory} from './workspace-confinement.mjs'
 
 export const MODEL_ID = 'Qwen3.6-27B-UD-Q4_K_XL.gguf'
 
@@ -37,7 +38,11 @@ export async function temporaryWorkspace(files = {}, outsideFiles = {}) {
         await writeFile(join(path, name), contents)
     for (const [name, contents] of Object.entries(outsideFiles))
         await writeFile(join(root, name), contents)
-    return {path, remove: () => rm(root, {recursive: true, force: true})}
+    const scratch = scratchDirectory(path)
+    return {
+        path,
+        remove: () => Promise.all([root, scratch].map(at => rm(at, {recursive: true, force: true})))
+    }
 }
 
 export function startServer() {

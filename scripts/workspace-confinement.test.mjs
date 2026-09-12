@@ -4,7 +4,12 @@ import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import test from 'node:test'
 import {NodeExecutionEnv, createEditTool} from '@earendil-works/pi-agent-core/node'
-import {confineTool, validateBashCommand} from './workspace-confinement.mjs'
+import {
+    confineTool,
+    ensureScratchDirectory,
+    scratchDirectory,
+    validateBashCommand
+} from './workspace-confinement.mjs'
 
 async function workspace() {
     const root = await mkdtemp(join(tmpdir(), 'gofer-confinement-'))
@@ -822,4 +827,40 @@ test('a refused search is told it was a search, and which tool answers one', asy
 
     for (const command of ['grep -rn RunState scripts', 'godot --headless | grep -E "PASS|FAIL"'])
         assert.deepEqual(await tool.execute('3', {command}), asRun(command))
+})
+
+test('lets every file tool reach the scratch directory by its full path, and nothing beside it', async context => {
+    const current = await workspace()
+    context.after(current.remove)
+    const scratch = await ensureScratchDirectory(current.path)
+    context.after(() => rm(scratch, {recursive: true, force: true}))
+    const note = join(scratch, 'render.png')
+
+    for (const name of ['read', 'write', 'edit', 'grep']) {
+        const tool = confineTool(fakeTool(name), current.path)
+        assert.deepEqual(await tool.execute('1', {path: note}), {path: note})
+    }
+    // Project rules are about the project: a .gd in scratch is a text file, not the editor's.
+    const writer = confineTool(fakeTool('write'), current.path)
+    assert.deepEqual(await writer.execute('2', {path: join(scratch, 'probe.gd')}), {
+        path: join(scratch, 'probe.gd')
+    })
+    await assert.rejects(writer.execute('3', {path: join(scratch, '..', 'other.txt')}), /scratch/iu)
+    await assert.rejects(writer.execute('4', {path: join(tmpdir(), 'loose.txt')}), /scratch/iu)
+})
+
+test('gives the same project the same scratch directory and two projects different ones', () => {
+    assert.equal(scratchDirectory('/a/project'), scratchDirectory('/a/project'))
+    assert.notEqual(scratchDirectory('/a/project'), scratchDirectory('/b/project'))
+    assert.ok(scratchDirectory('/a/project').startsWith(tmpdir()))
+})
+
+test('a scratch directory nothing has made yet is still a place a write may go', async context => {
+    const current = await workspace()
+    context.after(current.remove)
+    const unmade = join(scratchDirectory(current.path), 'never-made')
+    const tool = confineTool(fakeTool('write'), current.path, [], unmade)
+
+    const target = join(unmade, 'first.txt')
+    assert.deepEqual(await tool.execute('1', {path: target}), {path: target})
 })

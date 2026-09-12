@@ -1,6 +1,12 @@
 import {deepEqual, equal} from 'node:assert/strict'
 import {test} from 'node:test'
-import {carriedText, carryTurnContext, turnContextText, withTurnContext} from './turn-context.mjs'
+import {
+    carriedText,
+    carryTurnContext,
+    scratchLine,
+    turnContextText,
+    withTurnContext
+} from './turn-context.mjs'
 
 test('the three blocks are sent in the order the prompt describes them', () => {
     equal(
@@ -10,6 +16,17 @@ test('the three blocks are sent in the order the prompt describes them', () => {
             inventory: 'a.gd'
         }),
         'Relevant persistent project memory:\na memory\n\na session\n\na.gd'
+    )
+})
+
+test('the scratch directory is named after the session and before the inventory', () => {
+    equal(
+        turnContextText({
+            sessionContext: 'a session',
+            scratchPath: '/tmp/gofer/scratch/abc',
+            inventory: 'a.gd'
+        }),
+        `a session\n\n${scratchLine('/tmp/gofer/scratch/abc')}\n\na.gd`
     )
 })
 
