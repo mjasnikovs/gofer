@@ -28,13 +28,16 @@ export const goferTheme = defineTheme({
         '--color-border-emphasized': ['#83838a', '#77777c'],
         // Tokens rather than a `color.accent` seed, which would re-tint every neutral.
         // Stone bakes all five as literals, so each has to be moved by hand.
-        '--color-accent': ['#00695c', '#2fa88f'],
+        // Godot's scene-tree green — the #8eef97 in its icon SVGs after the editor's
+        // default icon_saturation of 2.0 — is #6bff7d, 6 L* off body text. Same hue and
+        // saturation, scaled to 90% value, which is the brightest the accent gate allows.
+        '--color-accent': ['#2c6933', '#60e670'],
         '--color-on-accent': ['#ffffff', '#1b1b1f'],
-        // Re-picked alpha: stone's byte was tuned against a near-white accent, and the
-        // same alpha on a mid-tone teal lifts half as far.
-        '--color-accent-muted': ['#00695c19', '#2fa88f38'],
-        '--color-text-accent': ['#00695c', '#2fa88f'],
-        '--color-icon-accent': ['#00695c', '#2fa88f'],
+        // Alpha re-picked per theme: the dark accent is 28 L* brighter than the teal it
+        // replaced, so the old byte lifted the fill 7 L* too far.
+        '--color-accent-muted': ['#2c693319', '#60e67026'],
+        '--color-text-accent': ['#2c6933', '#60e670'],
+        '--color-icon-accent': ['#2c6933', '#60e670'],
         '--radius-chat': '3px'
     },
     components: {
