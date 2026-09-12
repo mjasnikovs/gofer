@@ -2520,7 +2520,10 @@ func _resource_describe_tileset(params: Dictionary) -> Dictionary:
         return Params.error(
             "resource_not_found", "TileSet %s does not exist" % path, {"path": path}
         )
-    var resource := load(path)
+    # CACHE_MODE_IGNORE, not load(): a TileMapLayer holding this tileset keeps the pre-replace copy
+    # in the resource cache, and load() hands that back — describe then reports the old physics
+    # layers and solid flags after a create_tileset that replaced them (platformer-jump-10, live).
+    var resource := ResourceLoader.load(path, "TileSet", ResourceLoader.CACHE_MODE_IGNORE)
     if resource == null or not (resource is TileSet):
         return Params.error(
             "unsupported_resource", "%s is not a TileSet" % path, {"path": path}

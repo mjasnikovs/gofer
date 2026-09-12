@@ -1308,3 +1308,61 @@ fn creating_a_scene_over_one_that_exists_is_refused_rather_than_done() {
     );
     assert!(worktree.join("levels/two.tscn").exists());
 }
+
+/// A tileset read after a replacing create is the new one, even while a TileMapLayer holds the old.
+///
+/// platformer-jump-10, live: create_tileset at a path with a TileMapLayer already set to it, then
+/// create_tileset again at the same path with a solid tile and describe_tileset in the same call.
+/// describe answered physicsLayers 0 and every tile solid:false — the pre-replace copy — because
+/// the TileMapLayer holds the old resource in the cache and describe's `load(path)` returns it.
+/// The turn decided the tool was unreliable and hand-wrote the physics polygon into the .tres.
+#[test]
+fn a_tileset_read_after_a_replace_is_the_new_one_while_a_layer_holds_the_old() {
+    let mut session = Session::start();
+    session.call(
+        "resource.create_texture",
+        json!({"path": "res://art/tiles.png", "width": 32, "height": 16, "background": "black"}),
+    );
+    session.call(
+        "resource.create_tileset",
+        json!({"path": "res://art/tiles.tres", "texture": "res://art/tiles.png", "tileWidth": 16, "tileHeight": 16}),
+    );
+    session.mutate(
+        "scene.create",
+        json!({"path": "res://art/level.tscn", "rootType": "Node2D"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"parent": "/level", "name": "Terrain", "type": "TileMapLayer"}),
+    );
+    // The layer now holds the pre-replace tileset in the resource cache.
+    session.mutate(
+        "node.set_property",
+        json!({"node": "/level/Terrain", "property": "tile_set",
+               "value": {"type": "Resource", "value": {"path": "res://art/tiles.tres"}}}),
+    );
+
+    let replaced = session.call(
+        "resource.create_tileset",
+        json!({
+            "path": "res://art/tiles.tres", "texture": "res://art/tiles.png",
+            "tileWidth": 16, "tileHeight": 16, "solid": [[0, 0]]
+        }),
+    );
+    assert_eq!(replaced["replaced"], true, "{replaced}");
+
+    let described = session.call(
+        "resource.describe_tileset",
+        json!({"path": "res://art/tiles.tres"}),
+    );
+    assert_eq!(
+        described["physicsLayers"], 1,
+        "describe must read the tileset on disk, not the copy the layer still holds: {described}"
+    );
+    let corner = described["sources"][0]["tiles"]
+        .as_array()
+        .and_then(|tiles| tiles.iter().find(|tile| tile["atlas"] == json!([0, 0])))
+        .cloned()
+        .unwrap_or_else(|| panic!("the atlas corner is a tile: {described}"));
+    assert_eq!(corner["solid"], true, "{described}");
+}
