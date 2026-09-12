@@ -10,6 +10,8 @@ import {
     CHILD_TOOL_NAMES,
     SUBAGENT_BOUNDS,
     SUBAGENT_SETTINGS_DEFAULTS,
+    WAITING_FOR_SLOT,
+    createSlots,
     SUBAGENT_TOOL_NAMES,
     assertChildTools,
     boundsFrom,
@@ -1137,6 +1139,7 @@ test('every bound comes from the settings, not from this file', async context =>
     assert.deepEqual(Object.keys(SUBAGENT_SETTINGS_DEFAULTS).sort(), [
         'commandTimeoutMinutes',
         'maxAnswerChars',
+        'maxConcurrent',
         'maxTurns',
         'retryAttempts',
         'retryBaseDelaySeconds',
@@ -1169,6 +1172,75 @@ test('every bound comes from the settings, not from this file', async context =>
     })
     assert.match(partial.text, /\[cut here/u)
     assert.ok(partial.text.length < 20_000)
+})
+
+test('delegations past the limit wait their turn, and say so on their row', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const slots = createSlots(1)
+    const held = slots.acquire()
+    const tool = createSubagentTool({
+        workspacePath: workspace.path,
+        models: scriptedModels([{text: 'two'}]),
+        model,
+        slots
+    })
+    const updates = []
+    let answer
+    const running = tool
+        .execute('call-2', {prompt: 'Two?'}, undefined, u => updates.push(u))
+        .then(result => {
+            answer = result.content[0].text.split('\n')[0]
+        })
+
+    assert.equal(updates.length, 1)
+    assert.equal(updates[0].details.waiting, true)
+    assert.equal(updates[0].details.step, WAITING_FOR_SLOT)
+    assert.equal(answer, undefined)
+
+    ;(await held.taken)()
+    await running
+    assert.equal(answer, 'two')
+    assert.equal(updates[1].details.waiting, false)
+    assert.equal(updates[1].details.step, undefined)
+})
+
+test('the shipped limit is one, and it comes from the settings', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const models = scriptedModels([{text: 'ok'}])
+    const tool = createSubagentTool({workspacePath: workspace.path, models, model})
+    const updates = []
+    const both = Promise.all([
+        tool.execute('call-1', {prompt: 'One?'}, undefined, () => {}),
+        tool.execute('call-2', {prompt: 'Two?'}, undefined, u => updates.push(u))
+    ])
+    assert.equal(updates[0]?.details.waiting, true)
+    await both
+})
+
+test('a queued delegation is dropped from the queue when the turn is stopped', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const slots = createSlots(1)
+    const held = slots.acquire()
+    const controller = new AbortController()
+    const tool = createSubagentTool({
+        workspacePath: workspace.path,
+        models: scriptedModels([{text: 'never'}]),
+        model,
+        slots
+    })
+    const queued = tool.execute('call-1', {prompt: 'Anything.'}, controller.signal, () => {})
+    controller.abort()
+    await assert.rejects(queued, /the turn was stopped/u)
+    ;(await held.taken)()
+    const next = slots.acquire()
+    assert.equal(next.queued, false)
+
+    const stopped = new AbortController()
+    stopped.abort()
+    await assert.rejects(slots.acquire(stopped.signal).taken, /the turn was stopped/u)
 })
 
 function rustDefaults(source) {

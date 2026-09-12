@@ -391,6 +391,9 @@ pub(crate) struct SubagentSettings {
     /// Ceiling on model requests one delegation may make. 0 turns it off.
     #[serde(default = "default_subagent_max_turns")]
     pub(crate) max_turns: u32,
+    /// How many delegations run at once. The rest wait for a slot.
+    #[serde(default = "default_subagent_max_concurrent")]
+    pub(crate) max_concurrent: u32,
     /// Ceiling on the answer handed back. 0 turns it off.
     #[serde(default = "default_subagent_max_answer_chars")]
     pub(crate) max_answer_chars: u32,
@@ -758,6 +761,7 @@ impl Default for SubagentSettings {
             command_timeout_minutes: default_subagent_command_timeout_minutes(),
             stream_inactivity_minutes: default_subagent_stream_inactivity_minutes(),
             max_turns: default_subagent_max_turns(),
+            max_concurrent: default_subagent_max_concurrent(),
             max_answer_chars: default_subagent_max_answer_chars(),
             retry_attempts: default_subagent_retry_attempts(),
             retry_base_delay_seconds: default_subagent_retry_base_delay_seconds(),
@@ -1940,8 +1944,8 @@ type SubagentBound = (&'static str, fn(&SubagentSettings) -> u32, u32, u32);
 /// was validated, and was obeyed. The top of each range is the largest value that is still a
 /// ceiling rather than an absence of one, and every range starts where "off" is a real answer —
 /// except the retry wait, which is only read when a retry happens and has no meaning at zero.
-// GENERATED-BEGIN subagent-bounds sha256:7d342edd130bbc31
-const SUBAGENT_BOUNDS: [SubagentBound; 6] = [
+// GENERATED-BEGIN subagent-bounds sha256:4af8ca5d0ab2af6d
+const SUBAGENT_BOUNDS: [SubagentBound; 7] = [
     (
         "commandTimeoutMinutes",
         |s| s.command_timeout_minutes,
@@ -1955,6 +1959,7 @@ const SUBAGENT_BOUNDS: [SubagentBound; 6] = [
         30,
     ),
     ("maxTurns", |s| s.max_turns, 0, 40),
+    ("maxConcurrent", |s| s.max_concurrent, 1, 8),
     ("maxAnswerChars", |s| s.max_answer_chars, 0, 24_000),
     ("retryAttempts", |s| s.retry_attempts, 0, 5),
     (
@@ -1994,6 +1999,15 @@ fn default_subagent_stream_inactivity_minutes() -> u32 {
 /// twenty-four was too few for a large one.
 fn default_subagent_max_turns() -> u32 {
     0
+}
+
+/// How many delegations may run at the same time; the rest wait for a free slot.
+///
+/// One, because the target is a local server with one slot. A parent that delegates five audits in
+/// one reply would put five prompts on it at once, and it answers all of them slower than it
+/// answers them in turn.
+fn default_subagent_max_concurrent() -> u32 {
+    1
 }
 
 /// Longest answer the sub-agent may hand back.
@@ -4966,6 +4980,11 @@ mod tests {
             {
                 let mut value = settings("http://localhost", "model");
                 value.ai.subagent.max_turns = 100_000;
+                value
+            },
+            {
+                let mut value = settings("http://localhost", "model");
+                value.ai.subagent.max_concurrent = 0;
                 value
             },
             {

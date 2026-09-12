@@ -778,12 +778,13 @@ export async function runAgent({
             return
         }
         if (event.type === 'tool_execution_update') {
-            const step = event.partialResult?.details?.step
+            const {step, waiting} = event.partialResult?.details ?? {}
             emit(
                 toolUpdate({
                     id: event.toolCallId,
                     output: textContent(event.partialResult.content ?? []),
-                    step: typeof step === 'string' && step !== '' ? step : undefined
+                    step: typeof step === 'string' && step !== '' ? step : undefined,
+                    waiting: typeof waiting === 'boolean' ? waiting : undefined
                 })
             )
             return

@@ -95,7 +95,7 @@ export type AiStreamEvent =
     | Readonly<{type: 'text-delta'; delta: string}>
     | Readonly<{type: 'thinking-delta'; delta: string}>
     | Readonly<{type: 'tool-start'; id: string; name: string; target?: string; startedAt: number}>
-    | Readonly<{type: 'tool-update'; id: string; output: string; step?: string}>
+    | Readonly<{type: 'tool-update'; id: string; output: string; step?: string; waiting?: boolean}>
     | Readonly<{type: 'tool-end'; id: string; output: string; isError: boolean; endedAt: number}>
     | Readonly<{type: 'usage'; usage: TokenUsage; model: string}>
     | Readonly<{type: 'tool-cost'; ids: readonly string[]; tokens: number}>

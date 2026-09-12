@@ -27,10 +27,11 @@ export const toolStart = declare([TURN_EVENTS], 'tool-start', ({id, name, target
     startedAt
 }))
 
-export const toolUpdate = declare([TURN_EVENTS], 'tool-update', ({id, output, step}) => ({
+export const toolUpdate = declare([TURN_EVENTS], 'tool-update', ({id, output, step, waiting}) => ({
     id,
     output,
-    step
+    step,
+    waiting
 }))
 
 export const toolEnd = declare([TURN_EVENTS], 'tool-end', ({id, output, isError, endedAt}) => ({

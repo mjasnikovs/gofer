@@ -34,6 +34,17 @@
             "defaultNote": "Off. A child that repeats itself is caught by the progress guard, which counts identical calls and results that teach nothing and needs no number sized to a repository. This is a cost cap for a user who wants one; any shipped value is a guess about how large a codebase is, and twenty-four was too few for a large one."
         },
         {
+            "name": "maxConcurrent",
+            "field": "max_concurrent",
+            "default": 1,
+            "min": 1,
+            "max": 8,
+            "step": 1,
+            "summary": "How many delegations may run at the same time; the rest wait for a free slot.",
+            "defaultNote": "One, because the target is a local server with one slot. A parent that delegates five audits in one reply would put five prompts on it at once, and it answers all of them slower than it answers them in turn.",
+            "rangeNote": "Eight is a cloud endpoint's worth of parallel prompts. Past that the parent is not delegating, it is fanning out, and the chat above shows nothing but waiting rows."
+        },
+        {
             "name": "maxAnswerChars",
             "field": "max_answer_chars",
             "default": 12000,

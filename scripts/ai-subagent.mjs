@@ -34,6 +34,7 @@ export const SUBAGENT_SETTINGS_DEFAULTS = {
     commandTimeoutMinutes: 5,
     streamInactivityMinutes: 10,
     maxTurns: 0,
+    maxConcurrent: 1,
     maxAnswerChars: 12_000,
     retryAttempts: 2,
     retryBaseDelaySeconds: 1
@@ -47,6 +48,7 @@ export function boundsFrom(settings) {
         commandTimeoutMs: pick('commandTimeoutMinutes') * 60_000,
         streamInactivityMs: pick('streamInactivityMinutes') * 60_000,
         maxTurns: pick('maxTurns'),
+        maxConcurrent: pick('maxConcurrent'),
         maxAnswerChars: pick('maxAnswerChars'),
         retryAttempts: pick('retryAttempts'),
         retryBaseDelayMs: pick('retryBaseDelaySeconds') * 1_000
@@ -732,6 +734,56 @@ export function cannedModels(model, answer = SUBAGENT_PROBE_ANSWER) {
     }
 }
 
+export const WAITING_FOR_SLOT = 'waiting for a free sub-agent slot'
+
+// A counting semaphore. Delegations past the limit queue here, in the order they asked.
+export function createSlots(limit) {
+    const waiting = []
+    let running = 0
+    const release = () => {
+        const next = waiting.shift()
+        if (next) next()
+        else running -= 1
+    }
+    return {
+        acquire(signal) {
+            // An already-aborted signal never fires abort, so the check has to be up front.
+            if (signal?.aborted)
+                return {
+                    queued: true,
+                    taken: Promise.reject(new Error(subagentFailure('the turn was stopped')))
+                }
+            if (running < limit) {
+                running += 1
+                return {queued: false, taken: Promise.resolve(release)}
+            }
+            const taken = new Promise((resolve, reject) => {
+                const wake = () => {
+                    signal?.removeEventListener('abort', stop)
+                    resolve(release)
+                }
+                const stop = () => {
+                    const index = waiting.indexOf(wake)
+                    if (index !== -1) waiting.splice(index, 1)
+                    reject(new Error(subagentFailure('the turn was stopped')))
+                }
+                waiting.push(wake)
+                signal?.addEventListener('abort', stop, {once: true})
+            })
+            return {queued: true, taken}
+        }
+    }
+}
+
+function slotStatus(waiting) {
+    return {
+        content: [
+            {type: 'text', text: waiting ? `Waiting — ${WAITING_FOR_SLOT}.` : 'Working — starting.'}
+        ],
+        details: {waiting, ...(waiting && {step: WAITING_FOR_SLOT})}
+    }
+}
+
 export function createSubagentTool({
     workspacePath,
     models,
@@ -740,7 +792,8 @@ export function createSubagentTool({
     streamOptions,
     settings,
     timers,
-    probe
+    probe,
+    slots = createSlots(boundsFrom(settings).maxConcurrent)
 }) {
     return {
         name: SUBAGENT_TOOL_NAME,
@@ -763,23 +816,35 @@ export function createSubagentTool({
             const probing = params?.probe === true
             if (!probing && (typeof params?.prompt !== 'string' || params.prompt.trim() === ''))
                 throw new Error(subagentFailure('it was given no question to answer'))
-            const result = await runSubagent({
-                prompt: probing ? PROBE_PROMPT : params.prompt,
-                workspacePath,
-                models: probing ? cannedModels(model) : models,
-                model,
-                thinkingLevel,
-                streamOptions,
-                settings,
-                timers,
-                probe,
-                signal,
-                progress: toolProgress(onUpdate)
-            })
-            return {
-                content: [{type: 'text', text: `${result.text}\n\n${usageFooter(result, model)}`}],
-                details: {turns: result.turns, usage: result.usage}
+            const slot = slots.acquire(signal)
+            if (slot.queued) onUpdate?.(slotStatus(true))
+            const release = await slot.taken
+            if (slot.queued) onUpdate?.(slotStatus(false))
+            try {
+                return await delegate(probing, params, signal, onUpdate)
+            } finally {
+                release()
             }
+        }
+    }
+
+    async function delegate(probing, params, signal, onUpdate) {
+        const result = await runSubagent({
+            prompt: probing ? PROBE_PROMPT : params.prompt,
+            workspacePath,
+            models: probing ? cannedModels(model) : models,
+            model,
+            thinkingLevel,
+            streamOptions,
+            settings,
+            timers,
+            probe,
+            signal,
+            progress: toolProgress(onUpdate)
+        })
+        return {
+            content: [{type: 'text', text: `${result.text}\n\n${usageFooter(result, model)}`}],
+            details: {turns: result.turns, usage: result.usage}
         }
     }
 }

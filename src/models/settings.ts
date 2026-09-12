@@ -57,6 +57,7 @@ export type SubagentSettings = Readonly<{
     commandTimeoutMinutes: number
     streamInactivityMinutes: number
     maxTurns: number
+    maxConcurrent: number
     maxAnswerChars: number
     retryAttempts: number
     retryBaseDelaySeconds: number
@@ -200,11 +201,12 @@ export function keepThinkingLevel(model: ThinkingCapable, level: ThinkingLevel):
     return EFFORT_LEVELS.find(cheapest => offered.includes(cheapest)) ?? offered[0] ?? 'off'
 }
 
-// GENERATED-BEGIN subagent-bounds sha256:e53302d81d27c140
+// GENERATED-BEGIN subagent-bounds sha256:7f1923b6e13ee268
 export const DEFAULT_SUBAGENT_SETTINGS: SubagentSettings = {
     commandTimeoutMinutes: 5,
     streamInactivityMinutes: 10,
     maxTurns: 0,
+    maxConcurrent: 1,
     maxAnswerChars: 12_000,
     retryAttempts: 2,
     retryBaseDelaySeconds: 1
@@ -214,6 +216,9 @@ export const SUBAGENT_RANGES = {
     commandTimeoutMinutes: {min: 0, max: 30, step: 1},
     streamInactivityMinutes: {min: 0, max: 30, step: 1},
     maxTurns: {min: 0, max: 40, step: 1},
+    // Eight is a cloud endpoint's worth of parallel prompts. Past that the parent is not
+    // delegating, it is fanning out, and the chat above shows nothing but waiting rows.
+    maxConcurrent: {min: 1, max: 8, step: 1},
     // Capped at what a tool result is truncated to anyway (`MAX_TOOL_TEXT_CHARS`): an answer larger
     // than that is cut by the layer above regardless of what is chosen here.
     maxAnswerChars: {min: 0, max: 24_000, step: 1_000},
@@ -236,6 +241,10 @@ export function secondsLabel(seconds: number) {
 export function stepsLabel(steps: number) {
     if (steps === 0) return 'Off'
     return `${String(steps)} step${steps === 1 ? '' : 's'}`
+}
+
+export function atOnceLabel(count: number) {
+    return `${String(count)} at once`
 }
 
 export function charactersLabel(characters: number) {

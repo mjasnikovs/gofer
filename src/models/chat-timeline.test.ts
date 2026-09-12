@@ -186,6 +186,44 @@ describe('applyStreamEvent', () => {
         expect(done.tools?.[0]?.target).toBe('find the menu')
     })
 
+    it('shows a delegation waiting for a slot as pending, and running once it has one', () => {
+        const start = {
+            type: 'tool-start',
+            id: 'a',
+            name: 'subagent',
+            target: 'audit',
+            startedAt: 1
+        } as const
+        const queued = replay([
+            start,
+            {
+                type: 'tool-update',
+                id: 'a',
+                output: 'Waiting',
+                step: 'waiting for a slot',
+                waiting: true
+            }
+        ])
+        expect(queued.tools?.[0]).toMatchObject({status: 'pending', step: 'waiting for a slot'})
+
+        const started = replay([
+            start,
+            {
+                type: 'tool-update',
+                id: 'a',
+                output: 'Waiting',
+                step: 'waiting for a slot',
+                waiting: true
+            },
+            {type: 'tool-update', id: 'a', output: 'Working', waiting: false}
+        ])
+        expect(started.tools?.[0]?.status).toBe('running')
+        expect(started.tools?.[0]).not.toHaveProperty('step')
+        expect(isAiStreamEvent({type: 'tool-update', id: 'a', output: 'x', waiting: 'yes'})).toBe(
+            false
+        )
+    })
+
     it('accepts a tool update with no step, and rejects one whose step is not text', () => {
         expect(isAiStreamEvent({type: 'tool-update', id: 'a', output: 'x'})).toBe(true)
         expect(isAiStreamEvent({type: 'tool-update', id: 'a', output: 'x', step: 'bash: ls'})).toBe(

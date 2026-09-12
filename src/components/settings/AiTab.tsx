@@ -24,6 +24,7 @@ import {
     SEARCH_PROVIDERS_NEEDING_KEY,
     SEARCH_PROVIDER_LABELS,
     SUBAGENT_RANGES,
+    atOnceLabel,
     charactersLabel,
     compactionLabel,
     connectionNotice,
@@ -727,6 +728,22 @@ export function useAiTab(view: SettingsView): AiTabView {
                                     description='A cost cap, off by default. A sub-agent that repeats itself is stopped without it; set this only to bound what one delegation may spend.'
                                     onChange={(maxTurns: number) => {
                                         updateSubagent({maxTurns})
+                                    }}
+                                />
+                                <Slider
+                                    label='Sub-agents at once'
+                                    value={draft.ai.subagent.maxConcurrent}
+                                    {...SUBAGENT_RANGES.maxConcurrent}
+                                    valueDisplay='text'
+                                    formatValue={atOnceLabel}
+                                    marks={[
+                                        {value: 1, label: '1'},
+                                        {value: 4, label: '4'},
+                                        {value: 8, label: '8'}
+                                    ]}
+                                    description='Delegations past this wait for a running one to finish. A local server with one slot answers one prompt at a time, so more here only makes each wait longer.'
+                                    onChange={(maxConcurrent: number) => {
+                                        updateSubagent({maxConcurrent})
                                     }}
                                 />
                                 <Slider

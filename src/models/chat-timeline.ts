@@ -173,6 +173,7 @@ export function isAiStreamEvent(value: unknown): value is AiStreamEvent {
                 isText(value['id'])
                 && isText(value['output'])
                 && (value['step'] === undefined || isText(value['step']))
+                && (value['waiting'] === undefined || typeof value['waiting'] === 'boolean')
             )
         case 'tool-end':
             return (
@@ -244,6 +245,19 @@ export function withoutStatus(message: Message): Message {
     return rest
 }
 
+function updatedTool(
+    tool: ToolActivity,
+    event: Extract<AiStreamEvent, {type: 'tool-update'}>
+): ToolActivity {
+    const base = event.waiting === false ? withoutStep(tool) : tool
+    return {
+        ...base,
+        output: event.output,
+        ...(event.step !== undefined && {step: event.step}),
+        ...(event.waiting !== undefined && {status: event.waiting ? 'pending' : 'running'})
+    }
+}
+
 function withoutStep(tool: ToolActivity): ToolActivity {
     if (tool.step === undefined) return tool
     const {step: _dropped, ...rest} = tool
@@ -286,12 +300,7 @@ export function applyStreamEvent(message: Message, event: AiStreamEvent): Messag
                 ...message,
                 tools: (message.tools ?? []).map(tool => {
                     if (tool.id !== event.id) return tool
-                    if (event.type === 'tool-update')
-                        return {
-                            ...tool,
-                            output: event.output,
-                            ...(event.step !== undefined && {step: event.step})
-                        }
+                    if (event.type === 'tool-update') return updatedTool(tool, event)
                     return {
                         ...withoutStep(tool),
                         output: event.output,
