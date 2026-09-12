@@ -23,7 +23,7 @@ async function workspace(files) {
 test('every line carries its number, and the trailing newline is not a line', () => {
     assert.equal(
         numberLines(SCRIPT),
-        ['1\textends Node2D', '2\t', '3\tfunc _ready() -> void:', '4\t\tprint("hi")'].join('\n')
+        ['1\textends Node2D', '2', '3\tfunc _ready() -> void:', '4\t\tprint("hi")'].join('\n')
     )
 })
 
@@ -42,7 +42,7 @@ test("the tool's own note stays as it was, and only where the tool wrote one", (
     const more = '\n\n[7 more lines in file. Use offset=3 to continue.]'
     assert.equal(numberLines(`a\nb${more}`, {limited: true}), `1\ta\n2\tb${more}`)
     // the same text as the last line of a whole file is a line like any other
-    assert.equal(numberLines(`a\nb${more}`), `1\ta\n2\tb\n3\t\n4\t${more.slice(2)}`)
+    assert.equal(numberLines(`a\nb${more}`), `1\ta\n2\tb\n3\n4\t${more.slice(2)}`)
 })
 
 test('a line too long to show, and an omitted bitmap, are not listings', () => {

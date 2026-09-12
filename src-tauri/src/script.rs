@@ -597,46 +597,152 @@ fn squeeze(text: &str) -> Squeezed {
 /// three times and with nothing four times, and never once with the wrong region — the two it
 /// could not reach were a stale idea of the file's content, which no amount of whitespace
 /// forgiveness reaches.
-fn anchor_not_found(at: &str, path: &str, text: &str, old_text: &str) -> LspError {
-    let unmatched = format!(
-        "`{at}` is not in {path}. The file may already hold the change, or the anchor may \
-         differ in whitespace. Read the file and anchor on text it currently has."
-    );
+/// The one region an anchor names once whitespace is forgiven: its bytes from the start of its
+/// first line to the end of its last matched character, and the lines it spans.
+struct NearMiss {
+    start: usize,
+    end: usize,
+    first_line: usize,
+    last_line: usize,
+}
+
+/// Where in the file an anchor would land if whitespace were not counted.
+///
+/// `Err` carries the line each candidate starts on when there are several, and nothing when there
+/// are none: both are refusals, and the caller words them.
+fn near_miss(text: &str, old_text: &str) -> Result<NearMiss, Vec<usize>> {
     let haystack = squeeze(text);
     let needle = squeeze(old_text);
     if needle.text.is_empty() {
-        return LspError::new("anchor_not_found", unmatched);
+        return Err(Vec::new());
     }
     let mut found = haystack.text.match_indices(needle.text.as_str());
     let Some((first, _)) = found.next() else {
-        return LspError::new("anchor_not_found", unmatched);
+        return Err(Vec::new());
     };
     let line_of = |offset: usize| text[..offset].matches('\n').count() + 1;
     let others: Vec<usize> = found.map(|(start, _)| start).collect();
     if !others.is_empty() {
-        let lines: Vec<String> = std::iter::once(first)
+        return Err(std::iter::once(first)
             .chain(others)
-            .map(|start| line_of(haystack.starts[start]).to_string())
-            .collect();
-        return LspError::new(
-            "anchor_not_found",
-            format!(
-                "`{at}` is not in {path}. Apart from whitespace it matches {} regions, at lines \
-                 {}, so it still names no single region. Quote one of them from the file, with a \
-                 neighbouring line.",
-                lines.len(),
-                lines.join(", ")
-            ),
-        );
+            .map(|start| line_of(haystack.starts[start]))
+            .collect());
     }
     let start = haystack.starts[first];
     let last = first + needle.text.len() - 1;
     // From the start of the line, not of the match: a quote that dropped the first line's
     // indentation was anchored on three times in one live turn, and refused three times.
     let quoted_from = text[..start].rfind('\n').map_or(0, |newline| newline + 1);
-    let held = &text[quoted_from..haystack.ends[last]];
-    let first_line = line_of(start);
-    let last_line = line_of(haystack.starts[last]);
+    Ok(NearMiss {
+        start: quoted_from,
+        end: haystack.ends[last],
+        first_line: line_of(start),
+        last_line: line_of(haystack.starts[last]),
+    })
+}
+
+/// The replacement for an anchor whose every line is indented the same amount too deep, or too
+/// shallow, against the region it names — shifted onto the file's indentation.
+///
+/// This is the one whitespace mistake the model makes in a shape a program can undo. Its `read`
+/// prints `119\t` before a line, and that tab runs into the line's own, so it counts one too many
+/// on every line of the block — six identical refusals in one turn on 2026-09-12, after the quoted
+/// region had been handed back with the same uncountable tabs. Because it wrote `newText` against
+/// the same miscount, the replacement is moved by the same amount, which is what makes the write
+/// safe in a language whose indentation is its block structure. Anything less regular than a
+/// uniform shift — one line off, a space for a tab, text that starts mid-line — is not undone,
+/// because then the shift is a guess about which line the model meant.
+///
+/// Blank lines are not counted on either side. The same `45\t` prefix shows a blank line as a
+/// tab, so the model writes one, or drops the line; a blank line carries no block structure, so
+/// neither is a guess about which line was meant. A blank line in `newText` is written empty.
+fn is_blank(line: &str) -> bool {
+    line.trim().is_empty()
+}
+
+fn shifted_onto_file_indent(held: &str, old_text: &str, new_text: &str) -> Option<String> {
+    let held_lines: Vec<&str> = held.lines().filter(|line| !is_blank(line)).collect();
+    let old_lines: Vec<&str> = old_text.lines().filter(|line| !is_blank(line)).collect();
+    if held_lines.len() != old_lines.len() || held_lines.is_empty() {
+        return None;
+    }
+    let indent_of = |line: &str| line.len() - line.trim_start().len();
+    let deeper = indent_of(old_lines[0]) > indent_of(held_lines[0]);
+    let (long, short) = if deeper {
+        (old_lines[0], held_lines[0])
+    } else {
+        (held_lines[0], old_lines[0])
+    };
+    let extra = &long[..indent_of(long) - indent_of(short)];
+    if !extra.chars().all(char::is_whitespace) {
+        return None;
+    }
+    let shifted_exactly = |from: &str, onto: &str| {
+        let (long, short) = if deeper { (from, onto) } else { (onto, from) };
+        long.strip_prefix(extra) == Some(short)
+    };
+    if !old_lines
+        .iter()
+        .zip(&held_lines)
+        .all(|(old, held)| shifted_exactly(old, held))
+    {
+        return None;
+    }
+    let mut shifted = Vec::with_capacity(new_text.lines().count());
+    for line in new_text.trim_end_matches('\n').lines() {
+        if is_blank(line) {
+            shifted.push(String::new());
+        } else if deeper {
+            shifted.push(line.strip_prefix(extra)?.to_owned());
+        } else {
+            shifted.push(format!("{extra}{line}"));
+        }
+    }
+    let mut joined = shifted.join("\n");
+    if new_text.ends_with('\n') {
+        joined.push('\n');
+    }
+    Some(joined)
+}
+
+/// A near-miss region stops at its last non-blank character; an anchor that ends in a newline
+/// meant to take the newline with it.
+fn trailing_newline_end(text: &str, end: usize, old_text: &str) -> usize {
+    if old_text.ends_with('\n') && text[end..].starts_with('\n') {
+        end + 1
+    } else {
+        end
+    }
+}
+
+fn anchor_not_found(at: &str, path: &str, text: &str, old_text: &str) -> LspError {
+    let unmatched = format!(
+        "`{at}` is not in {path}. The file may already hold the change, or the anchor may \
+         differ in whitespace. Read the file and anchor on text it currently has."
+    );
+    let region = match near_miss(text, old_text) {
+        Ok(region) => region,
+        Err(lines) if lines.is_empty() => return LspError::new("anchor_not_found", unmatched),
+        Err(lines) => {
+            let lines: Vec<String> = lines.iter().map(usize::to_string).collect();
+            return LspError::new(
+                "anchor_not_found",
+                format!(
+                    "`{at}` is not in {path}. Apart from whitespace it matches {} regions, at lines \
+                     {}, so it still names no single region. Quote one of them from the file, with a \
+                     neighbouring line.",
+                    lines.len(),
+                    lines.join(", ")
+                ),
+            );
+        }
+    };
+    let held = &text[region.start..region.end];
+    let NearMiss {
+        first_line,
+        last_line,
+        ..
+    } = region;
     if held.len() > MAX_NEAR_MISS_BYTES {
         let opening = held.lines().next().unwrap_or_default().trim();
         return LspError::new(
@@ -673,36 +779,56 @@ fn anchor_not_found(at: &str, path: &str, text: &str, old_text: &str) -> LspErro
 /// A repeated anchor is answered with the lines it matched, for the same reason the near-miss
 /// branch of [`anchor_not_found`] is: "extend it until it is unique" is a search, and the numbers
 /// turn it into arithmetic. The offsets are already in hand at that point.
+///
+/// Every anchor is checked before any is refused, and the answer carries all of them. Refusing at
+/// the first one made the model fix it, resend the whole batch, and be refused for a second anchor
+/// that was already wrong the first time: three rounds and 12,000 tokens for one six-file call on
+/// 2026-09-12. Nothing is written either way, so diagnosis need not stop where the write does.
 fn apply_edits(
     file_index: usize,
     path: &str,
     text: &str,
     edits: &[ScriptEdit],
-) -> Result<String, LspError> {
+) -> Result<String, Vec<LspError>> {
     if edits.is_empty() {
-        return Err(LspError::new(
+        return Err(vec![LspError::new(
             "no_edits",
             format!(
                 "`files[{file_index}]` is {path}, and its `edits` list is empty, so the call asks \
                  for nothing."
             ),
-        ));
+        )]);
     }
-    let mut spans = Vec::with_capacity(edits.len());
+    let mut spans: Vec<(usize, usize, &str)> = Vec::with_capacity(edits.len());
+    // Owned because a shifted replacement is built here, not carried in the call.
+    let mut shifted_spans: Vec<(usize, usize, String)> = Vec::new();
+    let mut refusals = Vec::new();
     for (edit_index, edit) in edits.iter().enumerate() {
         let at = format!("files[{file_index}].edits[{edit_index}].oldText");
         if edit.old_text.is_empty() {
-            return Err(LspError::new(
+            refusals.push(LspError::new(
                 "empty_anchor",
                 format!(
                     "`{at}` is empty, in {path}. An anchor is the text being replaced; to add a \
                      line, anchor on the line it goes next to and put both in `newText`."
                 ),
             ));
+            continue;
         }
         let mut found = text.match_indices(edit.old_text.as_str());
         let Some((start, _)) = found.next() else {
-            return Err(anchor_not_found(&at, path, text, &edit.old_text));
+            let shifted = near_miss(text, &edit.old_text).ok().and_then(|region| {
+                let held = &text[region.start..region.end];
+                let end = trailing_newline_end(text, region.end, &edit.old_text);
+                shifted_onto_file_indent(held, &edit.old_text, &edit.new_text)
+                    .map(|new_text| (region.start, end, new_text))
+            });
+            let Some((start, end, new_text)) = shifted else {
+                refusals.push(anchor_not_found(&at, path, text, &edit.old_text));
+                continue;
+            };
+            shifted_spans.push((start, end, new_text));
+            continue;
         };
         let others: Vec<usize> = found.map(|(offset, _)| offset).collect();
         if !others.is_empty() {
@@ -710,7 +836,7 @@ fn apply_edits(
                 .chain(others)
                 .map(|offset| (text[..offset].matches('\n').count() + 1).to_string())
                 .collect();
-            return Err(LspError::new(
+            refusals.push(LspError::new(
                 "anchor_not_unique",
                 format!(
                     "`{at}` is in {path} {} times, at lines {}, so it names no single region. \
@@ -719,22 +845,31 @@ fn apply_edits(
                     lines.join(", ")
                 ),
             ));
+            continue;
         }
         spans.push((start, start + edit.old_text.len(), edit.new_text.as_str()));
     }
+    if !refusals.is_empty() {
+        return Err(refusals);
+    }
+    spans.extend(
+        shifted_spans
+            .iter()
+            .map(|(start, end, new_text)| (*start, *end, new_text.as_str())),
+    );
     spans.sort_by_key(|&(start, _, _)| start);
     if let Some(overlap) = spans
         .windows(2)
         .find(|pair| pair[0].1 > pair[1].0)
         .map(|pair| pair[0].1)
     {
-        return Err(LspError::new(
+        return Err(vec![LspError::new(
             "overlapping_edits",
             format!(
                 "Two edits of {path} cover the same text, around byte {overlap}. Merge them into \
                  one edit whose `oldText` spans both."
             ),
-        ));
+        )]);
     }
     let mut updated = String::with_capacity(text.len());
     let mut cursor = 0;
@@ -745,6 +880,28 @@ fn apply_edits(
     }
     updated.push_str(&text[cursor..]);
     Ok(updated)
+}
+
+/// Every refusal a batch earned, as the one answer a call can carry.
+///
+/// The code is the first refusal's, so a caller branching on it sees what it always saw.
+fn refused_together(mut refusals: Vec<LspError>) -> LspError {
+    if refusals.len() == 1 {
+        return refusals.remove(0);
+    }
+    let named: Vec<&str> = refusals
+        .iter()
+        .map(|refusal| refusal.message.as_str())
+        .collect();
+    LspError::new(
+        refusals[0].code,
+        format!(
+            "{} edits are refused and nothing was written. Every one is named here, so one call \
+             can fix them all.\n\n{}",
+            refusals.len(),
+            named.join("\n\n")
+        ),
+    )
 }
 
 /// Applies targeted replacements across one or more scripts, then answers with the diagnostics the
@@ -789,15 +946,27 @@ pub fn edit_documents(request: EditScriptRequest) -> Result<Vec<EditedScript>, L
         ));
     }
     let mut planned = Vec::with_capacity(request.files.len());
+    let mut refusals = Vec::new();
     for (file_index, file) in request.files.iter().enumerate() {
-        let contents = workspace.read(&file.path).map_err(file_error)?;
-        let updated_text = apply_edits(file_index, &file.path, &contents.text, &file.edits)?;
-        planned.push(PlannedFile {
-            path: file.path.clone(),
-            original_hash: contents.hash,
-            original_text: contents.text,
-            updated_text,
-        });
+        let contents = match workspace.read(&file.path) {
+            Ok(contents) => contents,
+            Err(error) => {
+                refusals.push(file_error(error));
+                continue;
+            }
+        };
+        match apply_edits(file_index, &file.path, &contents.text, &file.edits) {
+            Ok(updated_text) => planned.push(PlannedFile {
+                path: file.path.clone(),
+                original_hash: contents.hash,
+                original_text: contents.text,
+                updated_text,
+            }),
+            Err(refused) => refusals.extend(refused),
+        }
+    }
+    if !refusals.is_empty() {
+        return Err(refused_together(refusals));
     }
     let stamps = godot_lsp::commit_planned_edit(&workspace, &planned)?;
     let mut synchronized = Vec::with_capacity(planned.len());
@@ -1522,7 +1691,7 @@ mod tests {
     }
 
     fn edited(text: &str, edits: &[ScriptEdit]) -> Result<String, LspError> {
-        apply_edits(0, "player.gd", text, edits)
+        apply_edits(0, "player.gd", text, edits).map_err(refused_together)
     }
 
     /// Several anchors in one call are the whole point of the operation, and the one way to get
@@ -1597,6 +1766,7 @@ mod tests {
             text,
             &[edit("func a():", "func c():"), edit("\tpass", "\treturn")],
         )
+        .map_err(refused_together)
         .expect_err("the second anchor is in the file twice");
 
         assert_eq!(repeated.code, "anchor_not_unique");
@@ -1612,6 +1782,7 @@ mod tests {
         );
 
         let missing = apply_edits(0, "unit.gd", text, &[edit("func c():", "func d():")])
+            .map_err(refused_together)
             .expect_err("the anchor is not there");
         assert_eq!(missing.code, "anchor_not_found");
         assert!(
@@ -1621,6 +1792,7 @@ mod tests {
         );
 
         let empty = apply_edits(2, "unit.gd", text, &[edit("", "func c():\n")])
+            .map_err(refused_together)
             .expect_err("an empty anchor names the whole file");
         assert_eq!(empty.code, "empty_anchor");
         assert!(
@@ -1675,6 +1847,171 @@ mod tests {
             refusal.message.contains("lines 3 to 8"),
             "and it has to say where it is: {}",
             refusal.message
+        );
+    }
+
+    /// An anchor off by the same leading whitespace on every line names one region, and is applied.
+    ///
+    /// Today's exact call, 2026-09-12: the model read `step()` through `read`, whose `119\t` prefix
+    /// runs into the line's own tabs, counted three where the file has two, and sent that anchor
+    /// six times. The refusal quoted the region back with raw tabs, which it could not count
+    /// either. The file's indentation is what is kept, and `newText` is shifted by the same amount,
+    /// because the model wrote both against the picture it had.
+    #[test]
+    fn an_anchor_off_by_one_indent_on_every_line_is_applied_at_the_files_indent() {
+        let text = concat!(
+            "func step(target_pos: Vector2, die_radius: float) -> void:\n",
+            "\tvar pos: Vector2 = global_position\n",
+            "\tif pos.distance_squared_to(target_pos) < die_radius * die_radius:\n",
+            "\t\tvelocity = Vector2.ZERO\n",
+            "\t\tarrived = true\n",
+            "\t\ton_arrived()\n",
+            "\t\tvar hud: HudCommandBar = _hud()\n",
+            "\t\tif hud != null:\n",
+            "\t\t\thud.lose_life()\n",
+            "\t\treturn\n",
+        );
+        let one_tab_too_deep = concat!(
+            "\t\t\ton_arrived()\n",
+            "\t\t\tvar hud: HudCommandBar = _hud()\n",
+            "\t\t\tif hud != null:\n",
+            "\t\t\t\thud.lose_life()\n",
+            "\t\t\treturn",
+        );
+        let replacement = "\t\t\ton_arrived()\n\t\t\tRunState.lose_life()\n\t\t\treturn";
+
+        let updated = edited(text, &[edit(one_tab_too_deep, replacement)])
+            .expect("the region is unique once the indent is forgiven");
+
+        assert_eq!(
+            updated,
+            concat!(
+                "func step(target_pos: Vector2, die_radius: float) -> void:\n",
+                "\tvar pos: Vector2 = global_position\n",
+                "\tif pos.distance_squared_to(target_pos) < die_radius * die_radius:\n",
+                "\t\tvelocity = Vector2.ZERO\n",
+                "\t\tarrived = true\n",
+                "\t\ton_arrived()\n",
+                "\t\tRunState.lose_life()\n",
+                "\t\treturn\n",
+            )
+        );
+    }
+
+    /// The shift runs the other way too, and stops at anything less regular than one indent.
+    #[test]
+    fn the_indent_shift_is_only_ever_uniform() {
+        let text = "func _ready() -> void:\n\tif ok:\n\t\tgo()\n\treturn\n";
+
+        let too_shallow = edited(text, &[edit("if ok:\n\tgo()\n", "if ok:\n\tstop()\n")])
+            .expect("every line is one tab too shallow");
+        assert_eq!(
+            too_shallow,
+            "func _ready() -> void:\n\tif ok:\n\t\tstop()\n\treturn\n"
+        );
+
+        let one_line_off = edited(text, &[edit("\tif ok:\n\tgo()", "\tif ok:\n\tstop()")])
+            .expect_err("only the second line is off");
+        assert_eq!(one_line_off.code, "anchor_not_found");
+
+        let replacement_off = edited(text, &[edit("\t\tif ok:\n\t\t\tgo()", "stop()")])
+            .expect_err("the replacement does not carry the extra indent to strip");
+        assert_eq!(replacement_off.code, "anchor_not_found");
+    }
+
+    /// A blank line is forgiven whatever it holds, and whether it is there at all.
+    ///
+    /// Task 2 on 2026-09-12: `read` prints a blank line as `45\t`, the model wrote the tab, and the
+    /// near-miss found lines 44 to 46 that the shift then declined, because the first lines were
+    /// both at indent zero and a blank line made the counts differ. 7,424 tokens of refusal and a
+    /// resend of six files, for whitespace on a line that has no block structure to get wrong.
+    #[test]
+    fn a_blank_line_is_matched_whatever_whitespace_either_side_holds() {
+        let text = "var die_radius: float = 12.0\n\nvar velocity: Vector2 = Vector2.ZERO\n";
+
+        let tab_on_the_blank = edited(
+            text,
+            &[edit(
+                "var die_radius: float = 12.0\n\t\nvar velocity: Vector2 = Vector2.ZERO",
+                "var die_radius: float = 12.0\n\t\nvar velocity := Vector2.ZERO",
+            )],
+        )
+        .expect("a tab on the blank line is the read's own separator");
+        assert_eq!(
+            tab_on_the_blank,
+            "var die_radius: float = 12.0\n\nvar velocity := Vector2.ZERO\n"
+        );
+
+        let dropped = edited(
+            text,
+            &[edit(
+                "var die_radius: float = 12.0\nvar velocity: Vector2 = Vector2.ZERO",
+                "var die_radius: float = 12.0\nvar velocity := Vector2.ZERO",
+            )],
+        )
+        .expect("a dropped blank line still names one region");
+        assert_eq!(
+            dropped,
+            "var die_radius: float = 12.0\nvar velocity := Vector2.ZERO\n"
+        );
+
+        let shifted_too = edited(
+            "func f():\n\tif ok:\n\t\tgo()\n\n\t\tstop()\n",
+            &[edit(
+                "\t\t\tgo()\n\t\n\t\t\tstop()",
+                "\t\t\tgo()\n\t\n\t\t\thalt()",
+            )],
+        )
+        .expect("a uniform shift and a tab on the blank line are forgiven together");
+        assert_eq!(shifted_too, "func f():\n\tif ok:\n\t\tgo()\n\n\t\thalt()\n");
+    }
+
+    /// Every wrong anchor in a call is named at once, so one round fixes them all.
+    ///
+    /// Round one used to name `files[0].edits[0]`, and round two — the same batch, resent —
+    /// `files[5].edits[1]`, which was wrong the first time too. The write is still all or nothing.
+    #[test]
+    fn every_refused_anchor_is_named_in_one_answer() {
+        let text = "extends Node\n\nfunc a():\n\tpass\n\nfunc b():\n\tpass\n";
+
+        let refused = apply_edits(
+            3,
+            "unit.gd",
+            text,
+            &[
+                edit("func a():", "func c():"),
+                edit("func z():", "func y():"),
+                edit("\tpass", "\treturn"),
+            ],
+        )
+        .expect_err("two of the three anchors are wrong");
+        assert_eq!(refused.len(), 2, "one refusal per wrong anchor");
+
+        let together = refused_together(refused);
+        assert_eq!(
+            together.code, "anchor_not_found",
+            "the first refusal's code is kept"
+        );
+        assert!(
+            together.message.starts_with("2 edits are refused"),
+            "{}",
+            together.message
+        );
+        assert!(
+            together.message.contains("`files[3].edits[1].oldText`"),
+            "{}",
+            together.message
+        );
+        assert!(
+            together.message.contains("`files[3].edits[2].oldText`"),
+            "{}",
+            together.message
+        );
+
+        let one = refused_together(vec![LspError::new("no_edits", "nothing")]);
+        assert_eq!(
+            one.message, "nothing",
+            "a single refusal is answered as itself"
         );
     }
 

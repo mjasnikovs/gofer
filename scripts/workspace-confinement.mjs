@@ -163,6 +163,30 @@ function inProjectTerms(workspacePath, error) {
     throw new Error(spelled)
 }
 
+const OPENS_A_SEARCH =
+    /^\s*(?:(?:if|while|until|do|then|else|!)\s+)?(?:grep|egrep|fgrep|rg|ag)(?:\s|$)/u
+
+/// Whether any pipeline in the command opens with a grep. One that opens a pipeline searches
+/// files; one fed by a pipe filters output, which `godot --headless | grep FAIL` does all day.
+function isASearch(command) {
+    return command
+        .split(/\|\||&&|[;&\n\r]/u)
+        .some(chain => OPENS_A_SEARCH.test(chain.split('|')[0]))
+}
+
+/// Every refusal below names the tool that reads or writes the path. A search is neither, and a
+/// model refused for `grep -n RunState project.godot DESIGN.md` was pointed at `read` and `godot`,
+/// guessed again, and went back to the shell: seven refusals in one project after the grep tool
+/// landed. So a refused search is told what it was, and which tool answers it.
+const SEARCH_INSTEAD =
+    ' This command is a search, and the grep tool is the one that answers it: it reads scenes, '
+    + 'project.godot and every resource by pattern, and its context, countOnly and filesOnly '
+    + "parameters stand in for grep's -C, -c and -l."
+
+function refusal(command, message) {
+    return new Error(isASearch(command) ? `${message}${SEARCH_INSTEAD}` : message)
+}
+
 const ESCAPES_THE_WORKSPACE =
     /(?:^|[\s=<>|;&])["']?(?:\.\.(?:[\\/]|$)|~(?:[\\/]|$)|[A-Za-z]:(?:[\\/]|$)|\/)/u
 
@@ -263,7 +287,8 @@ export function validateBashCommand(command, temporaryRoot = tmpdir(), workspace
     )
     const escaping = ESCAPES_THE_WORKSPACE.exec(measured)
     if (escaping !== null)
-        throw new Error(
+        throw refusal(
+            command,
             `Shell commands take paths relative to the workspace, and \`${pathAt(command, escaping.index)}\` `
                 + 'is an absolute path or one that climbs out. The shell already runs in the '
                 + 'workspace root, so name the file the way the project does — scripts/mario.gd, '
@@ -283,13 +308,15 @@ export function validateBashCommand(command, temporaryRoot = tmpdir(), workspace
                 + '{"op": "wait", "frames": 30} or {"op": "wait", "ms": 500}.'
         )
     if (namesTheSkillsDirectory(command))
-        throw new Error(
+        throw refusal(
+            command,
             'Shell commands cannot name the skills directory. Skills are the instructions this '
                 + "project gives you, and they are the user's to change, in the Skills tab. Read "
                 + 'one with the read tool, at the location the skill list gave you.'
         )
     if (EDITOR_OWNED_IN_SHELL.test(withoutASearchGlob(command)) && !readsOnlyThroughGit(command))
-        throw new Error(
+        throw refusal(
+            command,
             'Shell commands cannot name a scene or project.godot. Read one with the read tool, '
                 + "and change it with the godot tool's scene, node and project operations, which "
                 + 'write it through the editor that has it open.'
@@ -317,6 +344,8 @@ const BASH_IS_CONFINED =
     + ' relative to that root, and an absolute path, or one that climbs out with .. or ~, is'
     + ' refused before the command runs. Scratch output is the exception: a path under the'
     + ' temporary directory the OS gives you is allowed, and nothing there is part of the project.'
+    + " Searching files is the grep tool's job, not this one's: a shell grep over a scene,"
+    + ' project.godot or a skill is refused.'
 
 const SHELL_DEADLINE_SECONDS = 120
 

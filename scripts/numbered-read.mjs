@@ -1,6 +1,8 @@
 // The model counts lines badly. Asked for a breakpoint on a named line, it missed in 45 of 60
 // trials reading raw text and in 0 of 60 reading numbered text; the bare number scored the same as
 // `cat -n` padding and costs two tokens a line less (scripts/bench/lines-run.mjs).
+// A blank line is its number alone: `45\t` reads as a line holding one tab, and the model quoted
+// that tab back in an anchor the file could not match.
 const TRUNCATION_NOTE = /\n\n\[Showing lines \d+-\d+ of \d+[^\n]*\]$/u
 const LIMIT_NOTE = /\n\n\[\d+ more lines in file\. Use offset=\d+ to continue\.\]$/u
 const NOT_A_LISTING =
@@ -22,7 +24,9 @@ export function numberLines(text, {from = 1, truncated = false, limited = false}
     return (
         body
             .split('\n')
-            .map((line, i) => `${String(from + i)}\t${line}`)
+            .map((line, i) =>
+                line.trim() === '' ? String(from + i) : `${String(from + i)}\t${line}`
+            )
             .join('\n') + note
     )
 }

@@ -1108,6 +1108,37 @@ fn a_session_nobody_subscribed_to_still_gets_the_rules_the_user_chose() {
 /// a script that fails to compile leaves behind, and a reload does not rebuild it. The refusal
 /// blamed an older instance and sent the turn to save and reload the scene. The compiled script's
 /// own method list is the fact that matters for a connection, and it is what decides now.
+/// A script operation asked before any session is answered by the editor the router starts.
+///
+/// The router starts a session when a call meets none, and `godot_session start` holds its call
+/// open until the editor can answer. The router's own start did not: it returned on spawn and
+/// retried the call at once, so the retry met the language server's port before anything was
+/// listening and answered `connect_failed`. A live turn's first `edit` of a `.gd` met exactly that
+/// on 2026-09-12, and then started the session by hand and sent the same edit again.
+#[test]
+fn a_script_operation_asked_before_any_session_is_answered_by_the_editor_it_starts() {
+    let journey = Journey::start();
+    let _worktree = journey.new_task();
+    let opened = journey.try_call(
+        "godot_script",
+        Journey::one("open", json!({"paths": [PROBE_PATH]})),
+    );
+    assert!(
+        opened.is_ok(),
+        "the call has to be answered by the editor the router started for it: {} {}\n--- session \
+         output ---\n{}",
+        opened
+            .as_ref()
+            .err()
+            .map_or("", |failure| failure.code.as_str()),
+        opened
+            .as_ref()
+            .err()
+            .map_or("", |failure| failure.message.as_str()),
+        session_output()
+    );
+}
+
 #[test]
 fn a_handler_added_through_script_edit_is_connectable_after_the_scene_is_reopened() {
     let journey = Journey::start();

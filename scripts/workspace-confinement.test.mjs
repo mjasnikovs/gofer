@@ -763,3 +763,31 @@ test('a searching tool that names nothing at all searches the whole workspace', 
     for (const path of [undefined, null, '', 'res://'])
         assert.deepEqual(await tool.execute('1', {pattern: 'x', path}), {pattern: 'x', path: '.'})
 })
+
+test('a refused search is told it was a search, and which tool answers one', async context => {
+    const current = await workspace()
+    context.after(current.remove)
+    const tool = confineTool(fakeTool('bash'), current.path)
+    assert.match(tool.description, /grep tool's job/u)
+
+    for (const command of [
+        'grep -n "RunState" project.godot DESIGN.md | head -40',
+        "grep -q 'SFXPlayer2D' scenes/pixel_perfect_shell.tscn",
+        "grep -rn X scripts/ ; grep -q '^\\[autoload\\]' project.godot",
+        'if grep -q RunState project.godot; then echo yes; fi',
+        'grep -n naming .gofer/skills/godot-code-style/reference/naming.md',
+        'rg RunState /etc/passwd'
+    ])
+        await assert.rejects(tool.execute('1', {command}), /grep tool .* countOnly and filesOnly/u)
+
+    // A grep fed by a pipe filters, and a refused command with no search in it is pointed
+    // nowhere new.
+    for (const command of ['head -20 project.godot | grep name', 'cat .gofer/skills/x/SKILL.md'])
+        await assert.rejects(
+            tool.execute('2', {command}),
+            error => !/grep tool/u.test(error.message)
+        )
+
+    for (const command of ['grep -rn RunState scripts', 'godot --headless | grep -E "PASS|FAIL"'])
+        assert.deepEqual(await tool.execute('3', {command}), asRun(command))
+})

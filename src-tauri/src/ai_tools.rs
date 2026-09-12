@@ -383,9 +383,8 @@ fn route<R: Runtime>(
             params,
             |params| run_one(app, entry.domain, entry.operation, params),
             || {
-                godot_session_api::start_session(app, StartGodotSessionRequest {})
-                    .map(|_| ())
-                    .map_err(ToolFailure::from)
+                godot_session_api::start_session(app, StartGodotSessionRequest {})?;
+                the_editor_once_it_can_answer(app).map(|_| ())
             },
         )
     };
@@ -476,6 +475,9 @@ fn told_the_editor_about<R: Runtime>(app: &AppHandle<R>, paths: Vec<String>) {
 ///
 /// A start that fails still answers the code the call met. There is still no session, which is what
 /// that code says and what the caller has to act on; why the start failed is the sentence after it.
+///
+/// The start is the same wait `godot_session start` is: a start that answered on spawn had the
+/// retry meet the language server's port before it was listening, and answer `connect_failed`.
 fn starting_the_session_if_there_is_none(
     domain: &ToolDomain,
     params: Value,
@@ -1642,6 +1644,9 @@ fn named_scripts(params: &Value) -> Result<Vec<String>, ToolFailure> {
 /// The model counts lines badly: a named breakpoint line went from 15/60 right to 60/60 once the
 /// text carried its numbers (scripts/bench/lines-run.mjs), so a script reads the way the read
 /// tool answers.
+///
+/// A blank line is its number alone. `45\t` reads as a line holding one tab, and the model quoted
+/// that tab back in an anchor, which the file does not have.
 pub(crate) fn numbered_lines(text: &str) -> String {
     if text.is_empty() {
         return String::new();
@@ -1650,7 +1655,13 @@ pub(crate) fn numbered_lines(text: &str) -> String {
         .unwrap_or(text)
         .split('\n')
         .enumerate()
-        .map(|(index, line)| format!("{}\t{line}", index + 1))
+        .map(|(index, line)| {
+            if line.trim().is_empty() {
+                (index + 1).to_string()
+            } else {
+                format!("{}\t{line}", index + 1)
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -2450,7 +2461,8 @@ mod tests {
     #[test]
     fn a_listing_numbers_every_line_and_not_the_newline_after_the_last() {
         assert_eq!(super::numbered_lines(""), "");
-        assert_eq!(super::numbered_lines("a\n\nb\n"), "1\ta\n2\t\n3\tb");
+        assert_eq!(super::numbered_lines("a\n\nb\n"), "1\ta\n2\n3\tb");
+        assert_eq!(super::numbered_lines("a\n\t\nb"), "1\ta\n2\n3\tb");
         assert_eq!(super::numbered_lines("a\r\nb"), "1\ta\r\n2\tb");
     }
 
