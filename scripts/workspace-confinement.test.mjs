@@ -299,6 +299,38 @@ test('lets a slash inside an argument be a slash', async context => {
         assert.deepEqual(await tool.execute('1', {command}), asRun(command))
 })
 
+test('a grep pattern that opens on a slash is a pattern, not a path', async context => {
+    const current = await workspace()
+    context.after(current.remove)
+    const tool = confineTool(fakeTool('bash'), current.path)
+
+    // A task's own verification point, `grep -c "/10" … | grep -qx 0`, was refused as an absolute
+    // path. The point never ran, and the model spent forty calls reading this guard's source to
+    // find out why. A grep names its pattern first, and a pattern is never a path.
+    for (const command of [
+        'grep -c "/10" scripts/ui/hud_command_bar.gd | grep -qx 0',
+        "grep -n '/10' scripts/ui/hud_command_bar.gd",
+        'grep -e "/10" -c scripts/ui/hud_command_bar.gd',
+        'grep --regexp="/10" scripts/ui/hud_command_bar.gd',
+        'grep -- /10 scripts/ui/hud_command_bar.gd',
+        'rg "/[0-9]+" scripts',
+        'godot --headless | grep -c "/10"',
+        'if grep -q "/10" scripts/ui/hud_command_bar.gd; then echo yes; fi'
+    ])
+        assert.deepEqual(await tool.execute('1', {command}), asRun(command))
+
+    // The pattern is the only argument a grep may open on a slash: the files it searches are
+    // still paths, and so is anything a pipe hands it after the pattern.
+    for (const command of [
+        'grep -c "/10" /etc/passwd',
+        'grep -e "/10" -f /etc/patterns scripts',
+        'grep -rn x /home/edgars',
+        'grep -c "/10" scripts/x.gd > /root/out.txt',
+        "grep -q '/10' scripts/x.gd && cat /etc/passwd"
+    ])
+        await assert.rejects(tool.execute('2', {command}), /workspace/iu, command)
+})
+
 test('gives a shell command a deadline, so one that never returns cannot hold the turn', async context => {
     const current = await workspace()
     context.after(current.remove)

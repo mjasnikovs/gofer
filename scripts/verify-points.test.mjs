@@ -138,10 +138,50 @@ test('a point that reaches outside the workspace is refused, not run', async () 
     })
 
     assert.equal(results[0].passed, false)
+    assert.equal(results[0].refused, true)
     assert.match(results[0].output, /absolute path/u)
     assert.match(results[0].output, /godot_runtime \{"ops"/u)
     assert.deepEqual(env.ran, ['godot --headless --script .gofer/checks/boss.gd'])
     assert.equal(results[1].passed, true)
+    assert.equal(results[1].refused, undefined)
+})
+
+test('a refused point is not handed to the model as code to fix', async () => {
+    // A point the shell refused never ran, so no change to the code can turn it green. Told to
+    // fix the code and not touch the check, a model spent half an hour reading the guard's
+    // source for a way to satisfy both. The refusal is the specification's to fix, and the model
+    // is told so instead of being sent back to work.
+    const refused = {
+        name: 'no /10 in the HUD',
+        command: 'grep -c "/10" scripts/hud.gd | grep -qx 0',
+        passed: false,
+        refused: true,
+        output: 'Shell commands take paths relative to the workspace, and `"/10"` is an absolute path'
+    }
+    const failed = {name: 'the boss moves', command: 'make boss', passed: false, output: 'actual=0'}
+    const green = {name: 'it still starts', command: 'make start', passed: true, output: ''}
+
+    assert.equal(verifyReport([refused, green]), undefined)
+
+    const report = verifyReport([refused, failed, green])
+    assert.match(report, /1 of 3 verification points/u)
+    assert.match(report, /FAIL {2}the boss moves/u)
+    assert.match(report, /REFUSED {2}no \/10 in the HUD/u)
+    assert.match(report, /never ran/u)
+    assert.match(report, /specification/u)
+    assert.match(report, /actual=0/u)
+    assert.match(report, /Do not edit or delete the check/u)
+    assert.doesNotMatch(report, /absolute path/u)
+
+    const summary = verifySummary([refused, failed, green])
+    assert.match(summary, /1 of 3 points/u)
+    assert.match(summary, /REFUSED {2}no \/10 in the HUD/u)
+    assert.match(summary, /FAIL {2}the boss moves/u)
+    assert.match(summary, /1 point could not run/u)
+
+    const alone = verifySummary([refused, green])
+    assert.match(alone, /1 point could not run/u)
+    assert.doesNotMatch(alone, /Verification failed/u)
 })
 
 const TOOL_SPEC =

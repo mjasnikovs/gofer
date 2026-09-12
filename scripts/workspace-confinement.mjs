@@ -187,6 +187,49 @@ function refusal(command, message) {
     return new Error(isASearch(command) ? `${message}${SEARCH_INSTEAD}` : message)
 }
 
+const SHELL_WORD = /\s*("[^"]*"?|'[^']*'?|\S+)/guy
+
+/// Masks the pattern of every grep, so `grep -c "/10" scripts/hud.gd` is not refused as a path.
+/// The pattern is the first plain word, or the one after -e; the files after it stay paths.
+function withoutSearchPatterns(command) {
+    return command.replace(/[^|;&\n\r]+/gu, segment => {
+        const opened = OPENS_A_SEARCH.exec(segment)
+        if (opened === null) return segment
+        let masked = segment
+        let named = false
+        let after = false
+        let next = false
+        SHELL_WORD.lastIndex = opened[0].length
+        for (let word = SHELL_WORD.exec(segment); word !== null; word = SHELL_WORD.exec(segment)) {
+            const token = word[1]
+            const start = word.index + word[0].length - token.length
+            const isPattern = next || (!named && (after || !token.startsWith('-')))
+            next = false
+            if (isPattern) {
+                masked =
+                    masked.slice(0, start)
+                    + FILLER.repeat(token.length)
+                    + masked.slice(start + token.length)
+                named = true
+                continue
+            }
+            if (after) continue
+            if (token === '-e' || token === '--regexp') {
+                next = true
+                named = true
+            } else if (token.startsWith('--regexp=')) {
+                const at = start + '--regexp='.length
+                masked =
+                    masked.slice(0, at)
+                    + FILLER.repeat(token.length - '--regexp='.length)
+                    + masked.slice(start + token.length)
+                named = true
+            } else if (token === '--') after = true
+        }
+        return masked
+    })
+}
+
 const ESCAPES_THE_WORKSPACE =
     /(?:^|[\s=<>|;&])["']?(?:\.\.(?:[\\/]|$)|~(?:[\\/]|$)|[A-Za-z]:(?:[\\/]|$)|\/)/u
 
@@ -270,7 +313,9 @@ function staysUnder(root, token) {
 export function validateBashCommand(command, temporaryRoot = tmpdir(), workspaceRoot = undefined) {
     if (typeof command !== 'string' || command.length === 0 || command.includes('\0'))
         throw new Error('Shell commands must be non-empty strings')
-    const probed = blank(command, /\/dev\/(?:null|stdin|stdout|stderr|fd\/\d+)(?![\w-])/gu)
+    const probed = withoutSearchPatterns(
+        blank(command, /\/dev\/(?:null|stdin|stdout|stderr|fd\/\d+)(?![\w-])/gu)
+    )
     const scratched = withoutTemporaryPaths(
         workspaceRoot === undefined ? probed : withoutTemporaryPaths(probed, workspaceRoot),
         temporaryRoot

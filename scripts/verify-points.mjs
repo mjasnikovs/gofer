@@ -67,15 +67,19 @@ async function runToolPoint(point, host, domains, signal) {
 }
 
 async function runShellPoint(point, env, signal) {
-    let outcome
     try {
         validateBashCommand(point.command)
+    } catch (error) {
+        return {passed: false, refused: true, output: refusedPoint(error)}
+    }
+    let outcome
+    try {
         outcome = await env.exec(point.command, {
             timeout: POINT_TIMEOUT_SECONDS,
             abortSignal: signal
         })
     } catch (error) {
-        outcome = {ok: false, error: {message: refusedPoint(error)}}
+        outcome = {ok: false, error}
     }
     return {
         passed: outcome.ok && outcome.value.exitCode === 0,
@@ -98,12 +102,16 @@ export async function runVerifyPoints({points, env, host, domains, emit, signal}
                 of: points.length
             })
         )
-        const {passed, output: written} =
+        const {
+            passed,
+            refused,
+            output: written
+        } =
             point.tool ?
                 await runToolPoint(point, host, domains, signal)
             :   await runShellPoint(point, env, signal)
         const output = tail(written)
-        results.push({name: point.name, command: point.command, passed, output})
+        results.push({name: point.name, command: point.command, passed, refused, output})
         emit(
             verifyPoint({
                 status: passed ? 'complete' : 'error',
@@ -118,28 +126,58 @@ export async function runVerifyPoints({points, env, host, domains, emit, signal}
     return results
 }
 
-export function verifySummary(results) {
-    const failed = (results ?? []).filter(result => !result.passed)
-    if (failed.length === 0) return undefined
-    const lines = results.map(result => `  ${result.passed ? 'PASS' : 'FAIL'}  ${result.name}`)
-    return (
-        `Verification failed: ${failed.length} of ${results.length} points from this task's `
-        + `specification did not pass.\n${lines.join('\n')}`
-    )
+const verdict = result =>
+    result.passed ? 'PASS'
+    : result.refused ? 'REFUSED'
+    : 'FAIL'
+
+const points = count => (count === 1 ? '1 point' : `${count} points`)
+
+/// A refused point never ran, so it is counted apart from the ones that ran and failed: the
+/// first is the specification's to fix, the second the code's.
+function sorted(results) {
+    const all = results ?? []
+    return {
+        all,
+        failed: all.filter(result => !result.passed && !result.refused),
+        refused: all.filter(result => result.refused)
+    }
 }
 
+export function verifySummary(results) {
+    const {all, failed, refused} = sorted(results)
+    if (failed.length === 0 && refused.length === 0) return undefined
+    const lines = all.map(result => `  ${verdict(result)}  ${result.name}`)
+    const heading =
+        failed.length > 0 ?
+            `Verification failed: ${failed.length} of ${all.length} points from this task's `
+            + 'specification did not pass.'
+        :   ''
+    const unrun =
+        refused.length > 0 ?
+            `${points(refused.length)} could not run: the shell refused the line as written.`
+        :   ''
+    return [heading, unrun, lines.join('\n')].filter(Boolean).join('\n')
+}
+
+/// A refused point is named and not asked for: no change to the code turns it green, and a model
+/// told to fix the code without touching the check will go looking for a third way.
 export function verifyReport(results) {
-    const failed = results.filter(result => !result.passed)
+    const {all, failed, refused} = sorted(results)
     if (failed.length === 0) return undefined
-    const lines = results.map(
-        result => `${result.passed ? 'PASS' : 'FAIL'}  ${result.name}\n      ${result.command}`
-    )
+    const lines = all.map(result => `${verdict(result)}  ${result.name}\n      ${result.command}`)
     const detail = failed
         .map(result => `--- ${result.name}\n${result.output || '(no output)'}`)
         .join('\n\n')
+    const unrun =
+        refused.length > 0 ?
+            `\n\n${points(refused.length)} marked REFUSED never ran: the shell refuses the line `
+            + 'as the specification wrote it. That is not yours to fix. Say so in your answer '
+            + 'and leave it.'
+        :   ''
     return (
-        `${failed.length} of ${results.length} verification points from this task's specification `
+        `${failed.length} of ${all.length} verification points from this task's specification `
         + `failed. The work is not done until they pass.\n\n${lines.join('\n')}\n\n${detail}\n\n`
-        + 'Fix the code so these pass. Do not edit or delete the check to make it green.'
+        + `Fix the code so these pass. Do not edit or delete the check to make it green.${unrun}`
     )
 }
