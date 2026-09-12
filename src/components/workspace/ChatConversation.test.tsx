@@ -2,7 +2,7 @@ import {afterEach, describe, expect, it, vi} from 'vitest'
 import {cleanup, render, screen} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {createRef} from 'react'
-import {ChatConversation} from './ChatConversation'
+import {ChatConversation, WAITING_ROW_CLASS} from './ChatConversation'
 import type {Message, ToolActivity, VerifyPoint} from '../../models/chat'
 
 const STARTED_AT = 1_000_000
@@ -51,6 +51,20 @@ describe('ChatConversation', () => {
 
         await vi.advanceTimersByTimeAsync(21_000)
         expect(await screen.findByText('scene.open · 24s')).toBeTruthy()
+    })
+
+    it('marks a call still waiting for a slot so the theme can draw it as queued', () => {
+        const {container} = render(
+            conversation({
+                id: 'call-2',
+                name: 'subagent',
+                status: 'pending',
+                startedAt: STARTED_AT,
+                step: 'waiting for a free sub-agent slot'
+            })
+        )
+
+        expect(container.querySelector(`.${WAITING_ROW_CLASS}`)).toBeTruthy()
     })
 
     it('colours a GDScript fence, and leaves an unknown language alone', () => {
@@ -276,7 +290,6 @@ describe('verification points', () => {
 
         const verdict = screen.getByText('Verification failed — 1 of 1')
         const retried = screen.getByText(/godot --headless --script fix\.gd/)
-        // eslint-disable-next-line no-bitwise
         const isAfter = verdict.compareDocumentPosition(retried) & Node.DOCUMENT_POSITION_FOLLOWING
 
         expect(isAfter).toBeTruthy()

@@ -46,6 +46,8 @@ const SENT_TEXT_STYLE = {whiteSpace: 'pre-wrap'} as const
 const CHAT_SCROLL_VIEWPORT_STYLE = {display: 'flex', width: '100%'} as const
 const CHAT_MESSAGE_LIST_STYLE = {minWidth: 0, paddingBlockEnd: 'var(--spacing-3)'} as const
 const TOOL_ROW_STYLE = {maxWidth: '100%', overflow: 'hidden'} as const
+// Astryx spins a queued call exactly like a running one; tool-calls.css draws the hourglass.
+export const WAITING_ROW_CLASS = 'gofer-tool-waiting'
 const MESSAGE_HEADING_LEVEL = 3
 
 // Astryx drops its own spacing wrapper as soon as components.code is set, so the
@@ -166,6 +168,7 @@ const ToolCallRow = memo(({now, tool}: {now?: number | undefined; tool: ToolActi
     return (
         <ChatToolCalls
             style={TOOL_ROW_STYLE}
+            {...(tool.status === 'pending' && {className: WAITING_ROW_CLASS})}
             calls={[
                 {
                     key: tool.id,
