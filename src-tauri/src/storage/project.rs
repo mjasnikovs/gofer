@@ -430,6 +430,11 @@ pub fn draft_ui_key(task_id: &str) -> String {
     format!("{UI_STATE_PREFIX}draft.{task_id}")
 }
 
+/// The key the pictures of an unsent message wait under, until the composer picks them up.
+pub fn draft_attachments_ui_key(task_id: &str) -> String {
+    format!("{UI_STATE_PREFIX}draftAttachments.{task_id}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::test_support::*;

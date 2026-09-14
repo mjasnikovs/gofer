@@ -35,7 +35,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null
 }
 
-function isStoredAttachment(value: unknown): value is ChatAttachment {
+export function isStoredAttachment(value: unknown): value is ChatAttachment {
     if (!isRecord(value)) return false
     return (
         typeof value['id'] === 'string'

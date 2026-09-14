@@ -1,7 +1,7 @@
 [[permission]]
 identifier = "main-window-commands"
 description = "Allows the main window to use Gofer's user-facing application commands."
-# GENERATED-BEGIN allow-list sha256:e77bf5a7bba2775d
+# GENERATED-BEGIN allow-list sha256:7f5e809260ce0c24
 commands.allow = [
     "abandon_task_merge",
     "activate_chat_task",
@@ -15,6 +15,7 @@ commands.allow = [
     "cancel_chatgpt_login",
     "card_comment",
     "card_create",
+    "card_delete",
     "card_edit",
     "card_move",
     "card_post_to_gofer",

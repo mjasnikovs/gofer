@@ -466,6 +466,36 @@ PRAGMA user_version = 10;
 COMMIT;
 "#;
 
+/// The pictures on a card. A row here is what keeps the picture out of the attachment sweep, the
+/// way a `message_attachments` row does for a message.
+const PROJECT_SCHEMA_V11: &str = r#"
+BEGIN;
+CREATE TABLE card_attachments (
+    card_id TEXT NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+    attachment_id TEXT NOT NULL REFERENCES attachments(id),
+    position INTEGER NOT NULL,
+    PRIMARY KEY (card_id, attachment_id)
+) STRICT;
+CREATE INDEX card_attachments_attachment ON card_attachments(attachment_id);
+PRAGMA user_version = 11;
+COMMIT;
+"#;
+
+/// A short number per card, because a model copying a UUIDv7 slips on the prefix that every card
+/// made in the same minute shares. Existing cards are numbered in the order they were made.
+const PROJECT_SCHEMA_V12: &str = r#"
+BEGIN;
+ALTER TABLE cards ADD COLUMN number INTEGER NOT NULL DEFAULT 0;
+UPDATE cards SET number = numbered.n
+FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY created_at, id) AS n FROM cards) AS numbered
+WHERE numbered.id = cards.id;
+CREATE UNIQUE INDEX cards_number ON cards(number);
+INSERT INTO project_state (key, value)
+SELECT 'board.next_card_number', CAST(COALESCE(MAX(number), 0) + 1 AS TEXT) FROM cards;
+PRAGMA user_version = 12;
+COMMIT;
+"#;
+
 /// One task's brief, as the panel and a resume read it.
 ///
 /// Every phase output is optional because a run that stopped part way through has only the ones it
@@ -484,7 +514,7 @@ pub struct BriefRun {
     pub reason: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredAttachment {
     pub id: String,
@@ -1273,9 +1303,9 @@ fn migrate_project(connection: &Connection) -> Result<(), CommandError> {
     let current = connection
         .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
         .map_err(database_error)?;
-    if current > 10 {
+    if current > 12 {
         return Err(format!(
-            "The database schema version {current} is newer than supported version 10"
+            "The database schema version {current} is newer than supported version 12"
         )
         .into());
     }
@@ -1327,6 +1357,16 @@ fn migrate_project(connection: &Connection) -> Result<(), CommandError> {
     if current <= 9 {
         connection
             .execute_batch(PROJECT_SCHEMA_V10)
+            .map_err(database_error)?;
+    }
+    if current <= 10 {
+        connection
+            .execute_batch(PROJECT_SCHEMA_V11)
+            .map_err(database_error)?;
+    }
+    if current <= 11 {
+        connection
+            .execute_batch(PROJECT_SCHEMA_V12)
             .map_err(database_error)?;
     }
     Ok(())
@@ -1741,7 +1781,7 @@ mod tests {
             .query_row("SELECT vec_version()", [], |row| row.get::<_, String>(0))
             .expect("sqlite-vec version");
 
-        assert_eq!(version, 10);
+        assert_eq!(version, 12);
         assert_eq!(vec_version, "v0.1.9");
     }
 
@@ -1771,7 +1811,7 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .expect("schema version");
         assert_eq!(title, "Existing task");
-        assert_eq!(version, 10);
+        assert_eq!(version, 12);
         connection
             .execute_batch(
                 "INSERT INTO sketches (id, task_id, question_id, question, label, is_approved, saved_at)
@@ -1783,6 +1823,61 @@ mod tests {
     /// Run logging moved from the standalone Godot process to the managed editor session. The
     /// history recorded before that move has to stay exactly as searchable as it was, which is why
     /// the migration adds a column instead of rebuilding the table.
+    #[test]
+    fn existing_cards_are_numbered_in_the_order_they_were_made() {
+        register_sqlite_vec();
+        let connection = Connection::open_in_memory().expect("in-memory database");
+        for schema in [
+            PROJECT_SCHEMA_V1,
+            PROJECT_SCHEMA_V2,
+            PROJECT_SCHEMA_V3,
+            PROJECT_SCHEMA_V4,
+            PROJECT_SCHEMA_V5,
+            PROJECT_SCHEMA_V6,
+            PROJECT_SCHEMA_V7,
+            PROJECT_SCHEMA_V8,
+            PROJECT_SCHEMA_V9,
+            PROJECT_SCHEMA_V10,
+            PROJECT_SCHEMA_V11,
+        ] {
+            connection.execute_batch(schema).expect("earlier schema");
+        }
+        connection
+            .execute_batch(
+                "INSERT INTO cards (id, title, body, owner, status, position, created_at, updated_at)
+                 VALUES ('card-c', 'Third', '', 'user', 'backlog', 1, 30, 30),
+                        ('card-a', 'First', '', 'user', 'done', 1, 10, 10),
+                        ('card-b', 'Second', '', 'user', 'ready', 1, 20, 20);",
+            )
+            .expect("existing cards");
+
+        migrate_project(&connection).expect("migrate project");
+
+        let numbered: Vec<(String, i64)> = connection
+            .prepare("SELECT id, number FROM cards ORDER BY id")
+            .expect("statement")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows");
+        assert_eq!(
+            numbered,
+            [
+                ("card-a".to_owned(), 1),
+                ("card-b".to_owned(), 2),
+                ("card-c".to_owned(), 3)
+            ]
+        );
+        let next = connection
+            .query_row(
+                "SELECT value FROM project_state WHERE key = 'board.next_card_number'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("the counter");
+        assert_eq!(next, "4");
+    }
+
     #[test]
     fn recorded_run_history_survives_the_session_identifier_migration() {
         register_sqlite_vec();

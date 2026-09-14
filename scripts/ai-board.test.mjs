@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import {validateToolArguments} from '@earendil-works/pi-ai'
 import {BOARD_PROBE_ANSWER, BOARD_TOOL_NAME, CARD_STATUSES, createBoardTool} from './ai-board.mjs'
 import {toolStepLine} from './tool-target.mjs'
 
@@ -37,11 +38,39 @@ test('the schema is one flat object with an op, and only the columns that exist'
     assert.equal(tool.parameters.additionalProperties, false)
 })
 
+test('pi hands the board a number id as text and drops a null one', () => {
+    const tool = createBoardTool({host: recording()})
+    const validated = args =>
+        validateToolArguments(tool, {
+            type: 'toolCall',
+            id: 'call-1',
+            name: BOARD_TOOL_NAME,
+            arguments: args
+        })
+
+    assert.deepEqual(validated({op: 'comment', id: 7, body: 'Done'}), {
+        op: 'comment',
+        id: '7',
+        body: 'Done'
+    })
+    assert.deepEqual(validated({op: 'comment', id: '#7', body: 'Done'}), {
+        op: 'comment',
+        id: '#7',
+        body: 'Done'
+    })
+    assert.deepEqual(validated({op: 'comment', id: null, body: 'Done'}), {
+        op: 'comment',
+        body: 'Done'
+    })
+    assert.deepEqual(validated({op: 'read', id: true}), {op: 'read', id: 'true'})
+})
+
 test('the description says the model never finishes a card', () => {
     const {description} = createBoardTool({host: recording()})
 
     assert.match(description, /never move a card to done/u)
     assert.match(description, /Comment on your own card/u)
+    assert.match(description, /Leave id out/u)
 })
 
 test('a call reaches the backend as it was written', async () => {

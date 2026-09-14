@@ -3,7 +3,7 @@ import {attachmentData, pngFile} from '../services/chat-storage'
 import {invoke, isTauri} from '../services/desktop'
 import {commandErrorMessage} from '../utils/command-error'
 import type {AnnotationShape} from '../models/annotation'
-import type {DraftAttachment} from '../models/chat'
+import type {ChatAttachment, DraftAttachment} from '../models/chat'
 
 export const CHAT_ATTACHMENT_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
 export const MAX_CHAT_ATTACHMENTS = 5
@@ -12,6 +12,8 @@ export const MAX_CHAT_ATTACHMENT_BYTES = 10 * 1024 * 1024
 export type AttachmentPool = Readonly<{
     attachments: readonly DraftAttachment[]
     clear: () => void
+    /** Brings pictures already stored on the desktop into the pool, for a draft that carries some. */
+    restore: (stored: readonly ChatAttachment[]) => Promise<void>
     select: (files: FileList | readonly File[] | null) => Promise<void>
     attachClipboardImage: () => Promise<void>
     edit: (attachmentId: string, file: File, shapes: readonly AnnotationShape[]) => Promise<void>
@@ -72,6 +74,30 @@ export function useAttachmentPool(report: (message?: string) => void): Attachmen
         }
     }
 
+    // Stable, so an effect that restores once per task can depend on it honestly.
+    const restore = useCallback(
+        async (stored: readonly ChatAttachment[]) => {
+            if (!isTauri() || stored.length === 0) return
+            try {
+                const restored = await Promise.all(
+                    stored.map(async attachment => {
+                        const previewUrl = await invoke('read_chat_attachment', {attachment})
+                        return {
+                            ...attachment,
+                            previewUrl,
+                            data: previewUrl.slice(previewUrl.indexOf(',') + 1)
+                        }
+                    })
+                )
+                setAttachments(previous => [...previous, ...restored])
+                report(undefined)
+            } catch (error) {
+                report(`The pictures could not be read back: ${commandErrorMessage(error)}`)
+            }
+        },
+        [report]
+    )
+
     const attachClipboardImage = async () => {
         if (!isTauri()) return
         try {
@@ -113,5 +139,5 @@ export function useAttachmentPool(report: (message?: string) => void): Attachmen
         }
     }
 
-    return {attachments, clear, select, attachClipboardImage, edit, remove}
+    return {attachments, clear, restore, select, attachClipboardImage, edit, remove}
 }

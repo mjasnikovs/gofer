@@ -30,7 +30,8 @@ const {values, positionals} = parseArgs({
         images: {type: 'boolean', default: false},
         thinking: {type: 'string'},
         model: {type: 'string', default: 'local'},
-        budget: {type: 'string'}
+        budget: {type: 'string'},
+        card: {type: 'string'}
     }
 })
 const [name] = positionals
@@ -86,7 +87,8 @@ const env = virtualDisplayEnv({
     GOFER_LIVE_IMAGES: values.images ? 'on' : 'off',
     GOFER_LIVE_MODEL: values.model,
     GOFER_DISPATCH_LEDGER: ledger,
-    ...(values.thinking ? {GOFER_LIVE_THINKING: values.thinking} : {})
+    ...(values.thinking ? {GOFER_LIVE_THINKING: values.thinking} : {}),
+    ...(values.card ? {GOFER_LIVE_CARD: values.card} : {})
 })
 
 const startedAt = Date.now()

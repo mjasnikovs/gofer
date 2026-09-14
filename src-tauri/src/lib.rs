@@ -79,7 +79,8 @@ mod workers;
 mod workspace;
 
 use board::{
-    board_list, card_comment, card_create, card_edit, card_move, card_post_to_gofer, card_read,
+    board_list, card_comment, card_create, card_delete, card_edit, card_move, card_post_to_gofer,
+    card_read,
 };
 
 use ai_turn::{
@@ -1338,6 +1339,7 @@ pub fn run() {
         board_list,
         card_comment,
         card_create,
+        card_delete,
         card_edit,
         card_move,
         card_post_to_gofer,

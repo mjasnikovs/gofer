@@ -2,7 +2,7 @@ import {invoke, listen} from './desktop'
 import {toCommandError} from '../utils/command-error'
 import type {CommandError} from '../models/errors'
 import type {Card, CardComment, CardDetail, CardEdit, CardStatus} from '../models/board'
-import type {StoredChat} from '../models/chat'
+import type {ChatAttachment, DraftAttachment, StoredChat} from '../models/chat'
 
 export function listCards(): Promise<readonly Card[]> {
     return invoke('board_list')
@@ -12,8 +12,42 @@ export function readCard(id: string): Promise<CardDetail> {
     return invoke('card_read', {id})
 }
 
-export function createCard(title: string, body: string, status: CardStatus): Promise<Card> {
-    return invoke('card_create', {title, body, status})
+export function createCard(
+    title: string,
+    body: string,
+    status: CardStatus,
+    attachments: readonly ChatAttachment[]
+): Promise<Card> {
+    return invoke('card_create', {title, body, status, attachments})
+}
+
+export function deleteCard(id: string): Promise<void> {
+    return invoke('card_delete', {id})
+}
+
+/**
+ * Puts every picture the card does not have yet where a message's pictures go, and answers with
+ * the rows a card points at. The same id twice is the same bytes, so a picture the card already
+ * holds is skipped rather than sent again.
+ */
+export async function storeCardAttachments(
+    pictures: readonly DraftAttachment[],
+    held: ReadonlySet<string>
+): Promise<readonly ChatAttachment[]> {
+    await Promise.all(
+        pictures
+            .filter(picture => !held.has(picture.id))
+            .map(picture =>
+                invoke('save_chat_attachment', {
+                    request: {attachment: toChatAttachment(picture), data: picture.data}
+                })
+            )
+    )
+    return pictures.map(toChatAttachment)
+}
+
+function toChatAttachment(picture: DraftAttachment): ChatAttachment {
+    return {id: picture.id, name: picture.name, mimeType: picture.mimeType, size: picture.size}
 }
 
 export function moveCard(id: string, status: CardStatus): Promise<Card> {

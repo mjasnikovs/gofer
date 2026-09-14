@@ -15,6 +15,7 @@ const tauri = createDesktopFake()
 function card(overrides: Partial<Card> = {}): Card {
     return {
         id: 'card-1',
+        number: 1,
         title: 'Make the hero jump higher',
         body: 'Twice the height, same hang time.',
         owner: 'user',
@@ -29,6 +30,7 @@ function card(overrides: Partial<Card> = {}): Card {
 
 const DOING = card({
     id: 'card-2',
+    number: 2,
     title: 'Fix the ladder',
     owner: 'claude',
     status: 'doing',
@@ -81,7 +83,7 @@ describe('the board', () => {
         for (const column of ['Backlog', 'Ready', 'Doing', 'Review', 'Done'])
             expect(screen.getByText(column)).toBeInTheDocument()
         expect(screen.getByText('Make the hero jump higher')).toBeInTheDocument()
-        expect(screen.getByText('claude · 1 comment')).toBeInTheDocument()
+        expect(screen.getByText('#2 · claude · 1 comment')).toBeInTheDocument()
         expect(screen.getByText('task')).toBeInTheDocument()
     })
 
@@ -97,7 +99,7 @@ describe('the board', () => {
         const {state} = backend([card()])
         await open()
 
-        state.cards = [...state.cards, card({id: 'card-3', title: 'Add a double jump'})]
+        state.cards = [...state.cards, card({id: 'card-3', number: 3, title: 'Add a double jump'})]
         const announce = tauri.listen.mock.calls.findLast(call => call[0] === 'board-changed')?.[1]
         expect(announce).toBeDefined()
         announce?.({payload: undefined as never})
@@ -124,14 +126,14 @@ describe('the board', () => {
 
         await userEvent.click(screen.getByText('Fix the ladder'))
         await flushUntil(() => screen.queryByText('Halfway there.') !== null)
-        expect(screen.getByText('claude · 1 comment')).toBeInTheDocument()
+        expect(screen.getByText('#2 · claude · 1 comment')).toBeInTheDocument()
 
         await userEvent.click(screen.getByRole('combobox', {name: 'Column'}))
         await userEvent.click(await screen.findByRole('option', {name: 'Review'}))
         await flushUntil(() => calls().includes('card_move'))
 
         const dialog = screen.getByRole('dialog')
-        expect(await within(dialog).findByText('Review · claude')).toBeInTheDocument()
+        expect(await within(dialog).findByText('#2 · Review · claude')).toBeInTheDocument()
     })
 
     it('posts a ready card to Gofer and opens the task it made on the chat tab', async () => {
@@ -194,6 +196,68 @@ describe('the board', () => {
 
         expect(screen.getByLabelText(/^Title/u)).toHaveValue('Make the hero jump twice')
         expect(screen.getByRole('button', {name: 'Save changes'})).toBeInTheDocument()
+    })
+
+    it('deletes a card after the user confirms', async () => {
+        backend()
+        await open()
+
+        await userEvent.click(screen.getByText('Make the hero jump higher'))
+        await userEvent.click(await screen.findByRole('button', {name: 'Delete'}))
+        expect(calls()).not.toContain('card_delete')
+        await userEvent.click(await screen.findByRole('button', {name: 'Delete card'}))
+        await flushUntil(() => screen.queryByText('Make the hero jump higher') === null)
+
+        expect(calls()).toContain('card_delete')
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+        expect(screen.getByText('Fix the ladder')).toBeInTheDocument()
+    })
+
+    it('shows the pictures on a card and saves the set the user leaves', async () => {
+        backend([card()], {
+            card_read: ({id}) => ({
+                card: card({id}),
+                comments: [],
+                attachments: [
+                    {id: 'picture-1', name: 'scene.png', mimeType: 'image/png', size: 2},
+                    {id: 'picture-2', name: 'ladder.png', mimeType: 'image/png', size: 2}
+                ]
+            })
+        })
+        await open()
+
+        await userEvent.click(screen.getByText('Make the hero jump higher'))
+        const first = await screen.findByAltText('Attached image: scene.png')
+        expect(first).toHaveAttribute('src', 'data:image/png;base64,aGk=')
+        expect(screen.getByRole('button', {name: 'Save changes'})).toBeDisabled()
+
+        await userEvent.click(
+            screen.getByRole('button', {name: /Remove.*scene\.png|scene\.png.*Remove/iu})
+        )
+        await userEvent.click(screen.getByRole('button', {name: 'Save changes'}))
+        await flushUntil(() => calls().includes('card_edit'))
+
+        const edit = tauri.invoke.mock.calls.find(call => call[0] === 'card_edit')?.[1]
+        expect(edit).toMatchObject({
+            edit: {attachments: [{id: 'picture-2', name: 'ladder.png'}]}
+        })
+        expect(calls()).not.toContain('save_chat_attachment')
+    })
+
+    it('writes a new line on Enter instead of sending', async () => {
+        backend([])
+        await open()
+
+        await userEvent.click(screen.getByRole('button', {name: 'New card'}))
+        await flush()
+        await userEvent.type(screen.getByLabelText(/Title/u), 'Add a double jump')
+        const body = screen.getByLabelText(/What to do/u)
+        await userEvent.type(body, 'Second press{Enter}in the air')
+        await userEvent.click(screen.getByRole('button', {name: 'Add card'}))
+        await flushUntil(() => calls().includes('card_create'))
+
+        const created = tauri.invoke.mock.calls.find(call => call[0] === 'card_create')?.[1]
+        expect(created).toMatchObject({body: 'Second press\nin the air', attachments: []})
     })
 
     it('shows a comment another agent leaves while the card is open', async () => {

@@ -1,3 +1,5 @@
+import type {ChatAttachment} from './chat'
+
 export const CARD_STATUSES = ['backlog', 'ready', 'doing', 'review', 'done'] as const
 
 export type CardStatus = (typeof CARD_STATUSES)[number]
@@ -12,6 +14,7 @@ export const CARD_STATUS_LABELS: Readonly<Record<CardStatus, string>> = {
 
 export type Card = Readonly<{
     id: string
+    number: number
     title: string
     body: string
     owner: string
@@ -33,12 +36,15 @@ export type CardComment = Readonly<{
 export type CardDetail = Readonly<{
     card: Card
     comments: readonly CardComment[]
+    attachments: readonly ChatAttachment[]
 }>
 
 export type CardEdit = Readonly<{
     title?: string
     body?: string
     owner?: string
+    /** The whole set the card keeps, not a delta. */
+    attachments?: readonly ChatAttachment[]
 }>
 
 export function cardsIn(cards: readonly Card[], status: CardStatus): readonly Card[] {

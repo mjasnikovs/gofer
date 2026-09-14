@@ -10,6 +10,11 @@ export function draftKey(taskId: string) {
     return `ui.draft.${taskId}`
 }
 
+/** Where a card's pictures wait for the task's composer. Read once, then cleared. */
+export function draftAttachmentsKey(taskId: string) {
+    return `ui.draftAttachments.${taskId}`
+}
+
 export const WRITE_DEBOUNCE_MS = 250
 
 type PendingWrite = Readonly<{value: unknown}>

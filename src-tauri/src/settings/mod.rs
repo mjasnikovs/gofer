@@ -3506,7 +3506,10 @@ mod tests {
         let loaded = read_settings_from_path(&path).expect("read");
         assert_eq!(loaded.mcp, saved.mcp, "and the file keeps it");
         let again = save_mcp_settings_at(&path, loaded.mcp.clone()).expect("save again");
-        assert_eq!(again.mcp, loaded.mcp, "a save with a token keeps that token");
+        assert_eq!(
+            again.mcp, loaded.mcp,
+            "a save with a token keeps that token"
+        );
     }
 
     /// The Godot tab writes on every tick of a checkbox, with no Save of its own. It must therefore

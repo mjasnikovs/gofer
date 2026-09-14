@@ -262,6 +262,44 @@ fn a_fixture_that_carries_its_own_history_starts_the_turn_without_it() {
     );
 }
 
+/// Posts the ask to the board the way the window's Post to Gofer does, among cards made in the same
+/// minute, so a turn about the board meets the look-alike ids that tripped the model on a real one.
+/// The turn's own task id is not a stored task, so the card hangs off a real one made active here.
+fn hand_the_task_a_card(storage: &crate::storage::ProjectStorage, title: &str, task: &str) {
+    use crate::storage::{Actor, CardStatus, NewCard};
+    let nothing_to_stop = |_: &std::path::Path| Ok(());
+    let switch = storage.switch_with_no_turn_to_refuse(&nothing_to_stop);
+    let task_id = storage
+        .tasks()
+        .create(&switch)
+        .expect("a task for the card")
+        .task_id
+        .expect("task id");
+    let card = |title: &str, body: &str, status: CardStatus| NewCard {
+        title: title.to_owned(),
+        body: body.to_owned(),
+        owner: "user".to_owned(),
+        status,
+        attachments: Vec::new(),
+    };
+    let board = storage.board();
+    for (neighbour, status) in [
+        ("Task 6e — Node flags and icons", CardStatus::Done),
+        ("Task 6f — Edges", CardStatus::Done),
+        ("Task 6h — Node card", CardStatus::Backlog),
+    ] {
+        board
+            .create(&card(neighbour, "", status), Actor::User)
+            .expect("a neighbouring card");
+    }
+    let own = board
+        .create(&card(title, task, CardStatus::Ready), Actor::User)
+        .expect("the task's card");
+    board
+        .attach_task(&own.id, &task_id)
+        .expect("hand the card to the task");
+}
+
 #[test]
 fn live_agent_acceptance() {
     let Ok(task) = std::env::var("GOFER_LIVE_TASK") else {
@@ -298,6 +336,9 @@ fn live_agent_acceptance() {
     let data = TempDir::new().expect("temporary application data");
     let storage =
         crate::storage::ProjectStorage::open(data.path(), &worktree).expect("open project storage");
+    if let Ok(title) = std::env::var("GOFER_LIVE_CARD") {
+        hand_the_task_a_card(&storage, &title, &task);
+    }
     app.manage(crate::storage::StorageSlot::new(Ok(storage)));
 
     let session = start_session(directory, worktree);

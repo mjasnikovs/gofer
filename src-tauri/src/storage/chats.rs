@@ -386,7 +386,9 @@ impl Chats<'_> {
             .prepare(
                 "SELECT a.id, a.content_hash FROM attachments a
                  LEFT JOIN message_attachments ma ON ma.attachment_id = a.id
-                 WHERE ma.attachment_id IS NULL AND a.created_at < ?1",
+                 LEFT JOIN card_attachments ca ON ca.attachment_id = a.id
+                 WHERE ma.attachment_id IS NULL AND ca.attachment_id IS NULL
+                   AND a.created_at < ?1",
             )
             .map_err(database_error)?;
         let orphaned = statement

@@ -9,7 +9,7 @@ import {
 import {draftKey} from '../services/ui-state'
 import type {DesktopCommand, DesktopCommandMap} from '../services/desktop'
 import type {DesktopFake} from './desktop-driver'
-import type {AiStreamPayload, StoredChat} from '../models/chat'
+import type {AiStreamPayload, ChatAttachment, StoredChat} from '../models/chat'
 import type {GodotSessionState} from '../models/godot'
 import type {WorkspaceFileChange} from '../models/files'
 import type {
@@ -44,6 +44,7 @@ export interface BackendState {
     sketches: ProjectSketch[]
     cards: Card[]
     comments: CardComment[]
+    cardAttachments: Record<string, ChatAttachment[]>
     changes: TaskChanges
     diffs: Map<string, FileDiff>
     skills: Map<string, {skill: Skill; text: string}>
@@ -302,6 +303,7 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
         sketches: [...(options.sketches ?? [])],
         cards: [...(options.cards ?? [])],
         comments: [...(options.comments ?? [])],
+        cardAttachments: {},
         changes: options.changes ?? NO_CHANGES,
         diffs: new Map(Object.entries(options.diffs ?? {})),
         skills: new Map((options.skills ?? []).map(one => [one.skill.name, one])),
@@ -562,11 +564,26 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
                 return [...state.cards]
             case 'card_read': {
                 const card = cardOf(payload['id'] as string)
-                return {card, comments: state.comments.filter(one => one.cardId === card.id)}
+                return {
+                    card,
+                    comments: state.comments.filter(one => one.cardId === card.id),
+                    attachments: state.cardAttachments[card.id] ?? []
+                }
+            }
+            case 'save_chat_attachment':
+                return undefined
+            case 'read_chat_attachment':
+                return 'data:image/png;base64,aGk='
+            case 'card_delete': {
+                const card = cardOf(payload['id'] as string)
+                state.cards = state.cards.filter(one => one.id !== card.id)
+                state.comments = state.comments.filter(one => one.cardId !== card.id)
+                return undefined
             }
             case 'card_create': {
                 const card: Card = {
                     id: `card-${String(state.cards.length + 1)}`,
+                    number: Math.max(0, ...state.cards.map(one => one.number)) + 1,
                     title: payload['title'] as string,
                     body: payload['body'] as string,
                     owner: 'user',
@@ -577,14 +594,18 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
                     updatedAt: stamp()
                 }
                 state.cards = [...state.cards, card]
+                state.cardAttachments[card.id] = payload['attachments'] as ChatAttachment[]
                 return card
             }
             case 'card_move':
                 return updateCard(payload['id'] as string, {
                     status: payload['status'] as CardStatus
                 })
-            case 'card_edit':
-                return updateCard(payload['id'] as string, payload['edit'] as CardEdit)
+            case 'card_edit': {
+                const {attachments, ...edit} = payload['edit'] as CardEdit
+                if (attachments) state.cardAttachments[payload['id'] as string] = [...attachments]
+                return updateCard(payload['id'] as string, edit)
+            }
             case 'card_comment': {
                 const card = cardOf(payload['id'] as string)
                 const comment: CardComment = {

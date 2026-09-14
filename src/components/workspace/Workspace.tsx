@@ -17,7 +17,13 @@ import type {TaskSummary} from '../../models/app'
 import type {CommandError} from '../../models/errors'
 import type {ChatAttachment} from '../../models/chat'
 import {messageUsage} from '../../utils/chat-format'
-import {draftKey} from '../../services/ui-state'
+import {
+    draftAttachmentsKey,
+    draftKey,
+    readProjectState,
+    writeProjectState
+} from '../../services/ui-state'
+import {isStoredAttachment} from '../../services/chat-storage'
 import {isTurnRunning, watchTurn} from '../../services/turn-activity'
 import {NO_THINKING_LEVELS, activeModel, thinkingLevelsFor} from '../../models/settings'
 import {useAiConnection} from '../../hooks/useAiConnection'
@@ -118,6 +124,7 @@ export function Workspace({
     const {
         attachments: draftAttachments,
         clear: clearAttachments,
+        restore: restoreAttachments,
         select: selectAttachments,
         attachClipboardImage,
         edit: editAttachment,
@@ -181,6 +188,20 @@ export function Workspace({
         isEmpty: value => value === ''
     })
     const draft = storedDraft ?? ''
+    // A card posted to this task leaves its pictures waiting under the task. They are taken the
+    // moment they are read, so a picture the user then removes from the composer stays removed.
+    useEffect(() => {
+        if (taskId === undefined) return undefined
+        let cancelled = false
+        void readProjectState(draftAttachmentsKey(taskId)).then(stored => {
+            if (cancelled || !Array.isArray(stored) || !stored.every(isStoredAttachment)) return
+            writeProjectState(draftAttachmentsKey(taskId), undefined)
+            void restoreAttachments(stored)
+        })
+        return () => {
+            cancelled = true
+        }
+    }, [taskId, restoreAttachments])
     // The composer's own document is the live one; the remembered value only catches up to it.
     const addToDraft = useCallback(
         (addition: ComposerAddition, takesCaret: boolean) => {

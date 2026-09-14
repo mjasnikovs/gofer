@@ -20,10 +20,13 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tauri::{AppHandle, Runtime};
 
-use crate::board::{announce_change, outside_actor};
+use crate::board::{
+    announce_change, given_reference, outside_actor, tool_card, tool_comment, tool_detail,
+    tool_list,
+};
 use crate::command_error::CommandError;
 use crate::settings::McpSettings;
-use crate::storage::{CardEdit, CardStatus, NewCard};
+use crate::storage::{Board, CardEdit, CardRecord, CardStatus, NewCard};
 
 const PATH: &str = "/mcp";
 const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -332,12 +335,12 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
 
 fn tools() -> Vec<Value> {
     let owner = json!({"type": "string", "description": "Who is writing: your own name."});
-    let id = json!({"type": "string"});
+    let id = json!({"type": ["integer", "string"], "description": "The card's number."});
     let status = json!({"type": "string", "enum": CardStatus::ALL.map(CardStatus::as_str)});
     vec![
         tool(
             "board_list",
-            "Every card on the board, column by column.",
+            "Every card on the board, column by column, without its body; card_read opens one.",
             json!({}),
             &[],
         ),
@@ -419,6 +422,13 @@ fn status_of(arguments: &Value) -> Result<Option<CardStatus>, CommandError> {
     })
 }
 
+/// An outside agent has no task, so unlike the worker it always names the card.
+fn named_card(board: &Board, arguments: &Value) -> Result<CardRecord, CommandError> {
+    let reference = given_reference(arguments.get("id"))?
+        .ok_or_else(|| CommandError::new("invalid_params", "`id` is required"))?;
+    board.resolve(&reference)
+}
+
 fn run<R: Runtime>(
     name: &str,
     arguments: &Value,
@@ -428,8 +438,8 @@ fn run<R: Runtime>(
         .map_err(|failure| CommandError::new("workspace_not_open", failure.message))?;
     let board = storage.board();
     let answer = match name {
-        "board_list" => json!({"cards": board.list()?}),
-        "card_read" => json!(board.read(required(arguments, "id")?)?),
+        "board_list" => tool_list(&board.list()?, None),
+        "card_read" => tool_detail(&board.read(&named_card(&board, arguments)?.id)?, None),
         "card_create" => {
             let owner = required(arguments, "owner")?;
             let card = NewCard {
@@ -437,23 +447,27 @@ fn run<R: Runtime>(
                 body: text(arguments, "body").unwrap_or_default().to_owned(),
                 owner: owner.to_owned(),
                 status: status_of(arguments)?.unwrap_or(CardStatus::Backlog),
+                attachments: Vec::new(),
             };
-            json!(board.create(&card, outside_actor())?)
+            tool_card(&board.create(&card, outside_actor())?, None)
         }
         "card_move" => {
             required(arguments, "owner")?;
             let status = status_of(arguments)?
                 .ok_or_else(|| CommandError::new("invalid_params", "`status` is required"))?;
-            json!(board.move_to(required(arguments, "id")?, status, outside_actor())?)
+            let card = named_card(&board, arguments)?;
+            tool_card(&board.move_to(&card.id, status, outside_actor())?, None)
         }
         "card_comment" => {
             let owner = required(arguments, "owner")?;
-            json!(board.comment(
-                required(arguments, "id")?,
+            let card = named_card(&board, arguments)?;
+            let comment = board.comment(
+                &card.id,
                 owner,
                 required(arguments, "body")?,
-                outside_actor()
-            )?)
+                outside_actor(),
+            )?;
+            tool_comment(&card, &comment)
         }
         "card_edit" => {
             required(arguments, "owner")?;
@@ -461,8 +475,10 @@ fn run<R: Runtime>(
                 title: text(arguments, "title").map(str::to_owned),
                 body: text(arguments, "body").map(str::to_owned),
                 owner: None,
+                attachments: None,
             };
-            json!(board.edit(required(arguments, "id")?, &edit, outside_actor())?)
+            let card = named_card(&board, arguments)?;
+            tool_card(&board.edit(&card.id, &edit, outside_actor())?, None)
         }
         other => {
             return Err(CommandError::new(
@@ -478,14 +494,14 @@ fn run<R: Runtime>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::storage::{ProjectStorage, StorageSlot};
     use std::fs;
     use tauri::Manager;
     use tempfile::TempDir;
 
-    fn app_with_storage(directory: &TempDir) -> tauri::App<tauri::test::MockRuntime> {
+    pub(crate) fn app_with_storage(directory: &TempDir) -> tauri::App<tauri::test::MockRuntime> {
         let workspace = directory.path().join("workspace");
         fs::create_dir(&workspace).expect("workspace directory");
         let storage =
@@ -618,9 +634,8 @@ mod tests {
         );
         assert_eq!(body["result"]["isError"], json!(false));
         let card_id = body["result"]["structuredContent"]["id"]
-            .as_str()
-            .expect("the card id")
-            .to_owned();
+            .as_u64()
+            .expect("the card is named by its number");
         assert_eq!(
             body["result"]["structuredContent"]["owner"],
             json!("claude")
@@ -655,7 +670,7 @@ mod tests {
             server.address,
             PATH,
             token,
-            &call("card_read", json!({"id": card_id})),
+            &call("card_read", json!({"id": format!("#{card_id}")})),
         );
         assert_eq!(
             body["result"]["structuredContent"]["comments"][0]["author"],
@@ -663,11 +678,26 @@ mod tests {
         );
 
         let (_, body) = post(server.address, PATH, token, &call("board_list", json!({})));
+        let cards = &body["result"]["structuredContent"]["cards"];
+        assert_eq!(cards.as_array().map(Vec::len), Some(1));
         assert_eq!(
-            body["result"]["structuredContent"]["cards"]
-                .as_array()
-                .map(Vec::len),
-            Some(1)
+            cards[0].get("body"),
+            None,
+            "the list leaves bodies to card_read"
+        );
+
+        let (_, body) = post(
+            server.address,
+            PATH,
+            token,
+            &call(
+                "card_edit",
+                json!({"id": card_id, "title": "Jump higher", "owner": "claude"}),
+            ),
+        );
+        assert_eq!(
+            body["result"]["structuredContent"]["title"],
+            json!("Jump higher")
         );
 
         stop(server);
@@ -696,6 +726,19 @@ mod tests {
                 .as_str()
                 .expect("text")
                 .starts_with("card_not_found")
+        );
+
+        let (_, body) = post(
+            server.address,
+            PATH,
+            token,
+            &call("card_read", json!({"id": true})),
+        );
+        assert!(
+            body["result"]["content"][0]["text"]
+                .as_str()
+                .expect("text")
+                .starts_with("invalid_params")
         );
 
         let (_, body) = post(
@@ -864,6 +907,7 @@ mod tests {
                     body: String::new(),
                     owner: "user".to_owned(),
                     status: CardStatus::Ready,
+                    attachments: Vec::new(),
                 },
                 crate::storage::Actor::User,
             )

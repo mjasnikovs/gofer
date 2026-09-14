@@ -443,6 +443,38 @@ describe('Workspace', () => {
         expect(drafts['ui.draft.0198f4c0-02ef-7000-8000-000000000001']).toContain('level')
     })
 
+    it('picks up the pictures a posted card left for the task, once', async () => {
+        const stored: Record<string, unknown> = {
+            'ui.draftAttachments.0198f4c0-02ef-7000-8000-000000000001': [
+                {id: 'picture-1', name: 'scene.png', mimeType: 'image/png', size: 2}
+            ]
+        }
+        backend({
+            load_chat: () => ({
+                taskId: '0198f4c0-02ef-7000-8000-000000000001',
+                messages: [],
+                agentMessages: []
+            }),
+            read_project_state: ({key}) => {
+                const value = stored[key]
+                return value === undefined ? null : JSON.stringify(value)
+            },
+            write_project_state: ({key, value}) => {
+                stored[key] = value === undefined ? undefined : (JSON.parse(value) as unknown)
+                return undefined
+            },
+            read_chat_attachment: () => 'data:image/png;base64,aGk='
+        })
+
+        render(<Workspace />)
+
+        expect(await screen.findByAltText('Attached image: scene.png')).toHaveAttribute(
+            'src',
+            'data:image/png;base64,aGk='
+        )
+        expect(stored['ui.draftAttachments.0198f4c0-02ef-7000-8000-000000000001']).toBeUndefined()
+    })
+
     it('coalesces chat snapshots while a save is already running', async () => {
         let resolveFirstSave: (() => void) | undefined
         backend({

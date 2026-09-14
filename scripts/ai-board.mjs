@@ -8,9 +8,10 @@ export const CARD_STATUSES = ['backlog', 'ready', 'doing', 'review', 'done']
 
 const DESCRIPTION =
     'The project board: cards in five columns — backlog, ready, doing, review, done. '
-    + 'The user and other agents write cards here; the card this task was opened for is the one '
-    + 'whose taskId matches yours. '
-    + 'list shows every card; read opens one with its comments. '
+    + "The user and other agents write cards here. A card's id is its number. "
+    + 'Leave id out of read, move, comment or edit to act on the card this task was opened for, '
+    + 'which list marks yours. '
+    + 'list shows every card without its body; read opens one with its body and comments. '
     + 'Comment on your own card when you finish, when you are stuck, or when you found something '
     + 'the card did not say — that is where the user and the reviewer look. '
     + 'create a card only for work you found and are not doing in this turn. '

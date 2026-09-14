@@ -47,6 +47,8 @@ impl CardStatus {
 #[serde(rename_all = "camelCase")]
 pub struct CardRecord {
     pub id: String,
+    /// What a tool names the card by. Never given out twice, so an old comment's `#7` stays true.
+    pub number: u64,
     pub title: String,
     pub body: String,
     pub owner: String,
@@ -73,6 +75,7 @@ pub struct CardComment {
 pub struct CardDetail {
     pub card: CardRecord,
     pub comments: Vec<CardComment>,
+    pub attachments: Vec<StoredAttachment>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -84,6 +87,9 @@ pub struct NewCard {
     pub owner: String,
     #[serde(default = "NewCard::default_status")]
     pub status: CardStatus,
+    /// Pictures already stored through `save_chat_attachment`; only the window sends any.
+    #[serde(default)]
+    pub attachments: Vec<StoredAttachment>,
 }
 
 impl NewCard {
@@ -99,6 +105,8 @@ pub struct CardEdit {
     pub title: Option<String>,
     pub body: Option<String>,
     pub owner: Option<String>,
+    /// The whole set to keep, not a delta: what the window shows is what the card has.
+    pub attachments: Option<Vec<StoredAttachment>>,
 }
 
 /// Who is asking, which is what decides what a card refuses.
@@ -143,6 +151,48 @@ impl Board<'_> {
         rows.into_iter().collect()
     }
 
+    /// The card a tool named: `7` or `#7`, or the full id an answer from before numbers carried.
+    pub fn resolve(&self, reference: &str) -> Result<CardRecord, CommandError> {
+        let connection = self.storage.connection()?;
+        let reference = reference.trim();
+        let Ok(number) = reference
+            .strip_prefix('#')
+            .unwrap_or(reference)
+            .parse::<i64>()
+        else {
+            return require_card(&connection, reference);
+        };
+        connection
+            .query_row(
+                &format!("{CARD_SELECT} WHERE cards.number = ?1"),
+                [number],
+                card_from_row,
+            )
+            .optional()
+            .map_err(database_error)?
+            .ok_or_else(card_not_found)?
+    }
+
+    /// The card the active task was opened from. A turn runs on the active task, and a switch
+    /// cannot happen while one runs. The oldest wins if a task ever holds more than one.
+    pub fn own_card(&self) -> Result<Option<CardRecord>, CommandError> {
+        let connection = self.storage.connection()?;
+        let Some(task_id) = active_task_id(&connection)? else {
+            return Ok(None);
+        };
+        connection
+            .query_row(
+                &format!(
+                    "{CARD_SELECT} WHERE cards.task_id = ?1 ORDER BY cards.created_at, cards.id LIMIT 1"
+                ),
+                [task_id],
+                card_from_row,
+            )
+            .optional()
+            .map_err(database_error)?
+            .transpose()
+    }
+
     pub fn read(&self, card_id: &str) -> Result<CardDetail, CommandError> {
         let connection = self.storage.connection()?;
         let card = require_card(&connection, card_id)?;
@@ -177,7 +227,12 @@ impl Board<'_> {
                 })
             })
             .collect::<Result<Vec<_>, CommandError>>()?;
-        Ok(CardDetail { card, comments })
+        let attachments = attachments_of(&connection, card_id)?;
+        Ok(CardDetail {
+            card,
+            comments,
+            attachments,
+        })
     }
 
     pub fn create(&self, card: &NewCard, actor: Actor) -> Result<CardRecord, CommandError> {
@@ -191,16 +246,23 @@ impl Board<'_> {
         }
         let now = now_millis()?;
         let id = Uuid::now_v7().to_string();
-        let (_write_guard, connection) = self.storage.write_connection()?;
-        let position = next_position(&connection, card.status)?;
-        connection
+        let (_write_guard, mut connection) = self.storage.write_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let position = next_position(&transaction, card.status)?;
+        let number = take_card_number(&transaction)?;
+        transaction
             .execute(
-                "INSERT INTO cards (id, title, body, owner, status, task_id, position, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?7)",
-                params![id, title, card.body, owner, card.status.as_str(), position, now],
+                "INSERT INTO cards (id, number, title, body, owner, status, task_id, position, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?8)",
+                params![id, number, title, card.body, owner, card.status.as_str(), position, now],
             )
             .map_err(database_error)?;
-        require_card(&connection, &id)
+        replace_attachments(&transaction, &id, &card.attachments)?;
+        let created = require_card(&transaction, &id)?;
+        transaction.commit().map_err(database_error)?;
+        Ok(created)
     }
 
     pub fn move_to(
@@ -261,9 +323,23 @@ impl Board<'_> {
                 ],
             )
             .map_err(database_error)?;
+        if let Some(attachments) = &edit.attachments {
+            replace_attachments(&transaction, card_id, attachments)?;
+        }
         let edited = require_card(&transaction, card_id)?;
         transaction.commit().map_err(database_error)?;
         Ok(edited)
+    }
+
+    /// Takes a card off the board for good, with everything said under it. The user's alone:
+    /// no tool door reaches it, so there is no actor to ask.
+    pub fn delete(&self, card_id: &str) -> Result<(), CommandError> {
+        let (_write_guard, connection) = self.storage.write_connection()?;
+        require_card(&connection, card_id)?;
+        connection
+            .execute("DELETE FROM cards WHERE id = ?1", [card_id])
+            .map_err(database_error)?;
+        Ok(())
     }
 
     pub fn comment(
@@ -356,6 +432,15 @@ impl Board<'_> {
         self.storage
             .project()
             .write_ui_state(&draft_ui_key(task_id), Some(&draft))?;
+        let attachments = attachments_of(&self.storage.connection()?, card_id)?;
+        if !attachments.is_empty() {
+            let pictures = serde_json::to_string(&attachments).map_err(|error| {
+                CommandError::from(format!("The card pictures could not be encoded: {error}"))
+            })?;
+            self.storage
+                .project()
+                .write_ui_state(&draft_attachments_ui_key(task_id), Some(&pictures))?;
+        }
         Ok(attached)
     }
 
@@ -383,14 +468,40 @@ const BOARD_ORDER: &str = "CASE cards.status
 const CARD_SELECT: &str =
     "SELECT cards.id, cards.title, cards.body, cards.owner, cards.status, cards.task_id,
         (SELECT COUNT(*) FROM card_comments WHERE card_comments.card_id = cards.id),
-        cards.created_at, cards.updated_at
+        cards.created_at, cards.updated_at, cards.number
      FROM cards";
+
+/// The `project_state` key holding the next card number. A counter rather than `MAX + 1`, which
+/// would hand a deleted card's number to the next one.
+pub(crate) const NEXT_CARD_NUMBER_KEY: &str = "board.next_card_number";
+
+fn take_card_number(connection: &Connection) -> Result<i64, CommandError> {
+    let number: i64 = connection
+        .query_row(
+            "SELECT MAX(
+                COALESCE((SELECT CAST(value AS INTEGER) FROM project_state WHERE key = ?1), 1),
+                (SELECT COALESCE(MAX(number), 0) + 1 FROM cards)
+            )",
+            [NEXT_CARD_NUMBER_KEY],
+            |row| row.get(0),
+        )
+        .map_err(database_error)?;
+    connection
+        .execute(
+            "INSERT INTO project_state (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![NEXT_CARD_NUMBER_KEY, (number + 1).to_string()],
+        )
+        .map_err(database_error)?;
+    Ok(number)
+}
 
 fn card_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<CardRecord, CommandError>> {
     let status: String = row.get(4)?;
     let comment_count: i64 = row.get(6)?;
     let created_at: i64 = row.get(7)?;
     let updated_at: i64 = row.get(8)?;
+    let number: i64 = row.get(9)?;
     let id: String = row.get(0)?;
     let title: String = row.get(1)?;
     let body: String = row.get(2)?;
@@ -399,6 +510,7 @@ fn card_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<CardRecord,
     Ok((|| {
         Ok(CardRecord {
             id,
+            number: from_database_u64(number, "card number")?,
             title,
             body,
             owner,
@@ -422,7 +534,82 @@ fn require_card(connection: &Connection, card_id: &str) -> Result<CardRecord, Co
         )
         .optional()
         .map_err(database_error)?
-        .ok_or_else(|| CommandError::new("card_not_found", "The card was not found"))?
+        .ok_or_else(card_not_found)?
+}
+
+fn card_not_found() -> CommandError {
+    CommandError::new("card_not_found", "The card was not found")
+}
+
+fn attachments_of(
+    connection: &Connection,
+    card_id: &str,
+) -> Result<Vec<StoredAttachment>, CommandError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT a.id, a.name, a.mime_type, a.size
+             FROM card_attachments ca JOIN attachments a ON a.id = ca.attachment_id
+             WHERE ca.card_id = ?1 ORDER BY ca.position",
+        )
+        .map_err(database_error)?;
+    let rows = statement
+        .query_map([card_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(database_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(database_error)?;
+    rows.into_iter()
+        .map(|(id, name, mime_type, size)| {
+            Ok(StoredAttachment {
+                id,
+                name,
+                mime_type,
+                size: from_database_u64(size, "attachment size")?,
+            })
+        })
+        .collect()
+}
+
+/// The pictures must already be stored: a card only points at them, the way a message does.
+fn replace_attachments(
+    connection: &Connection,
+    card_id: &str,
+    attachments: &[StoredAttachment],
+) -> Result<(), CommandError> {
+    connection
+        .execute("DELETE FROM card_attachments WHERE card_id = ?1", [card_id])
+        .map_err(database_error)?;
+    for (position, attachment) in attachments.iter().enumerate() {
+        let stored = connection
+            .query_row(
+                "SELECT 1 FROM attachments WHERE id = ?1",
+                [&attachment.id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(database_error)?
+            .is_some();
+        if !stored {
+            return Err(CommandError::new(
+                "attachment_not_stored",
+                format!("The picture {} has not been stored", attachment.name),
+            ));
+        }
+        connection
+            .execute(
+                "INSERT INTO card_attachments (card_id, attachment_id, position)
+                 VALUES (?1, ?2, ?3)",
+                params![card_id, attachment.id, position as i64],
+            )
+            .map_err(database_error)?;
+    }
+    Ok(())
 }
 
 /// Where the next card in a column goes: after every card already there.
@@ -563,6 +750,7 @@ mod tests {
             body: "Make the hero jump higher".to_owned(),
             owner: "user".to_owned(),
             status: CardStatus::Backlog,
+            attachments: Vec::new(),
         }
     }
 
@@ -971,6 +1159,256 @@ mod tests {
             .expect("read")
             .expect("a draft");
         assert_eq!(draft, "\"Jump\\n\\nMake the hero jump higher\"");
+    }
+
+    #[test]
+    fn a_card_keeps_its_pictures_and_hands_them_to_its_task() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        let board = storage.board();
+        let picture = attachment("018f47aa-09d2-7b34-a2d3-8c4e6f000010");
+        storage
+            .chats()
+            .save_attachment(&picture, b"hi")
+            .expect("save attachment");
+
+        let unstored = NewCard {
+            attachments: vec![attachment("nobody-stored-this")],
+            ..new_card("Jump")
+        };
+        let refused = board
+            .create(&unstored, Actor::User)
+            .expect_err("a picture nothing stored");
+        assert_eq!(refused.code, "attachment_not_stored");
+        assert!(board.list().expect("list").is_empty(), "nothing half-made");
+
+        let card = board
+            .create(
+                &NewCard {
+                    attachments: vec![picture.clone()],
+                    ..new_card("Jump")
+                },
+                Actor::User,
+            )
+            .expect("create");
+        assert_eq!(
+            board.read(&card.id).expect("read").attachments,
+            vec![picture.clone()]
+        );
+
+        let collected = storage
+            .chats()
+            .collect(&everything_is_old())
+            .expect("collect");
+        assert_eq!(collected.attachments_removed, 0, "a card holds its picture");
+
+        let edit = CardEdit {
+            body: Some("Jump twice as high".to_owned()),
+            ..CardEdit::default()
+        };
+        board.edit(&card.id, &edit, AGENT).expect("edit");
+        assert_eq!(
+            board.read(&card.id).expect("read").attachments.len(),
+            1,
+            "an edit that says nothing about pictures leaves them"
+        );
+
+        let released = Released::default();
+        let recording = released.recording();
+        let switch = storage.switch_with_no_turn_to_refuse(&recording);
+        let task_id = storage
+            .tasks()
+            .create(&switch)
+            .expect("task")
+            .task_id
+            .expect("task id");
+        board.hand_to_task(&card.id, &task_id).expect("hand over");
+        let pictures = storage
+            .project()
+            .read_ui_state(&draft_attachments_ui_key(&task_id))
+            .expect("read")
+            .expect("the pictures wait for the composer");
+        let waiting: Vec<StoredAttachment> = serde_json::from_str(&pictures).expect("json");
+        assert_eq!(waiting, vec![picture]);
+
+        let edit = CardEdit {
+            attachments: Some(Vec::new()),
+            ..CardEdit::default()
+        };
+        board
+            .edit(&card.id, &edit, Actor::User)
+            .expect("drop the picture");
+        assert!(board.read(&card.id).expect("read").attachments.is_empty());
+    }
+
+    #[test]
+    fn deleting_a_card_takes_its_comments_and_pictures_with_it() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        let board = storage.board();
+        let picture = attachment("018f47aa-09d2-7b34-a2d3-8c4e6f000011");
+        storage
+            .chats()
+            .save_attachment(&picture, b"hi")
+            .expect("save attachment");
+        let card = board
+            .create(
+                &NewCard {
+                    attachments: vec![picture],
+                    ..new_card("Jump")
+                },
+                Actor::User,
+            )
+            .expect("create");
+        board
+            .comment(&card.id, "claude", "On it", AGENT)
+            .expect("comment");
+        let kept = board
+            .create(&new_card("Stay"), Actor::User)
+            .expect("create");
+
+        board.delete(&card.id).expect("delete");
+        assert_eq!(
+            board.read(&card.id).expect_err("gone").code,
+            "card_not_found"
+        );
+        assert_eq!(
+            board.delete(&card.id).expect_err("gone").code,
+            "card_not_found"
+        );
+        let listed = board.list().expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, kept.id);
+        let connection = storage.connection().expect("connection");
+        let left: i64 = connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM card_comments) + (SELECT COUNT(*) FROM card_attachments)",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(left, 0, "nothing under the card outlives it");
+        let collected = storage
+            .chats()
+            .collect(&everything_is_old())
+            .expect("collect");
+        assert_eq!(
+            collected.attachments_removed, 1,
+            "the picture is rubbish now"
+        );
+    }
+
+    #[test]
+    fn a_card_is_found_by_its_number_and_a_deleted_number_is_not_given_again() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        let board = storage.board();
+        let first = board.create(&new_card("one"), Actor::User).expect("create");
+        let second = board.create(&new_card("two"), Actor::User).expect("create");
+        assert_eq!((first.number, second.number), (1, 2));
+
+        board.delete(&second.id).expect("delete");
+        let third = board
+            .create(&new_card("three"), Actor::User)
+            .expect("create");
+        assert_eq!(third.number, 3);
+
+        assert_eq!(board.resolve("3").expect("number").id, third.id);
+        assert_eq!(board.resolve(" #1 ").expect("hash").id, first.id);
+        assert_eq!(board.resolve(&first.id).expect("full id").id, first.id);
+        assert_eq!(
+            board.resolve("2").expect_err("deleted").code,
+            "card_not_found"
+        );
+
+        {
+            let connection = storage.connection().expect("connection");
+            let shared = connection.execute(
+                "UPDATE cards SET number = (SELECT number FROM cards WHERE id = ?1) WHERE id = ?2",
+                params![first.id, third.id],
+            );
+            assert!(shared.is_err(), "two cards cannot share a number");
+            connection
+                .execute(
+                    "DELETE FROM project_state WHERE key = ?1",
+                    [NEXT_CARD_NUMBER_KEY],
+                )
+                .expect("lose the counter");
+        }
+        let fourth = board
+            .create(&new_card("four"), Actor::User)
+            .expect("create");
+        assert_eq!(
+            fourth.number, 4,
+            "a lost counter starts after the highest card"
+        );
+
+        storage
+            .connection()
+            .expect("connection")
+            .execute(
+                "UPDATE project_state SET value = '1' WHERE key = ?1",
+                [NEXT_CARD_NUMBER_KEY],
+            )
+            .expect("wind the counter back");
+        let fifth = board
+            .create(&new_card("five"), Actor::User)
+            .expect("create");
+        assert_eq!(
+            fifth.number, 5,
+            "a counter behind the cards never repeats one"
+        );
+    }
+
+    #[test]
+    fn the_own_card_is_the_one_the_active_task_was_opened_from() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        let board = storage.board();
+        let card = board
+            .create(&new_card("Jump"), Actor::User)
+            .expect("create");
+        assert_eq!(board.own_card().expect("own card"), None, "no task yet");
+
+        let released = Released::default();
+        let recording = released.recording();
+        let switch = storage.switch_with_no_turn_to_refuse(&recording);
+        let task_id = storage
+            .tasks()
+            .create(&switch)
+            .expect("task")
+            .task_id
+            .expect("task id");
+        assert_eq!(
+            board.own_card().expect("own card"),
+            None,
+            "a task not opened from a card"
+        );
+        board.attach_task(&card.id, &task_id).expect("attach");
+        assert_eq!(
+            board.own_card().expect("own card").map(|own| own.id),
+            Some(card.id.clone())
+        );
+
+        let later = board
+            .create(&new_card("Later"), Actor::User)
+            .expect("create");
+        storage
+            .connection()
+            .expect("connection")
+            .execute(
+                "UPDATE cards SET created_at = created_at + 1 WHERE id = ?1",
+                [&later.id],
+            )
+            .expect("strictly later");
+        board
+            .attach_task(&later.id, &task_id)
+            .expect("a second card on the task");
+        assert_eq!(
+            board.own_card().expect("own card").map(|own| own.id),
+            Some(card.id),
+            "the card the task was opened from first wins"
+        );
     }
 
     #[test]

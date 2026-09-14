@@ -1,36 +1,54 @@
-import {useCallback, useEffect, useState} from 'react'
+import {useCallback, useEffect, useRef, useState} from 'react'
+import type {KeyboardEvent, ReactNode} from 'react'
 import {Badge} from '@astryxdesign/core/Badge'
 import {Banner} from '@astryxdesign/core/Banner'
 import {Button} from '@astryxdesign/core/Button'
+import {ChatComposer, ChatComposerDrawer} from '@astryxdesign/core/Chat'
+import type {ChatComposerInputHandle} from '@astryxdesign/core/Chat'
 import {Dialog, DialogHeader} from '@astryxdesign/core/Dialog'
 import {Divider} from '@astryxdesign/core/Divider'
 import {Item} from '@astryxdesign/core/Item'
+import {Layout, LayoutContent, LayoutFooter} from '@astryxdesign/core/Layout'
 import {Selector} from '@astryxdesign/core/Selector'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {Text} from '@astryxdesign/core/Text'
 import {TextArea} from '@astryxdesign/core/TextArea'
 import {TextInput} from '@astryxdesign/core/TextInput'
 import {Token} from '@astryxdesign/core/Token'
+import {AttachmentPicker, AttachmentThumbnails, GameCapturePicker} from './AttachmentControls'
+import {TextField} from '../TextField'
+import {clipboardItemImages, imageFiles} from '../../utils/chat-images'
 import {
     commentOnCard,
     createCard,
+    deleteCard,
     editCard,
     listCards,
     moveCard,
     postCardToGofer,
     readCard,
+    storeCardAttachments,
     toBoardError,
     watchBoard
 } from '../../services/board'
+import {isTauri} from '../../services/desktop'
 import {listPendingChanges} from '../../services/task-actions'
 import {CARD_STATUSES, CARD_STATUS_LABELS, cardsIn} from '../../models/board'
 import type {Card, CardDetail, CardStatus} from '../../models/board'
 import type {CommandError} from '../../models/errors'
 import type {PendingChange} from '../../models/app'
+import {useAttachmentPool} from '../../hooks/useAttachmentPool'
+import type {AttachmentPool} from '../../hooks/useAttachmentPool'
+import {useFileMentionTrigger} from '../../hooks/useFileMentionTrigger'
 import {useOpenCenterTab} from '../../hooks/useCenterTab'
 import {useOpenTask} from '../../hooks/useOpenTask'
 import {NewTaskDialog} from './NewTaskDialog'
 import {PanelState} from './PanelState'
+
+const DIALOG_WIDTH = 960
+const DIALOG_MAX_HEIGHT = '90dvh'
+// Tall enough that a task is read whole; the dialog body scrolls, the field never does.
+const BODY_MAX_ROWS = 200
 
 const STATUS_OPTIONS = CARD_STATUSES.map(status => ({
     value: status,
@@ -42,7 +60,7 @@ function whoAndWhen(card: Card): string {
         card.commentCount === 0 ?
             ''
         :   ` · ${String(card.commentCount)} comment${card.commentCount === 1 ? '' : 's'}`
-    return `${card.owner}${comments}`
+    return `#${String(card.number)} · ${card.owner}${comments}`
 }
 
 export function BoardView() {
@@ -228,6 +246,135 @@ function Column({status, cards, onOpen}: ColumnProps) {
     )
 }
 
+type CardFieldsProps = Readonly<{
+    title: string
+    onTitle: (title: string) => void
+    body: string
+    onBody: (body: string) => void
+    pictures: AttachmentPool
+    isReadOnly: boolean
+    isBusy: boolean
+    hasAutoFocus?: boolean
+    /** The composer's own button: what saving this card is called here. */
+    sendButton: ReactNode
+}>
+
+/**
+ * A card's ask is written the way a message is: files are linked with @, pictures are attached,
+ * pasted or dropped. Enter is a new line — a card is a document, and nothing is sent by typing.
+ */
+function CardFields({
+    title,
+    onTitle,
+    body,
+    onBody,
+    pictures,
+    isReadOnly,
+    isBusy,
+    hasAutoFocus = false,
+    sendButton
+}: CardFieldsProps) {
+    const fileMentions = useFileMentionTrigger()
+    const input = useRef<ChatComposerInputHandle>(null)
+    const canAttach = isTauri() && !isReadOnly && !isBusy
+
+    const onKeyDown = (event: KeyboardEvent) => {
+        fileMentions.onKeyDown(event)
+        if (event.defaultPrevented || event.key !== 'Enter' || event.shiftKey) return
+        // The rich input clears itself on a bare Enter whether or not anything is listening.
+        event.preventDefault()
+        input.current?.insertText('\n')
+        event.currentTarget.dispatchEvent(new Event('input', {bubbles: true}))
+    }
+
+    return (
+        <VStack gap={4}>
+            <TextInput
+                label='Title'
+                value={title}
+                isRequired
+                isReadOnly={isReadOnly}
+                hasAutoFocus={hasAutoFocus}
+                onChange={onTitle}
+            />
+            <VStack gap={1}>
+                <Text type='label'>What to do</Text>
+                <ChatComposer
+                    elevation='none'
+                    density='spacious'
+                    value={body}
+                    onChange={onBody}
+                    onSubmit={() => undefined}
+                    isDisabled={isReadOnly}
+                    headerActions={
+                        <>
+                            <AttachmentPicker
+                                canAttach={canAttach}
+                                supportsImages
+                                onSelect={files => {
+                                    void pictures.select(files)
+                                }}
+                            />
+                            <GameCapturePicker
+                                canAttach={canAttach}
+                                supportsImages
+                                onSelect={files => {
+                                    void pictures.select(files)
+                                }}
+                                onError={() => undefined}
+                            />
+                        </>
+                    }
+                    drawer={
+                        pictures.attachments.length > 0 ?
+                            <ChatComposerDrawer>
+                                <AttachmentThumbnails
+                                    attachments={pictures.attachments}
+                                    isDisabled={isReadOnly || isBusy}
+                                    onEdit={pictures.edit}
+                                    onRemove={pictures.remove}
+                                />
+                            </ChatComposerDrawer>
+                        :   undefined
+                    }
+                    input={
+                        <TextField
+                            kind='rich'
+                            label='What to do'
+                            placeholder=''
+                            value={body}
+                            maxRows={BODY_MAX_ROWS}
+                            handleRef={input}
+                            isDisabled={isReadOnly}
+                            triggers={[fileMentions.trigger]}
+                            hasPasteAsToken={false}
+                            onKeyDown={onKeyDown}
+                            onChange={onBody}
+                            onFiles={files => {
+                                const images = imageFiles(files)
+                                if (!canAttach || images.length === 0) return
+                                void pictures.select(images)
+                            }}
+                            onPaste={(event, text) => {
+                                if (!canAttach) return undefined
+                                const images = clipboardItemImages(event.clipboardData)
+                                if (images.length > 0) {
+                                    void pictures.select(images)
+                                    return true
+                                }
+                                if (text !== '') return undefined
+                                void pictures.attachClipboardImage()
+                                return true
+                            }}
+                        />
+                    }
+                    sendButton={sendButton}
+                />
+            </VStack>
+        </VStack>
+    )
+}
+
 type NewCardDialogProps = Readonly<{
     onClose: () => void
     onCreated: () => void
@@ -238,11 +385,13 @@ function NewCardDialog({onClose, onCreated}: NewCardDialogProps) {
     const [body, setBody] = useState('')
     const [failure, setFailure] = useState<string>()
     const [isSaving, setIsSaving] = useState(false)
+    const pictures = useAttachmentPool(setFailure)
 
     const add = async () => {
         setIsSaving(true)
         try {
-            await createCard(title, body, 'backlog')
+            const attachments = await storeCardAttachments(pictures.attachments, new Set())
+            await createCard(title, body, 'backlog', attachments)
             onCreated()
             onClose()
         } catch (error) {
@@ -256,60 +405,68 @@ function NewCardDialog({onClose, onCreated}: NewCardDialogProps) {
         <Dialog
             isOpen
             purpose='form'
-            width={520}
+            width={DIALOG_WIDTH}
+            maxHeight={DIALOG_MAX_HEIGHT}
             onOpenChange={isOpen => {
                 if (!isOpen) onClose()
             }}
         >
-            <DialogHeader
-                title='New card'
-                onOpenChange={isOpen => {
-                    if (!isOpen) onClose()
-                }}
+            <Layout
+                header={
+                    <DialogHeader
+                        title='New card'
+                        onOpenChange={isOpen => {
+                            if (!isOpen) onClose()
+                        }}
+                    />
+                }
+                content={
+                    <LayoutContent padding={4}>
+                        <VStack gap={4}>
+                            {failure !== undefined && (
+                                <Banner
+                                    status='error'
+                                    title='The card was not added'
+                                    description={failure}
+                                />
+                            )}
+                            <CardFields
+                                title={title}
+                                onTitle={setTitle}
+                                body={body}
+                                onBody={setBody}
+                                pictures={pictures}
+                                isReadOnly={false}
+                                isBusy={isSaving}
+                                hasAutoFocus
+                                sendButton={
+                                    <Button
+                                        label='Add card'
+                                        variant='primary'
+                                        isLoading={isSaving}
+                                        isDisabled={title.trim() === ''}
+                                        clickAction={add}
+                                    />
+                                }
+                            />
+                        </VStack>
+                    </LayoutContent>
+                }
+                footer={
+                    <LayoutFooter hasDivider>
+                        <HStack
+                            gap={3}
+                            hAlign='end'
+                        >
+                            <Button
+                                label='Cancel'
+                                variant='ghost'
+                                clickAction={onClose}
+                            />
+                        </HStack>
+                    </LayoutFooter>
+                }
             />
-            <VStack
-                gap={4}
-                padding={4}
-            >
-                {failure !== undefined && (
-                    <Banner
-                        status='error'
-                        title='The card was not added'
-                        description={failure}
-                    />
-                )}
-                <TextInput
-                    label='Title'
-                    value={title}
-                    isRequired
-                    hasAutoFocus
-                    onChange={setTitle}
-                />
-                <TextArea
-                    label='What to do'
-                    value={body}
-                    rows={5}
-                    isOptional
-                    onChange={setBody}
-                />
-                <HStack
-                    gap={3}
-                    hAlign='end'
-                >
-                    <Button
-                        label='Cancel'
-                        variant='ghost'
-                        clickAction={onClose}
-                    />
-                    <Button
-                        label='Add card'
-                        variant='primary'
-                        isLoading={isSaving}
-                        isDisabled={title.trim() === ''}
-                        clickAction={add}
-                    />
-                </HStack>
-            </VStack>
         </Dialog>
     )
 }
@@ -322,6 +479,10 @@ type CardDialogProps = Readonly<{
     onChanged: () => void
 }>
 
+function sameIds(left: readonly {id: string}[], right: readonly {id: string}[]): boolean {
+    return left.length === right.length && left.every((one, index) => one.id === right[index]?.id)
+}
+
 function CardDialog({id, version, onClose, onChanged}: CardDialogProps) {
     const openTask = useOpenTask()
     const openTab = useOpenCenterTab()
@@ -331,10 +492,13 @@ function CardDialog({id, version, onClose, onChanged}: CardDialogProps) {
     const [body, setBody] = useState('')
     const [comment, setComment] = useState('')
     const [isBusy, setIsBusy] = useState(false)
+    const [isDeleting, setIsDeleting] = useState(false)
     const [pending, setPending] = useState<readonly PendingChange[]>()
-    // The text fields are seeded from the card once per opening. A re-read after a comment or a
-    // move must not overwrite what the user is halfway through typing.
+    const pictures = useAttachmentPool(setFailure)
+    // The fields are seeded from the card once per opening. A re-read after a comment or a move
+    // must not overwrite what the user is halfway through typing.
     const [seededFor, setSeededFor] = useState<string>()
+    const restore = pictures.restore
 
     useEffect(() => {
         let cancelled = false
@@ -346,6 +510,7 @@ function CardDialog({id, version, onClose, onChanged}: CardDialogProps) {
                 setSeededFor(id)
                 setTitle(read.card.title)
                 setBody(read.card.body)
+                void restore(read.attachments)
             })
             .catch((error: unknown) => {
                 if (!cancelled) setFailure(toBoardError(error).message)
@@ -353,7 +518,7 @@ function CardDialog({id, version, onClose, onChanged}: CardDialogProps) {
         return () => {
             cancelled = true
         }
-    }, [id, version, seededFor])
+    }, [id, version, seededFor, restore])
 
     const act = async (work: () => Promise<unknown>) => {
         setIsBusy(true)
@@ -364,6 +529,26 @@ function CardDialog({id, version, onClose, onChanged}: CardDialogProps) {
         } catch (error) {
             setFailure(toBoardError(error).message)
         } finally {
+            setIsBusy(false)
+        }
+    }
+
+    const save = () =>
+        act(async () => {
+            const held = new Set((detail?.attachments ?? []).map(one => one.id))
+            const attachments = await storeCardAttachments(pictures.attachments, held)
+            await editCard(id, {title, body, attachments})
+        })
+
+    const remove = async () => {
+        setIsBusy(true)
+        setFailure(undefined)
+        try {
+            await deleteCard(id)
+            onChanged()
+            onClose()
+        } catch (error) {
+            setFailure(toBoardError(error).message)
             setIsBusy(false)
         }
     }
@@ -396,175 +581,184 @@ function CardDialog({id, version, onClose, onChanged}: CardDialogProps) {
 
     const card = detail?.card
     const isDone = card?.status === 'done'
-    const isEdited = card !== undefined && (title !== card.title || body !== card.body)
+    const isEdited =
+        card !== undefined
+        && detail !== undefined
+        && (title !== card.title
+            || body !== card.body
+            || !sameIds(pictures.attachments, detail.attachments))
     const canPost = card?.taskId === null && !isDone
+
+    const close = (isOpen: boolean) => {
+        if (!isOpen) onClose()
+    }
 
     return (
         <Dialog
             isOpen
             purpose='form'
-            width={640}
-            maxHeight='85vh'
-            onOpenChange={isOpen => {
-                if (!isOpen) onClose()
-            }}
+            width={DIALOG_WIDTH}
+            maxHeight={DIALOG_MAX_HEIGHT}
+            onOpenChange={close}
         >
-            <DialogHeader
-                title={card?.title ?? 'Card'}
-                {...(card && {subtitle: `${CARD_STATUS_LABELS[card.status]} · ${card.owner}`})}
-                onOpenChange={isOpen => {
-                    if (!isOpen) onClose()
-                }}
-            />
-            <VStack
-                gap={4}
-                padding={4}
-            >
-                {failure !== undefined && (
-                    <Banner
-                        status='error'
-                        title='That did not go through'
-                        description={failure}
+            <Layout
+                header={
+                    <DialogHeader
+                        title={card?.title ?? 'Card'}
+                        {...(card && {
+                            subtitle: `#${String(card.number)} · ${CARD_STATUS_LABELS[card.status]} · ${card.owner}`
+                        })}
+                        onOpenChange={close}
                     />
-                )}
-                {detail === undefined || card === undefined ?
-                    <Text
-                        type='supporting'
-                        color='secondary'
-                    >
-                        Opening the card…
-                    </Text>
-                :   <>
-                        <HStack
-                            gap={3}
-                            align='end'
-                        >
-                            <StackItem size='fill'>
-                                <Selector
-                                    label='Column'
-                                    value={card.status}
-                                    options={STATUS_OPTIONS}
-                                    isDisabled={isBusy}
-                                    onChange={status => {
-                                        void act(() => moveCard(id, status as CardStatus))
-                                    }}
-                                />
-                            </StackItem>
-                            {card.taskId !== null && openTask && (
-                                <OpenTaskButton
-                                    taskId={card.taskId}
-                                    onOpen={taskId => {
-                                        onClose()
-                                        openTask(taskId)
-                                    }}
+                }
+                content={
+                    <LayoutContent padding={4}>
+                        <VStack gap={4}>
+                            {failure !== undefined && (
+                                <Banner
+                                    status='error'
+                                    title='That did not go through'
+                                    description={failure}
                                 />
                             )}
-                        </HStack>
-                        <TextInput
-                            label='Title'
-                            value={title}
-                            isReadOnly={isDone}
-                            onChange={setTitle}
-                        />
-                        <TextArea
-                            label='What to do'
-                            value={body}
-                            rows={6}
-                            isReadOnly={isDone}
-                            onChange={setBody}
-                        />
-                        {isEdited && !isDone && (
-                            <HStack
-                                gap={3}
-                                hAlign='end'
-                            >
-                                <Button
-                                    label='Save changes'
-                                    variant='secondary'
-                                    isLoading={isBusy}
-                                    clickAction={() => {
-                                        void act(() => editCard(id, {title, body}))
-                                    }}
-                                />
-                            </HStack>
-                        )}
-                        <Divider />
-                        <VStack gap={2}>
-                            <Text type='label'>Comments</Text>
-                            {detail.comments.length === 0 && (
+                            {detail === undefined || card === undefined ?
                                 <Text
                                     type='supporting'
                                     color='secondary'
                                 >
-                                    Nobody has said anything yet.
+                                    Opening the card…
                                 </Text>
-                            )}
-                            {detail.comments.map(one => (
-                                <Item
-                                    key={one.id}
-                                    label={one.body}
-                                    labelLines={8}
-                                    description={`${one.author} · ${new Date(one.createdAt).toLocaleString()}`}
-                                    density='compact'
-                                    align='start'
-                                />
-                            ))}
-                            {!isDone && (
-                                <>
-                                    <TextArea
-                                        label='Add a comment'
-                                        value={comment}
-                                        rows={2}
-                                        onChange={setComment}
-                                    />
+                            :   <>
                                     <HStack
                                         gap={3}
-                                        hAlign='end'
+                                        align='end'
                                     >
-                                        <Button
-                                            label='Comment'
-                                            variant='secondary'
-                                            isLoading={isBusy}
-                                            isDisabled={comment.trim() === ''}
-                                            clickAction={() => {
-                                                void act(async () => {
-                                                    await commentOnCard(id, comment)
-                                                    setComment('')
-                                                })
-                                            }}
-                                        />
+                                        <StackItem size='fill'>
+                                            <Selector
+                                                label='Column'
+                                                value={card.status}
+                                                options={STATUS_OPTIONS}
+                                                isDisabled={isBusy}
+                                                onChange={status => {
+                                                    void act(() =>
+                                                        moveCard(id, status as CardStatus)
+                                                    )
+                                                }}
+                                            />
+                                        </StackItem>
+                                        {card.taskId !== null && openTask && (
+                                            <OpenTaskButton
+                                                taskId={card.taskId}
+                                                onOpen={taskId => {
+                                                    onClose()
+                                                    openTask(taskId)
+                                                }}
+                                            />
+                                        )}
                                     </HStack>
+                                    <CardFields
+                                        title={title}
+                                        onTitle={setTitle}
+                                        body={body}
+                                        onBody={setBody}
+                                        pictures={pictures}
+                                        isReadOnly={isDone}
+                                        isBusy={isBusy}
+                                        sendButton={
+                                            <Button
+                                                label='Save changes'
+                                                variant='secondary'
+                                                isLoading={isBusy}
+                                                isDisabled={!isEdited || isDone}
+                                                clickAction={save}
+                                            />
+                                        }
+                                    />
+                                    <Divider />
+                                    <Comments
+                                        detail={detail}
+                                        isDone={isDone}
+                                        isBusy={isBusy}
+                                        comment={comment}
+                                        onComment={setComment}
+                                        onSend={() => {
+                                            void act(async () => {
+                                                await commentOnCard(id, comment)
+                                                setComment('')
+                                            })
+                                        }}
+                                    />
                                 </>
-                            )}
+                            }
                         </VStack>
-                        {canPost && (
-                            <>
-                                <Divider />
+                    </LayoutContent>
+                }
+                footer={
+                    card && (
+                        <LayoutFooter hasDivider>
+                            {isDeleting ?
                                 <HStack
                                     gap={3}
                                     align='center'
                                 >
                                     <StackItem size='fill'>
-                                        <Text
-                                            type='supporting'
-                                            color='secondary'
-                                        >
-                                            Opens a task for this card with the ask already typed
-                                            in. Merging that task finishes the card.
+                                        <Text type='supporting'>
+                                            Delete this card and everything said under it? This
+                                            cannot be undone.
                                         </Text>
                                     </StackItem>
                                     <Button
-                                        label='Post to Gofer'
-                                        variant='primary'
+                                        label='Keep it'
+                                        variant='ghost'
+                                        isDisabled={isBusy}
+                                        clickAction={() => {
+                                            setIsDeleting(false)
+                                        }}
+                                    />
+                                    <Button
+                                        label='Delete card'
+                                        variant='destructive'
                                         isLoading={isBusy}
-                                        clickAction={offerToPost}
+                                        clickAction={remove}
                                     />
                                 </HStack>
-                            </>
-                        )}
-                    </>
+                            :   <HStack
+                                    gap={3}
+                                    align='center'
+                                >
+                                    <Button
+                                        label='Delete'
+                                        variant='ghost'
+                                        isDisabled={isBusy}
+                                        clickAction={() => {
+                                            setIsDeleting(true)
+                                        }}
+                                    />
+                                    <StackItem size='fill'>
+                                        {canPost && (
+                                            <Text
+                                                type='supporting'
+                                                color='secondary'
+                                            >
+                                                Opens a task for this card with the ask already
+                                                typed in. Merging that task finishes the card.
+                                            </Text>
+                                        )}
+                                    </StackItem>
+                                    {canPost && (
+                                        <Button
+                                            label='Post to Gofer'
+                                            variant='primary'
+                                            isLoading={isBusy}
+                                            clickAction={offerToPost}
+                                        />
+                                    )}
+                                </HStack>
+                            }
+                        </LayoutFooter>
+                    )
                 }
-            </VStack>
+            />
             {pending !== undefined && (
                 <NewTaskDialog
                     isOpen
@@ -578,6 +772,63 @@ function CardDialog({id, version, onClose, onChanged}: CardDialogProps) {
                 />
             )}
         </Dialog>
+    )
+}
+
+type CommentsProps = Readonly<{
+    detail: CardDetail
+    isDone: boolean
+    isBusy: boolean
+    comment: string
+    onComment: (comment: string) => void
+    onSend: () => void
+}>
+
+function Comments({detail, isDone, isBusy, comment, onComment, onSend}: CommentsProps) {
+    return (
+        <VStack gap={2}>
+            <Text type='label'>Comments</Text>
+            {detail.comments.length === 0 && (
+                <Text
+                    type='supporting'
+                    color='secondary'
+                >
+                    Nobody has said anything yet.
+                </Text>
+            )}
+            {detail.comments.map(one => (
+                <Item
+                    key={one.id}
+                    label={one.body}
+                    labelLines={8}
+                    description={`${one.author} · ${new Date(one.createdAt).toLocaleString()}`}
+                    density='compact'
+                    align='start'
+                />
+            ))}
+            {!isDone && (
+                <>
+                    <TextArea
+                        label='Add a comment'
+                        value={comment}
+                        rows={2}
+                        onChange={onComment}
+                    />
+                    <HStack
+                        gap={3}
+                        hAlign='end'
+                    >
+                        <Button
+                            label='Comment'
+                            variant='secondary'
+                            isLoading={isBusy}
+                            isDisabled={comment.trim() === ''}
+                            clickAction={onSend}
+                        />
+                    </HStack>
+                </>
+            )}
+        </VStack>
     )
 }
 

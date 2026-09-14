@@ -11,7 +11,7 @@ use tauri::{AppHandle, Emitter, Runtime};
 use crate::ai_tools::ToolFailure;
 use crate::ask::MAIN_WINDOW;
 use crate::command_error::CommandError;
-use crate::storage::{Actor, CardDetail, CardEdit, CardRecord, CardStatus, NewCard};
+use crate::storage::{Actor, CardComment, CardDetail, CardEdit, CardRecord, CardStatus, NewCard};
 
 /// The board, by the name the worker sends it under.
 pub const BOARD_TOOL: &str = "board";
@@ -39,13 +39,13 @@ pub(crate) fn outside_actor() -> Actor {
     }
 }
 
-/// One call from the worker's `board` tool.
+/// One call from the worker's `board` tool. An `id` left out means the task's own card.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase")]
 enum BoardCall {
     List,
     Read {
-        id: String,
+        id: Option<Value>,
     },
     Create {
         title: String,
@@ -54,18 +54,89 @@ enum BoardCall {
         status: Option<CardStatus>,
     },
     Move {
-        id: String,
+        id: Option<Value>,
         status: CardStatus,
     },
     Comment {
-        id: String,
+        id: Option<Value>,
         body: String,
     },
     Edit {
-        id: String,
+        id: Option<Value>,
         title: Option<String>,
         body: Option<String>,
     },
+}
+
+/// The card a tool named, as text for [`crate::storage::Board::resolve`], or `None` when it named
+/// none. A blank id counts as none, so a model that fills the field with nothing still means its
+/// own card.
+pub(crate) fn given_reference(id: Option<&Value>) -> Result<Option<String>, CommandError> {
+    match id {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(number)) => Ok(Some(number.to_string())),
+        Some(Value::String(text)) if text.trim().is_empty() => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(_) => Err(CommandError::new(
+            "invalid_params",
+            "`id` is a card's number",
+        )),
+    }
+}
+
+/// A card as a tool reads it: named by its number, without the ids only the window needs.
+fn card_view(card: &CardRecord, own: Option<&CardRecord>, with_body: bool) -> Value {
+    let mut view = json!({
+        "id": card.number,
+        "title": card.title,
+        "owner": card.owner,
+        "status": card.status,
+        "commentCount": card.comment_count,
+    });
+    if with_body {
+        view["body"] = json!(card.body);
+    }
+    if own.is_some_and(|own| own.id == card.id) {
+        view["yours"] = json!(true);
+    }
+    view
+}
+
+pub(crate) fn tool_card(card: &CardRecord, own: Option<&CardRecord>) -> Value {
+    card_view(card, own, true)
+}
+
+/// Bodies stay out: nine full cards already overran the worker's tool-answer cap.
+pub(crate) fn tool_list(cards: &[CardRecord], own: Option<&CardRecord>) -> Value {
+    let cards: Vec<Value> = cards
+        .iter()
+        .map(|card| card_view(card, own, false))
+        .collect();
+    json!({"cards": cards})
+}
+
+pub(crate) fn tool_detail(detail: &CardDetail, own: Option<&CardRecord>) -> Value {
+    let comments: Vec<Value> = detail
+        .comments
+        .iter()
+        .map(|comment| json!({"author": comment.author, "body": comment.body}))
+        .collect();
+    json!({
+        "card": card_view(&detail.card, own, true),
+        "comments": comments,
+        "attachments": detail.attachments,
+    })
+}
+
+pub(crate) fn tool_comment(card: &CardRecord, comment: &CardComment) -> Value {
+    json!({"card": card.number, "author": comment.author, "body": comment.body})
+}
+
+fn no_card_for_task() -> CommandError {
+    CommandError::new(
+        "no_card_for_task",
+        "This task was not opened from a card: pass the id of a card from list",
+    )
 }
 
 /// Answers the worker's `board` tool, or refuses in a sentence the model can act on.
@@ -89,10 +160,15 @@ pub(crate) fn board_tool<R: Runtime>(
     let storage = crate::workspace::project_storage(app)
         .map_err(|failure| ToolFailure::new("board_unavailable", failure.message))?;
     let board = storage.board();
+    let own = board.own_card()?;
+    let target = |id: Option<Value>| match given_reference(id.as_ref())? {
+        Some(reference) => board.resolve(&reference),
+        None => own.clone().ok_or_else(no_card_for_task),
+    };
     let reads = matches!(call, BoardCall::List | BoardCall::Read { .. });
     let answer = match call {
-        BoardCall::List => json!({"cards": board.list()?}),
-        BoardCall::Read { id } => json!(board.read(&id)?),
+        BoardCall::List => tool_list(&board.list()?, own.as_ref()),
+        BoardCall::Read { id } => tool_detail(&board.read(&target(id)?.id)?, own.as_ref()),
         BoardCall::Create {
             title,
             body,
@@ -103,20 +179,29 @@ pub(crate) fn board_tool<R: Runtime>(
                 body,
                 owner: WORKER_OWNER.to_owned(),
                 status: status.unwrap_or(CardStatus::Backlog),
+                attachments: Vec::new(),
             };
-            json!(board.create(&card, WORKER)?)
+            tool_card(&board.create(&card, WORKER)?, own.as_ref())
         }
-        BoardCall::Move { id, status } => json!(board.move_to(&id, status, WORKER)?),
+        BoardCall::Move { id, status } => tool_card(
+            &board.move_to(&target(id)?.id, status, WORKER)?,
+            own.as_ref(),
+        ),
         BoardCall::Comment { id, body } => {
-            json!(board.comment(&id, WORKER_OWNER, &body, WORKER)?)
+            let card = target(id)?;
+            tool_comment(
+                &card,
+                &board.comment(&card.id, WORKER_OWNER, &body, WORKER)?,
+            )
         }
         BoardCall::Edit { id, title, body } => {
             let edit = CardEdit {
                 title,
                 body,
                 owner: None,
+                attachments: None,
             };
-            json!(board.edit(&id, &edit, WORKER)?)
+            tool_card(&board.edit(&target(id)?.id, &edit, WORKER)?, own.as_ref())
         }
     };
     if !reads {
@@ -142,12 +227,14 @@ pub(crate) fn card_create(
     title: String,
     body: String,
     status: CardStatus,
+    attachments: Vec<crate::storage::StoredAttachment>,
 ) -> Result<CardRecord, CommandError> {
     let card = NewCard {
         title,
         body,
         owner: USER_OWNER.to_owned(),
         status,
+        attachments,
     };
     let created = crate::workspace::project_storage(&app)?
         .board()
@@ -181,6 +268,16 @@ pub(crate) fn card_edit(
         .edit(&id, &edit, Actor::User)?;
     announce_change(&app);
     Ok(edited)
+}
+
+/// Only the window deletes: a card is the user's ask, and no tool gets to lose one.
+#[tauri::command(async)]
+pub(crate) fn card_delete(app: AppHandle, id: String) -> Result<(), CommandError> {
+    crate::workspace::project_storage(&app)?
+        .board()
+        .delete(&id)?;
+    announce_change(&app);
+    Ok(())
 }
 
 #[tauri::command(async)]
@@ -284,5 +381,88 @@ mod tests {
         let missing = board_tool(app.handle(), &json!({"op": "move", "id": "x"}))
             .expect_err("move needs a status");
         assert_eq!(missing.code, "invalid_params");
+    }
+
+    #[test]
+    fn a_call_with_no_id_works_the_card_its_task_was_opened_from() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let app = crate::mcp_server::tests::app_with_storage(&directory);
+        let storage = crate::workspace::project_storage(app.handle()).expect("storage");
+        let refused = board_tool(app.handle(), &json!({"op": "comment", "body": "Done"}))
+            .expect_err("no task yet");
+        assert_eq!(refused.code, "no_card_for_task");
+
+        let nothing_to_stop = |_: &std::path::Path| Ok(());
+        let switch = storage.switch_with_no_turn_to_refuse(&nothing_to_stop);
+        let task_id = storage
+            .tasks()
+            .create(&switch)
+            .expect("task")
+            .task_id
+            .expect("task id");
+        let cardless = board_tool(app.handle(), &json!({"op": "move", "status": "review"}))
+            .expect_err("a task not opened from a card");
+        assert_eq!(cardless.code, "no_card_for_task");
+        let new_card = |title: &str| NewCard {
+            title: title.to_owned(),
+            body: String::new(),
+            owner: USER_OWNER.to_owned(),
+            status: CardStatus::Backlog,
+            attachments: Vec::new(),
+        };
+        let board = storage.board();
+        let other = board.create(&new_card("Other"), Actor::User).expect("card");
+        let card = board.create(&new_card("Jump"), Actor::User).expect("card");
+        board.attach_task(&card.id, &task_id).expect("attach");
+
+        let listed = board_tool(app.handle(), &json!({"op": "list"})).expect("list");
+        assert_eq!(
+            listed,
+            json!({"cards": [
+                {"id": 1, "title": "Other", "owner": "user", "status": "backlog", "commentCount": 0},
+                {"id": 2, "title": "Jump", "owner": "user", "status": "doing", "commentCount": 0, "yours": true}
+            ]})
+        );
+        let comment = board_tool(
+            app.handle(),
+            &json!({"op": "comment", "id": "", "body": "Done"}),
+        )
+        .expect("comment on the own card");
+        assert_eq!(
+            comment,
+            json!({"card": 2, "author": "gofer", "body": "Done"})
+        );
+        let edited = board_tool(app.handle(), &json!({"op": "edit", "body": "Higher"}))
+            .expect("edit the own card");
+        assert_eq!(
+            (edited["id"].clone(), edited["body"].clone()),
+            (json!(2), json!("Higher"))
+        );
+        let reviewed = board_tool(app.handle(), &json!({"op": "move", "status": "review"}))
+            .expect("move the own card");
+        assert_eq!(
+            (reviewed["id"].clone(), reviewed["status"].clone()),
+            (json!(2), json!("review"))
+        );
+        let as_text = board_tool(app.handle(), &json!({"op": "read", "id": "true"}))
+            .expect_err("pi hands a boolean id over as text");
+        assert_eq!(as_text.code, "card_not_found");
+        let wrong_type = board_tool(app.handle(), &json!({"op": "read", "id": true}))
+            .expect_err("not a card reference");
+        assert_eq!(wrong_type.code, "invalid_params");
+
+        let moved = board_tool(
+            app.handle(),
+            &json!({"op": "move", "id": "#1", "status": "ready"}),
+        )
+        .expect("move by number");
+        assert_eq!(moved["id"], json!(other.number));
+        let read = board_tool(app.handle(), &json!({"op": "read", "id": card.id}))
+            .expect("an id from before numbers");
+        assert_eq!(read["card"]["yours"], json!(true));
+        assert_eq!(
+            read["comments"],
+            json!([{"author": "gofer", "body": "Done"}])
+        );
     }
 }

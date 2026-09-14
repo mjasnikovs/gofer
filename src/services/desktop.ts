@@ -188,7 +188,11 @@ export type DesktopCommandMap = Readonly<{
     cancel_ai_request: CommandSpec<{requestId: number}, boolean>
     cancel_chatgpt_login: CommandSpec<undefined, boolean>
     card_comment: CommandSpec<{id: string; body: string}, CardComment>
-    card_create: CommandSpec<{title: string; body: string; status: CardStatus}, Card>
+    card_create: CommandSpec<
+        {title: string; body: string; status: CardStatus; attachments: readonly ChatAttachment[]},
+        Card
+    >
+    card_delete: CommandSpec<{id: string}, void>
     card_edit: CommandSpec<{id: string; edit: CardEdit}, Card>
     card_move: CommandSpec<{id: string; status: CardStatus}, Card>
     card_post_to_gofer: CommandSpec<{id: string; bringChanges: boolean}, StoredChat>
