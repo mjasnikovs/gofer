@@ -564,7 +564,9 @@ function FrameRegions({
                             : layout.centerTab === 'skills' ?
                                 <SkillsView />
                             : layout.centerTab === 'board' ?
-                                <BoardView />
+                                <OpenCenterTabContext value={openCenterTab}>
+                                    <BoardView />
+                                </OpenCenterTabContext>
                             : layout.centerTab === 'changes' ?
                                 <ChangesView
                                     isSideBySide={layout.isDiffSideBySide}

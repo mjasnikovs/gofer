@@ -2,6 +2,7 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {cleanup, render, screen, within} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {BoardView} from './BoardView'
+import {OpenCenterTabContext} from '../../hooks/useCenterTab'
 import {OpenTaskContext} from '../../hooks/useOpenTask'
 import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../../test/desktop-driver'
 import {flush, flushUntil} from '../../test/flush'
@@ -49,10 +50,12 @@ function backend(rows: readonly Card[] = [card(), DOING], answers: BackendAnswer
 
 const calls = () => tauri.invoke.mock.calls.map(call => call[0])
 
-async function open(openTask = vi.fn()) {
+async function open(openTask = vi.fn(), openTab = vi.fn()) {
     render(
         <OpenTaskContext value={openTask}>
-            <BoardView />
+            <OpenCenterTabContext value={openTab}>
+                <BoardView />
+            </OpenCenterTabContext>
         </OpenTaskContext>
     )
     await flushUntil(() => screen.queryByText('Backlog') !== null)
@@ -131,10 +134,11 @@ describe('the board', () => {
         expect(await within(dialog).findByText('Review · claude')).toBeInTheDocument()
     })
 
-    it('posts a ready card to Gofer and opens the task it made', async () => {
+    it('posts a ready card to Gofer and opens the task it made on the chat tab', async () => {
         const openTask = vi.fn()
+        const openTab = vi.fn()
         backend([card()])
-        await open(openTask)
+        await open(openTask, openTab)
 
         await userEvent.click(screen.getByText('Make the hero jump higher'))
         await userEvent.click(await screen.findByRole('button', {name: 'Post to Gofer'}))
@@ -142,6 +146,7 @@ describe('the board', () => {
 
         expect(calls()).toContain('card_post_to_gofer')
         expect(openTask).toHaveBeenCalledWith(expect.any(String))
+        expect(openTab).toHaveBeenCalledWith('chat')
     })
 
     it('does not offer to post a card that already has a task', async () => {

@@ -4,7 +4,9 @@ import {
     WORKSPACE_LAYOUT_KEY,
     createProjectStateWriter,
     draftKey,
-    readProjectState
+    flushProjectState,
+    readProjectState,
+    writeProjectState
 } from './ui-state'
 import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../test/desktop-driver'
 import type {WriteScheduler} from './clock'
@@ -173,6 +175,15 @@ describe('reading', () => {
     it('is undefined rather than a throw when the stored value will not parse', async () => {
         answer = () => 'not json'
         await expect(readProjectState(WORKSPACE_LAYOUT_KEY)).resolves.toBeUndefined()
+    })
+
+    it('answers with a change that has not been written out yet', async () => {
+        answer = () => JSON.stringify({centerTab: 'board'})
+        writeProjectState(WORKSPACE_LAYOUT_KEY, {centerTab: 'chat'})
+
+        await expect(readProjectState(WORKSPACE_LAYOUT_KEY)).resolves.toEqual({centerTab: 'chat'})
+        flushProjectState()
+        await expect(readProjectState(WORKSPACE_LAYOUT_KEY)).resolves.toEqual({centerTab: 'board'})
     })
 
     it('is undefined rather than a throw when the backend fails', async () => {

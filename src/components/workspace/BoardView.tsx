@@ -27,6 +27,7 @@ import {CARD_STATUSES, CARD_STATUS_LABELS, cardsIn} from '../../models/board'
 import type {Card, CardDetail, CardStatus} from '../../models/board'
 import type {CommandError} from '../../models/errors'
 import type {PendingChange} from '../../models/app'
+import {useOpenCenterTab} from '../../hooks/useCenterTab'
 import {useOpenTask} from '../../hooks/useOpenTask'
 import {NewTaskDialog} from './NewTaskDialog'
 import {PanelState} from './PanelState'
@@ -323,6 +324,7 @@ type CardDialogProps = Readonly<{
 
 function CardDialog({id, version, onClose, onChanged}: CardDialogProps) {
     const openTask = useOpenTask()
+    const openTab = useOpenCenterTab()
     const [detail, setDetail] = useState<CardDetail>()
     const [failure, setFailure] = useState<string>()
     const [title, setTitle] = useState('')
@@ -374,6 +376,7 @@ function CardDialog({id, version, onClose, onChanged}: CardDialogProps) {
             const chat = await postCardToGofer(id, bringChanges)
             onChanged()
             onClose()
+            openTab?.('chat')
             if (chat.taskId !== undefined && openTask) openTask(chat.taskId)
         } catch (error) {
             setFailure(toBoardError(error).message)
