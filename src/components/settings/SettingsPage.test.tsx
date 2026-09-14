@@ -728,7 +728,9 @@ describe('the other agents door', () => {
         await open()
         await openTab('Other agents')
 
-        expect(screen.getByText(/claude mcp add --transport http gofer/)).toBeInTheDocument()
+        expect(
+            screen.getByText(/claude mcp add --scope user --transport http gofer/)
+        ).toBeInTheDocument()
         expect(screen.getByRole('button', {name: 'Save'})).toBeDisabled()
     })
 

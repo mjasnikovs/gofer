@@ -19,6 +19,7 @@ mod cancel;
 mod chatgpt_auth;
 mod clipboard;
 mod command_error;
+mod command_line;
 mod debug;
 mod files;
 mod gdformat;
@@ -1301,6 +1302,11 @@ pub(crate) fn app_context<R: tauri::Runtime>() -> tauri::Context<R> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if let Some(answer) = command_line::answer(std::env::args().skip(1)) {
+        println!("{answer}");
+        return;
+    }
+
     #[cfg(target_os = "linux")]
     // SAFETY: this runs at process startup, before Tauri or WebKit creates worker threads.
     unsafe {

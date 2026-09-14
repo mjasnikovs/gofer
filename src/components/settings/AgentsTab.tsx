@@ -30,7 +30,8 @@ function parsePort(typed: string): number | undefined {
 }
 
 function connectCommand(url: string, token: string) {
-    return `claude mcp add --transport http gofer ${url} --header "Authorization: Bearer ${token}"`
+    // User scope, because the agent that needs the board is working in some other directory.
+    return `claude mcp add --scope user --transport http gofer ${url} --header "Authorization: Bearer ${token}"`
 }
 
 export function useAgentsTab(view: SettingsView): SettingsTabView {
