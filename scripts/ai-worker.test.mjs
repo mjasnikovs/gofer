@@ -81,7 +81,7 @@ test('the worker asks the backend for domain tools over the duplex channel', asy
     assert.equal(code, 0)
     assert.deepEqual(
         requests.filter(isProbe).map(request => request.tool),
-        ['ask_user', 'remember', 'godot']
+        ['ask_user', 'remember', 'board', 'godot']
     )
     assert.deepEqual(
         withoutProbes(requests).map(request => ({tool: request.tool, params: request.params})),

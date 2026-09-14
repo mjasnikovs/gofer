@@ -3,6 +3,7 @@ import {join} from 'node:path'
 import {SUBAGENT_PROBE_ANSWER, SUBAGENT_TOOL_NAME} from './ai-subagent.mjs'
 import {ASK_PROBE_ANSWER, ASK_USER_TOOL_NAME} from './ai-ask.mjs'
 import {REMEMBER_PROBE_ANSWER, REMEMBER_TOOL_NAME} from './ai-remember.mjs'
+import {BOARD_PROBE_ANSWER, BOARD_TOOL_NAME} from './ai-board.mjs'
 import {WEB_FETCH_PROBE_ANSWER, WEB_FETCH_TOOL_NAME} from './ai-fetch.mjs'
 import {WEB_SEARCH_PROBE_ANSWER, WEB_SEARCH_TOOL_NAME} from './ai-search.mjs'
 
@@ -42,12 +43,25 @@ const REMEMBER_PROBE = {
     answersWith: REMEMBER_PROBE_ANSWER
 }
 
+const BOARD_PROBE = {
+    name: BOARD_TOOL_NAME,
+    params: PROBE_REQUEST,
+    answersWith: BOARD_PROBE_ANSWER
+}
+
 const WEB_PROBES = [
     {name: WEB_SEARCH_TOOL_NAME, params: PROBE_REQUEST, answersWith: WEB_SEARCH_PROBE_ANSWER},
     {name: WEB_FETCH_TOOL_NAME, params: PROBE_REQUEST, answersWith: WEB_FETCH_PROBE_ANSWER}
 ]
 
-const LOCAL_PROBES = [...WORKSPACE_PROBES, SUBAGENT_PROBE, ASK_PROBE, REMEMBER_PROBE, ...WEB_PROBES]
+const LOCAL_PROBES = [
+    ...WORKSPACE_PROBES,
+    SUBAGENT_PROBE,
+    ASK_PROBE,
+    REMEMBER_PROBE,
+    BOARD_PROBE,
+    ...WEB_PROBES
+]
 
 function resultText(result) {
     return (result?.content ?? [])

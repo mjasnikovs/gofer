@@ -9,7 +9,9 @@ import {ResizeHandle, useResizable} from '@astryxdesign/core/Resizable'
 import {Spinner} from '@astryxdesign/core/Spinner'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {StatusDot} from '@astryxdesign/core/StatusDot'
+import {Switch} from '@astryxdesign/core/Switch'
 import {
+    BOARD_TAB,
     CHANGES_TAB,
     CHAT_TAB,
     DESIGN_TAB,
@@ -52,6 +54,7 @@ import {DocsView} from './DocsView'
 import {MemoryView} from './MemoryView'
 import {SketchesView} from './SketchesView'
 import {SkillsView} from './SkillsView'
+import {BoardView} from './BoardView'
 import {ExplorerPanel} from './ExplorerPanel'
 import {GameView} from './GameView'
 import {InspectorPanel} from './InspectorPanel'
@@ -526,6 +529,12 @@ function FrameRegions({
                                 >
                                     <OpenCenterTabContext value={openCenterTab}>
                                         {chat}
+                                    <Tab
+                                        value='board'
+                                        label='Board'
+                                        isLabelHidden={isCentreCompact}
+                                        {...BOARD_TAB}
+                                    />
                                     </OpenCenterTabContext>
                                 </VStack>
                             : layout.centerTab === 'scripts' ?
@@ -554,6 +563,8 @@ function FrameRegions({
                         </StackItem>
                         <Divider />
                         <VStack
+                            : layout.centerTab === 'board' ?
+                                <BoardView />
                             gap={0}
                             height={layout.isBottomCollapsed ? 'auto' : BOTTOM_HEIGHT}
                         >

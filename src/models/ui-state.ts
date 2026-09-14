@@ -2,7 +2,7 @@ import type {GodotLogSeverity} from './godot'
 import type {GodotSelection} from './workspace'
 
 export type CenterTab =
-    'chat' | 'scripts' | 'game' | 'docs' | 'memory' | 'sketches' | 'skills' | 'changes'
+    'chat' | 'scripts' | 'game' | 'docs' | 'memory' | 'sketches' | 'skills' | 'changes' | 'board'
 export type ExplorerTab = 'scene' | 'runtime' | 'files'
 export type InspectorTab = 'node' | 'project' | 'editor'
 export type BottomTab = 'problems' | 'debugger' | 'output' | 'import'
@@ -98,6 +98,7 @@ const CENTER_TABS: readonly CenterTab[] = [
     'memory',
     'sketches',
     'skills',
+    'board',
     'changes'
 ]
 const EXPLORER_TABS: readonly ExplorerTab[] = ['scene', 'runtime', 'files']

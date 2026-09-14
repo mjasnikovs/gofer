@@ -55,6 +55,7 @@ import {createCredentialStore} from './ai-credentials.mjs'
 import {probeTools} from './ai-reachability.mjs'
 import {createAskUserTool} from './ai-ask.mjs'
 import {createRememberTool} from './ai-remember.mjs'
+import {createBoardTool} from './ai-board.mjs'
 import {createAskDelegate} from './ai-ask-loop.mjs'
 import {createSubagentTool} from './ai-subagent.mjs'
 import {createProgressGuard} from './progress-guard.mjs'
@@ -617,6 +618,7 @@ export async function runAgent({
             ...(host ?
                 [
                     createRememberTool({host}),
+                    createBoardTool({host}),
                     createAskUserTool({
                         host,
                         model,

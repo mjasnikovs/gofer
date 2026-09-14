@@ -21,6 +21,7 @@ import type {
 } from '../models/memory'
 import type {FileDiff, TaskChanges} from '../models/changes'
 import type {ProjectSketch, SketchHtml} from '../models/sketch'
+import type {Card, CardComment, CardDetail, CardEdit, CardStatus} from '../models/board'
 import type {SkillsResponse} from '../models/skills'
 import type {UnsavedWork} from '../models/unsaved-work'
 import type {
@@ -60,7 +61,9 @@ import type {
     GodotSettings,
     SettingsRequest,
     SettingsResponse,
-    StorageMaintenanceResult
+    StorageMaintenanceResult,
+    McpSettings,
+    McpStatus
 } from '../models/settings'
 import type {
     CallGodotRequest,
@@ -178,11 +181,18 @@ export type DesktopCommandMap = Readonly<{
     activate_chat_task: CommandSpec<{taskId: string}, StoredChat>
     apply_health_remedy: CommandSpec<{request: HealthRemedyRequest}, HealthReport>
     apply_script_rename: CommandSpec<{request: ApplyScriptRenameRequest}, readonly ScriptStamp[]>
+    board_list: CommandSpec<undefined, readonly Card[]>
     call_godot: CommandSpec<{request: CallGodotRequest}, CallGodotResponse>
     call_godot_debug: CommandSpec<{request: DebugRequest}, DebugResponse>
     call_script_language: CommandSpec<{request: ScriptRequest}, ScriptResponse>
     cancel_ai_request: CommandSpec<{requestId: number}, boolean>
     cancel_chatgpt_login: CommandSpec<undefined, boolean>
+    card_comment: CommandSpec<{id: string; body: string}, CardComment>
+    card_create: CommandSpec<{title: string; body: string; status: CardStatus}, Card>
+    card_edit: CommandSpec<{id: string; edit: CardEdit}, Card>
+    card_move: CommandSpec<{id: string; status: CardStatus}, Card>
+    card_post_to_gofer: CommandSpec<{id: string; bringChanges: boolean}, StoredChat>
+    card_read: CommandSpec<{id: string}, CardDetail>
     check_workspace_health: CommandSpec<undefined, HealthReport>
     close_script_document: CommandSpec<{request: OpenScriptRequest}, void>
     compact_ai_context: CommandSpec<
@@ -221,6 +231,7 @@ export type DesktopCommandMap = Readonly<{
         void
     >
     logout_chatgpt: CommandSpec<undefined, void>
+    mcp_status: CommandSpec<undefined, McpStatus>
     merge_task_branch: CommandSpec<{taskId: string; unsavedWork?: UnsavedWork}, unknown>
     move_workspace_path: CommandSpec<{request: MoveWorkspacePathRequest}, void>
     open_script_document: CommandSpec<{request: OpenScriptRequest}, ScriptDocument>
@@ -251,6 +262,7 @@ export type DesktopCommandMap = Readonly<{
     save_chat: CommandSpec<{chat: StoredChatPayload}, void>
     save_chat_attachment: CommandSpec<{request: AttachmentUpload}, void>
     save_godot_settings: CommandSpec<{godot: GodotSettings}, SettingsResponse>
+    save_mcp_settings: CommandSpec<{mcp: McpSettings}, SettingsResponse>
     save_project_memory: CommandSpec<{edit: MemoryEdit}, ProjectMemory>
     save_script_document: CommandSpec<{request: SaveScriptRequest}, ScriptStamp>
     save_settings: CommandSpec<{request: SettingsRequest}, SettingsResponse>
@@ -295,6 +307,7 @@ type DesktopEventMap = Readonly<{
     'ai-question-settled': UserQuestionSettled
     'ai-memory-judge': MemoryJudgeEvent
     'ai-memory-sweep': MemorySweepEvent
+    'board-changed': undefined
     'godot-session-event': GodotSessionEvent
     'rag-download-progress': DownloadProgress
     'settings-saved': SettingsResponse

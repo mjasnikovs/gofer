@@ -716,3 +716,60 @@ describe('when the settings cannot be read at all', () => {
         expect(tauri.invoke).not.toHaveBeenCalled()
     })
 })
+
+describe('the other agents door', () => {
+    const savedMcp = () =>
+        (
+            tauri.invoke.mock.calls.filter(call => call[0] === 'save_mcp_settings').at(-1)?.[1] as
+                {mcp: {port: number; token: string}} | undefined
+        )?.mcp
+
+    it('shows where the door is and how Claude Code connects to it', async () => {
+        await open()
+        await openTab('Other agents')
+
+        expect(screen.getByText(/claude mcp add --transport http gofer/)).toBeInTheDocument()
+        expect(screen.getByRole('button', {name: 'Save'})).toBeDisabled()
+    })
+
+    it('refuses a port outside the range instead of sending it', async () => {
+        const user = userEvent.setup()
+        await open()
+        await openTab('Other agents')
+
+        const port = screen.getByLabelText(/^Port/)
+        await user.clear(port)
+        expect(port).toHaveValue('')
+        await user.type(port, '70000')
+        await flush()
+
+        expect(screen.getByText(/between 1 and 65535/)).toBeInTheDocument()
+        expect(screen.getByRole('button', {name: 'Save'})).toBeDisabled()
+    })
+
+    it('mints a new token and saves it with the port', async () => {
+        const user = userEvent.setup()
+        await open()
+        await openTab('Other agents')
+
+        const port = screen.getByLabelText(/^Port/)
+        await user.clear(port)
+        await user.type(port, '5005')
+        await user.click(screen.getByRole('button', {name: 'New token'}))
+        await flush()
+        await user.click(screen.getByRole('button', {name: 'Save'}))
+        await flush()
+
+        expect(savedMcp()?.port).toBe(5005)
+        expect(savedMcp()?.token).toMatch(/^[0-9a-f]{32}$/)
+        expect(screen.getByText('Agent door saved')).toBeInTheDocument()
+    })
+
+    it('says when the door could not open', async () => {
+        answer({mcp_status: {url: null, error: 'Port 47831 could not be opened: in use'}})
+        await open()
+        await openTab('Other agents')
+
+        expect(await screen.findByText(/could not be opened/)).toBeInTheDocument()
+    })
+})

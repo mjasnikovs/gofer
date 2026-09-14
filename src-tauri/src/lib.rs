@@ -14,6 +14,7 @@ mod ai_tools;
 mod ai_turn;
 mod approvals;
 mod ask;
+mod board;
 mod cancel;
 mod chatgpt_auth;
 mod clipboard;
@@ -51,6 +52,7 @@ mod godot_script_acceptance;
 mod godot_session;
 mod godot_session_api;
 mod health;
+mod mcp_server;
 mod memory;
 mod model_server;
 mod off_thread;
@@ -74,6 +76,10 @@ mod tool_results;
 mod unsaved_work;
 mod workers;
 mod workspace;
+
+use board::{
+    board_list, card_comment, card_create, card_edit, card_move, card_post_to_gofer, card_read,
+};
 
 use ai_turn::{
     ChatAttachment, ChatAttachmentUpload, SteerRequest, cancel_ai_request_with,
@@ -120,6 +126,7 @@ async fn save_settings(
             return Err(error);
         }
 
+        mcp_server::apply(&app, &settings.mcp);
         Ok(announce_settings(&app, settings_response(settings)))
     })
     .await
@@ -380,7 +387,7 @@ pub(crate) fn leave_task<R: tauri::Runtime>(
 ///
 /// Built once per command and handed to the task operation, rather than each operation remembering
 /// to pass a closure on. See `task_switch`: the order and the failure policy live there.
-fn switch_for(app: &AppHandle) -> impl Fn(&Path) -> Result<(), String> + use<'_> {
+pub(crate) fn switch_for(app: &AppHandle) -> impl Fn(&Path) -> Result<(), String> + use<'_> {
     move |workspace| leave_task(app, workspace)
 }
 
@@ -410,7 +417,11 @@ fn refuse_during_turn() -> Result<ai_turn::AiProviderOperation, CommandError> {
 fn delete_chat_task(app: AppHandle, task_id: String) -> Result<StoredChat, CommandError> {
     let storage = project_storage(&app)?;
     let release = switch_for(&app);
-    storage.tasks().delete(&task_id, &storage.switch(&release)?)
+    let chat = storage
+        .tasks()
+        .delete(&task_id, &storage.switch(&release)?)?;
+    board::announce_change(&app);
+    Ok(chat)
 }
 
 #[tauri::command(async)]
@@ -556,7 +567,9 @@ fn merge_task_branch(
     let release = switch_for(&app);
     let switch = storage.switch(&release)?;
     unsaved_work::settle(unsaved_work.unwrap_or_default())?;
-    storage.tasks().merge(&task_id, &switch)
+    let merged = storage.tasks().merge(&task_id, &switch)?;
+    board::announce_change(&app);
+    Ok(merged)
 }
 
 /// Brings the project's branch into the task so the agent can reconcile what clashed.
@@ -595,6 +608,39 @@ fn run_storage_maintenance(app: AppHandle) -> Result<MaintenanceResult, CommandE
 
 fn run_storage_maintenance_in(app: &AppHandle) -> Result<MaintenanceResult, CommandError> {
     project_storage(app)?.project().run_maintenance()
+}
+
+/// Starts the MCP server from the settings, minting the token the first time there is none.
+fn open_mcp_door(app: &AppHandle) {
+    let Ok(mut mcp) = settings::read_mcp_settings(app) else {
+        return;
+    };
+    if mcp.token.is_empty() {
+        mcp = match settings::save_mcp_settings(app, mcp) {
+            Ok(settings) => settings.mcp,
+            Err(_) => return,
+        };
+    }
+    mcp_server::apply(app, &mcp);
+}
+
+/// The MCP settings alone, applied to the live server as they are written.
+#[tauri::command]
+async fn save_mcp_settings(
+    app: AppHandle,
+    mcp: settings::McpSettings,
+) -> Result<SettingsResponse, CommandError> {
+    off_thread_coded("save_mcp_settings", "settings_unwritable", move || {
+        let settings = settings::save_mcp_settings(&app, mcp)?;
+        mcp_server::apply(&app, &settings.mcp);
+        Ok(announce_settings(&app, settings_response(settings)))
+    })
+    .await
+}
+
+#[tauri::command]
+fn mcp_status() -> Result<mcp_server::McpStatus, CommandError> {
+    Ok(mcp_server::status())
 }
 
 /// Searches the stored warning and error history of every recorded run.
@@ -1275,6 +1321,7 @@ pub fn run() {
         workers::remember_resource_dir(app.path().resource_dir().ok());
         godot_session_api::remember_app(app.handle().clone());
         app.manage(StorageSlot::new(open_project_storage(app.handle())));
+        open_mcp_door(app.handle());
         Ok(())
     });
 
@@ -1282,6 +1329,13 @@ pub fn run() {
         abandon_task_merge,
         activate_chat_task,
         apply_health_remedy,
+        board_list,
+        card_comment,
+        card_create,
+        card_edit,
+        card_move,
+        card_post_to_gofer,
+        card_read,
         apply_script_rename,
         call_godot,
         check_workspace_health,
@@ -1321,6 +1375,7 @@ pub fn run() {
         load_settings,
         login_chatgpt,
         logout_chatgpt,
+        mcp_status,
         merge_task_branch,
         move_workspace_path,
         open_script_document,
@@ -1348,6 +1403,7 @@ pub fn run() {
         save_script_document,
         save_settings,
         save_godot_settings,
+        save_mcp_settings,
         save_chat_attachment,
         search_godot_log_history,
         send_ai_message,

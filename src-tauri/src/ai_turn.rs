@@ -780,6 +780,12 @@ impl Drop for AiProviderOperation {
     }
 }
 
+/// Whether a provider operation holds the bit right now. A reading, not a claim: the answer can
+/// be stale the instant after, which is fine for what reads it — a lock on cards, not on files.
+pub(crate) fn provider_operation_running() -> bool {
+    AI_PROVIDER_OPERATION_RUNNING.load(Ordering::Acquire)
+}
+
 pub(crate) fn begin_provider_operation() -> Result<AiProviderOperation, String> {
     AI_PROVIDER_OPERATION_RUNNING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)

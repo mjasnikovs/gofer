@@ -177,6 +177,7 @@ impl Tasks<'_> {
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(database_error)?;
             require_task(&transaction, task_id)?;
+            super::board::release_cards_of_task(&transaction, task_id)?;
             transaction
                 .execute("DELETE FROM tasks WHERE id = ?1", [task_id])
                 .map_err(database_error)?;
@@ -518,6 +519,7 @@ impl Tasks<'_> {
                 params![now, task_id],
             )
             .map_err(database_error)?;
+        super::board::finish_cards_of_task(&transaction, task_id)?;
         transaction.commit().map_err(database_error)?;
         Ok(MergeTaskResult {
             task_id: task_id.to_owned(),

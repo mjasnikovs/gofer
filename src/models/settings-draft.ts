@@ -23,6 +23,7 @@ import type {
     CacheStatus,
     GodotSettings,
     GoferSettings,
+    McpSettings,
     ModelChoice,
     Notice,
     SecretName,
@@ -37,6 +38,7 @@ export type SettingsTask =
     | 'saving'
     | 'savingPrompt'
     | 'savingGodot'
+    | 'savingMcp'
     | 'downloading'
     | 'deleting'
     | 'backingUp'
@@ -44,13 +46,14 @@ export type SettingsTask =
 
 export type SettingsBusy = Readonly<Record<SettingsTask, boolean>>
 
-export type SettingsTab = 'ai' | 'prompt' | 'godot' | 'models' | 'storage'
+export type SettingsTab = 'ai' | 'prompt' | 'godot' | 'agents' | 'models' | 'storage'
 
 export const TASK_TABS: Readonly<Record<SettingsTask, SettingsTab>> = {
     testing: 'ai',
     saving: 'ai',
     savingPrompt: 'prompt',
     savingGodot: 'godot',
+    savingMcp: 'agents',
     downloading: 'models',
     deleting: 'models',
     backingUp: 'storage',
@@ -129,6 +132,8 @@ export type SettingsAction =
     | Readonly<{type: 'prompt-saved'; prompt: AgentPrompt}>
     | Readonly<{type: 'godot-changed'; update: Partial<GodotSettings>}>
     | Readonly<{type: 'godot-saved'; response: SettingsResponse}>
+    | Readonly<{type: 'mcp-changed'; update: Partial<McpSettings>}>
+    | Readonly<{type: 'mcp-saved'; response: SettingsResponse}>
     | Readonly<{type: 'noticed'; tab: SettingsTab; notice: Notice}>
     | Readonly<{type: 'cache-read'; cache: CacheStatus}>
     | Readonly<{type: 'cache-downloading'}>
@@ -141,6 +146,7 @@ const NOTHING_RUNNING: SettingsBusy = {
     saving: false,
     savingPrompt: false,
     savingGodot: false,
+    savingMcp: false,
     downloading: false,
     deleting: false,
     backingUp: false,
@@ -525,6 +531,28 @@ export function reduce(
                     status: 'success',
                     title: 'Godot rules saved',
                     description: 'They are applied the next time a Godot session starts.'
+                })
+            }
+        }
+
+        case 'mcp-changed':
+            if (!state.settings) return state
+            return {
+                ...state,
+                settings: {...state.settings, mcp: {...state.settings.mcp, ...action.update}}
+            }
+
+        case 'mcp-saved': {
+            const saved = normalizeSettings(action.response.settings)
+            return {
+                ...state,
+                settings: saved,
+                savedSettings: saved,
+                busy: busyWith(state.busy, 'savingMcp', false),
+                notices: noticedOn(state.notices, 'agents', {
+                    status: 'success',
+                    title: 'Agent door saved',
+                    description: 'Other agents connect with the new address and token from now on.'
                 })
             }
         }

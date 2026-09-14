@@ -88,7 +88,8 @@ tool_failure_from!(
     crate::godot_dap::DapError,
     crate::files::FileError,
     crate::gdformat::GdformatError,
-    crate::godot_session::SessionError
+    crate::godot_session::SessionError,
+    crate::command_error::CommandError
 );
 
 /// One domain tool: a name and every operation it accepts.
@@ -209,7 +210,7 @@ pub(crate) fn probe(domain: &str) -> Result<Value, ToolFailure> {
                 .map_err(|error| ToolFailure::new("docs_unavailable", error))?;
             Ok(json!({"tool": domain, "reachable": true, "worker": worker}))
         }
-        crate::ask::ASK_USER_TOOL | crate::remember::REMEMBER_TOOL => {
+        crate::ask::ASK_USER_TOOL | crate::remember::REMEMBER_TOOL | crate::board::BOARD_TOOL => {
             Ok(json!({"tool": domain, "reachable": true}))
         }
         other => Err(ToolFailure::new(
@@ -329,6 +330,9 @@ fn route<R: Runtime>(
     }
     if request.tool == crate::remember::REMEMBER_TOOL {
         return crate::remember::remember(app, &request.params);
+    }
+    if request.tool == crate::board::BOARD_TOOL {
+        return crate::board::board_tool(app, &request.params);
     }
     if request.tool == crate::read_ledger::NOTED_READ_TOOL {
         return note_a_read(app, &request.params);

@@ -97,10 +97,24 @@ export type GodotSettings = Readonly<{
 }>
 
 export type GoferSettings = Readonly<{
+export type McpSettings = Readonly<{
+    port: number
+    token: string
+}>
+
+/** Where the door is, or why it is shut. */
+export type McpStatus = Readonly<{
+    url: string | null
+    error: string | null
+}>
+
+export const DEFAULT_MCP_SETTINGS: McpSettings = {port: 47831, token: ''}
+
     version: 2
     ai: AiSettings
     godot: GodotSettings
 }>
+    mcp: McpSettings
 
 export type SettingsResponse = Readonly<{
     settings: GoferSettings
@@ -269,6 +283,7 @@ export function normalizeSettings(settings: GoferSettings): GoferSettings {
         godot: {...DEFAULT_GODOT_SETTINGS, ...settings.godot},
         ai: {
             ...tuning,
+        mcp: {...DEFAULT_MCP_SETTINGS, ...settings.mcp},
             ...settings.ai,
             connections: {...settings.ai.connections},
             subagent: {...DEFAULT_SUBAGENT_SETTINGS, ...settings.ai.subagent},

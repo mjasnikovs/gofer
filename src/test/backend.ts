@@ -1,5 +1,6 @@
 import {
     DEFAULT_GODOT_SETTINGS,
+    DEFAULT_MCP_SETTINGS,
     DEFAULT_SUBAGENT_SETTINGS,
     DEFAULT_PLAN_SETTINGS,
     DEFAULT_WEB_SETTINGS,
@@ -16,7 +17,8 @@ import type {
     CacheStatus,
     GoferSettings,
     SettingsRequest,
-    SettingsResponse
+    SettingsResponse,
+    McpStatus
 } from '../models/settings'
 import type {TaskSummary} from '../models/app'
 import type {HealthReport} from '../models/health'
@@ -24,6 +26,7 @@ import type {MemoryEdit, MemoryState, ProjectMemory} from '../models/memory'
 import type {FileDiff, TaskChanges} from '../models/changes'
 import {NO_CHANGES} from '../models/changes'
 import type {ProjectSketch, SketchHtml} from '../models/sketch'
+import type {Card, CardComment, CardStatus, CardEdit} from '../models/board'
 import type {Skill, SkillsResponse} from '../models/skills'
 import type {BriefRun} from '../models/brief'
 
@@ -39,6 +42,8 @@ export interface BackendState {
     briefs: Map<string, BriefRun>
     memories: ProjectMemory[]
     sketches: ProjectSketch[]
+    cards: Card[]
+    comments: CardComment[]
     changes: TaskChanges
     diffs: Map<string, FileDiff>
     skills: Map<string, {skill: Skill; text: string}>
@@ -79,9 +84,12 @@ export type BackendOptions = Readonly<{
     briefs?: Readonly<Record<string, BriefRun>>
     memories?: readonly ProjectMemory[]
     sketches?: readonly ProjectSketch[]
+    cards?: readonly Card[]
+    comments?: readonly CardComment[]
     changes?: TaskChanges
     diffs?: Readonly<Record<string, FileDiff>>
     sketchHtml?: SketchHtml
+    mcpStatus?: McpStatus
     skills?: readonly {skill: Skill; text: string}[]
     files?: readonly {path: string; bytes: number}[]
     thumbnails?: Readonly<Record<string, string>>
@@ -217,7 +225,8 @@ const STORED_SETTINGS: GoferSettings = {
         web: DEFAULT_WEB_SETTINGS,
         plan: DEFAULT_PLAN_SETTINGS
     },
-    godot: DEFAULT_GODOT_SETTINGS
+    godot: DEFAULT_GODOT_SETTINGS,
+    mcp: DEFAULT_MCP_SETTINGS
 }
 
 export const SETTINGS: SettingsResponse = {settings: STORED_SETTINGS, storedSecrets: {}}
@@ -291,6 +300,8 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
         memories: [...(options.memories ?? [])],
         sketches: [...(options.sketches ?? [])],
         changes: options.changes ?? NO_CHANGES,
+        cards: [...(options.cards ?? [])],
+        comments: [...(options.comments ?? [])],
         diffs: new Map(Object.entries(options.diffs ?? {})),
         skills: new Map((options.skills ?? []).map(one => [one.skill.name, one])),
         sketchHtml: options.sketchHtml ?? SKETCH_HTML,
@@ -319,6 +330,17 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
     const currentTask = () => state.tasks.find(task => task.isCurrent)
 
     let stamped = 1_700_000_000_000
+    const cardOf = (id: string) => {
+        const card = state.cards.find(one => one.id === id)
+        if (!card) throw new CommandFailure('card_not_found', 'The card was not found')
+        return card
+    }
+    const updateCard = (id: string, change: Partial<Card>) => {
+        const changed = {...cardOf(id), ...change, updatedAt: stamp()}
+        state.cards = state.cards.map(one => (one.id === id ? changed : one))
+        return changed
+    }
+
     const stamp = () => {
         stamped += 1
         return stamped
@@ -444,6 +466,16 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
                 return state.settings
             }
             case 'read_agent_prompt':
+            case 'save_mcp_settings': {
+                const mcp = payload['mcp'] as GoferSettings['mcp']
+                state.settings = {
+                    ...state.settings,
+                    settings: {...state.settings.settings, mcp}
+                }
+                return state.settings
+            }
+            case 'mcp_status':
+                return options.mcpStatus ?? {url: 'http://127.0.0.1:47831/mcp', error: null}
             case 'save_agent_prompt':
                 return options.agentPrompt ?? PROMPT
             case 'get_rag_cache_status':
@@ -526,6 +558,55 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
                 return [...state.sketches]
 
             case 'list_task_changes':
+            case 'board_list':
+                return [...state.cards]
+            case 'card_read': {
+                const card = cardOf(payload['id'] as string)
+                return {card, comments: state.comments.filter(one => one.cardId === card.id)}
+            }
+            case 'card_create': {
+                const card: Card = {
+                    id: `card-${String(state.cards.length + 1)}`,
+                    title: payload['title'] as string,
+                    body: payload['body'] as string,
+                    owner: 'user',
+                    status: payload['status'] as CardStatus,
+                    taskId: null,
+                    commentCount: 0,
+                    createdAt: stamp(),
+                    updatedAt: stamp()
+                }
+                state.cards = [...state.cards, card]
+                return card
+            }
+            case 'card_move':
+                return updateCard(payload['id'] as string, {
+                    status: payload['status'] as CardStatus
+                })
+            case 'card_edit':
+                return updateCard(payload['id'] as string, payload['edit'] as CardEdit)
+            case 'card_comment': {
+                const card = cardOf(payload['id'] as string)
+                const comment: CardComment = {
+                    id: `comment-${String(state.comments.length + 1)}`,
+                    cardId: card.id,
+                    author: 'user',
+                    body: payload['body'] as string,
+                    createdAt: stamp()
+                }
+                state.comments = [...state.comments, comment]
+                updateCard(card.id, {commentCount: card.commentCount + 1})
+                return comment
+            }
+            case 'card_post_to_gofer': {
+                const card = cardOf(payload['id'] as string)
+                if (card.taskId !== null)
+                    throw new CommandFailure('card_has_task', 'The card already has a task')
+                const task = createTask()
+                updateCard(card.id, {status: 'doing', taskId: task.id})
+                return chatOf(task.id)
+            }
+
                 return state.changes
 
             case 'read_task_change': {

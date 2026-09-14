@@ -124,11 +124,13 @@ function Application() {
         () => createTaskActions({navigate: goToTask, refresh: refreshTasks}),
         [goToTask, refreshTasks]
     )
+    // A task opened from inside the workspace may be one the sidebar has not heard of yet — the
+    // board makes them — so the list is read again before the route moves.
     const openTask = useCallback(
         (taskId: string) => {
-            void tasksActions.open(taskId)
+            void refreshTasks().then(() => tasksActions.open(taskId))
         },
-        [tasksActions]
+        [refreshTasks, tasksActions]
     )
     const showApplication = useCallback(() => {
         setIsReady(true)

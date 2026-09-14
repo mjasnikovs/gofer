@@ -5,6 +5,7 @@ import {Layout, LayoutContent} from '@astryxdesign/core/Layout'
 import {VStack} from '@astryxdesign/core/Stack'
 import {
     AI_SETTINGS_TAB,
+    AGENTS_SETTINGS_TAB,
     GODOT_SETTINGS_TAB,
     MODELS_SETTINGS_TAB,
     PROMPT_SETTINGS_TAB,
@@ -18,6 +19,7 @@ import {INITIAL_SETTINGS_DRAFT, reduce, runSettingsTask} from '../../models/sett
 import type {SettingsAction, SettingsTab, SettingsTask} from '../../models/settings-draft'
 import {useAiTab} from './AiTab'
 import {useGodotTab} from './GodotTab'
+import {useAgentsTab} from './AgentsTab'
 import {useModelsTab} from './ModelsTab'
 import {usePromptTab} from './PromptTab'
 import {useStorageTab} from './StorageTab'
@@ -101,6 +103,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
     const ai = useAiTab(view)
     const prompt = usePromptTab(view)
     const godot = useGodotTab(view)
+    const agents = useAgentsTab(view)
     const models = useModelsTab(view, onCacheDeleted)
     const storage = useStorageTab(view)
 
@@ -108,6 +111,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
         ai,
         prompt,
         godot,
+        agents,
         models,
         storage
     }
@@ -167,6 +171,12 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                         label='Godot rules'
                                         isLabelHidden={isCompact}
                                         {...GODOT_SETTINGS_TAB}
+                                    />
+                                    <Tab
+                                        value='agents'
+                                        label='Other agents'
+                                        isLabelHidden={isCompact}
+                                        {...AGENTS_SETTINGS_TAB}
                                     />
                                     <Tab
                                         value='models'

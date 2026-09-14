@@ -1,11 +1,12 @@
-//! The Ledger: one project database, and the six views over it.
+//! The Ledger: one project database, and the seven views over it.
 //!
-//! CONTEXT.md names six interfaces — `chats`, `tasks`, `runs`, `sketches`, `memory`, `project` — and
+//! CONTEXT.md names six interfaces — `chats`, `tasks`, `runs`, `sketches`, `memory`, `project` — with `board` the seventh, and
 //! for a long time the filesystem named one file of 7,829 lines. They are six files now, one per
 //! view, each holding its own tests. What stays here is what all six sit on: the connection, the
 //! schema and its migrations, the slot the workspace binding reopens, the checkout claim, and the
 //! handful of primitives every view converts a row through.
 
+mod board;
 mod chats;
 mod memories;
 mod project;
@@ -13,6 +14,7 @@ mod runs;
 mod sketches;
 mod tasks;
 
+pub use board::*;
 pub use chats::*;
 pub use memories::*;
 pub(crate) use project::copy_directory;
@@ -431,6 +433,39 @@ COMMIT;
 PRAGMA foreign_keys = ON;
 "#;
 
+/// The project board: cards, and the comments under them.
+///
+/// `task_id` clears rather than cascades. A card is what the user wrote before any task existed,
+/// and deleting the task that was opened for it should put the ask back on the board, not lose it;
+/// [`Board::collect`] moves such a card back to `ready`. `status` is checked here so a client of
+/// the MCP door cannot invent a sixth column.
+const PROJECT_SCHEMA_V10: &str = r#"
+BEGIN;
+CREATE TABLE cards (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('backlog', 'ready', 'doing', 'review', 'done')),
+    task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+    position INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX cards_status_position ON cards(status, position);
+CREATE INDEX cards_task ON cards(task_id);
+CREATE TABLE card_comments (
+    id TEXT PRIMARY KEY,
+    card_id TEXT NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+    author TEXT NOT NULL,
+    body TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX card_comments_card ON card_comments(card_id, created_at);
+PRAGMA user_version = 10;
+COMMIT;
+"#;
+
 /// One task's brief, as the panel and a resume read it.
 ///
 /// Every phase output is optional because a run that stopped part way through has only the ones it
@@ -770,6 +805,7 @@ pub(crate) enum Upkeep {
     Tasks,
     Runs,
     Sketches,
+    Board,
     Memories,
     Project,
 }
@@ -786,7 +822,8 @@ impl Upkeep {
             Self::Chats => Some(Self::Tasks),
             Self::Tasks => Some(Self::Runs),
             Self::Runs => Some(Self::Sketches),
-            Self::Sketches => Some(Self::Memories),
+            Self::Sketches => Some(Self::Board),
+            Self::Board => Some(Self::Memories),
             Self::Memories => Some(Self::Project),
             Self::Project => None,
         }
@@ -808,6 +845,7 @@ impl Upkeep {
             Self::Tasks => storage.tasks().collect(cutoffs),
             Self::Runs => storage.runs().collect(cutoffs),
             Self::Sketches => storage.sketches().collect(cutoffs),
+            Self::Board => storage.board().collect(cutoffs),
             Self::Memories => storage.memory().collect(cutoffs, pending),
             Self::Project => storage.project().collect(cutoffs),
         }
@@ -1188,6 +1226,11 @@ impl ProjectStorage {
         Sketches { storage: self }
     }
 
+    /// The project board: what is asked, what is being done, and what was reviewed.
+    pub fn board(&self) -> Board<'_> {
+        Board { storage: self }
+    }
+
     /// What the agent has been told to remember, and what finds it again.
     pub fn memory(&self) -> Memories<'_> {
         Memories { storage: self }
@@ -1230,9 +1273,9 @@ fn migrate_project(connection: &Connection) -> Result<(), CommandError> {
     let current = connection
         .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
         .map_err(database_error)?;
-    if current > 9 {
+    if current > 10 {
         return Err(format!(
-            "The database schema version {current} is newer than supported version 9"
+            "The database schema version {current} is newer than supported version 10"
         )
         .into());
     }
@@ -1279,6 +1322,11 @@ fn migrate_project(connection: &Connection) -> Result<(), CommandError> {
     if current <= 8 {
         connection
             .execute_batch(PROJECT_SCHEMA_V9)
+            .map_err(database_error)?;
+    }
+    if current <= 9 {
+        connection
+            .execute_batch(PROJECT_SCHEMA_V10)
             .map_err(database_error)?;
     }
     Ok(())
@@ -1693,7 +1741,7 @@ mod tests {
             .query_row("SELECT vec_version()", [], |row| row.get::<_, String>(0))
             .expect("sqlite-vec version");
 
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
         assert_eq!(vec_version, "v0.1.9");
     }
 
@@ -1723,7 +1771,7 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .expect("schema version");
         assert_eq!(title, "Existing task");
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
         connection
             .execute_batch(
                 "INSERT INTO sketches (id, task_id, question_id, question, label, is_approved, saved_at)

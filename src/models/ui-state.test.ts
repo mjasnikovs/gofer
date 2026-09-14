@@ -72,7 +72,8 @@ describe('toWorkspaceLayout', () => {
             'memory',
             'sketches',
             'skills',
-            'changes'
+            'changes',
+            'board'
         ] as const)
             expect(toWorkspaceLayout({...STORED, centerTab: tab}).centerTab).toBe(tab)
     })

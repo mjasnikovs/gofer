@@ -813,7 +813,7 @@ mod tests {
     fn maintenance_folds_over_every_view_and_needs_no_caller_to_finish_it() {
         let directory = TempDir::new().expect("temporary directory");
         let storage = storage(&directory);
-        assert_eq!(Upkeep::every().count(), 6, "one pass, one visit per view");
+        assert_eq!(Upkeep::every().count(), 7, "one pass, one visit per view");
         assert_eq!(
             Upkeep::every().collect::<Vec<_>>(),
             vec![
@@ -821,6 +821,7 @@ mod tests {
                 Upkeep::Tasks,
                 Upkeep::Runs,
                 Upkeep::Sketches,
+                Upkeep::Board,
                 Upkeep::Memories,
                 Upkeep::Project
             ]

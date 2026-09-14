@@ -23,6 +23,8 @@ import PencilSquareIcon from '@heroicons/react/24/outline/PencilSquareIcon'
 import PlayIcon from '@heroicons/react/24/outline/PlayIcon'
 import RectangleGroupIcon from '@heroicons/react/24/outline/RectangleGroupIcon'
 import SparklesIcon from '@heroicons/react/24/outline/SparklesIcon'
+import UsersIcon from '@heroicons/react/24/outline/UsersIcon'
+import ViewColumnsIcon from '@heroicons/react/24/outline/ViewColumnsIcon'
 import WrenchScrewdriverIcon from '@heroicons/react/24/outline/WrenchScrewdriverIcon'
 import AdjustmentsHorizontalSolid from '@heroicons/react/24/solid/AdjustmentsHorizontalIcon'
 import ArrowDownTraySolid from '@heroicons/react/24/solid/ArrowDownTrayIcon'
@@ -46,6 +48,8 @@ import PencilSquareSolid from '@heroicons/react/24/solid/PencilSquareIcon'
 import PlaySolid from '@heroicons/react/24/solid/PlayIcon'
 import RectangleGroupSolid from '@heroicons/react/24/solid/RectangleGroupIcon'
 import SparklesSolid from '@heroicons/react/24/solid/SparklesIcon'
+import UsersSolid from '@heroicons/react/24/solid/UsersIcon'
+import ViewColumnsSolid from '@heroicons/react/24/solid/ViewColumnsIcon'
 import WrenchScrewdriverSolid from '@heroicons/react/24/solid/WrenchScrewdriverIcon'
 
 export type TabIcons = Readonly<{
@@ -78,6 +82,7 @@ export const MEMORY_TAB = pair(CircleStackIcon, CircleStackSolid)
 export const DESIGN_TAB = pair(PaintBrushIcon, PaintBrushSolid)
 export const SKILLS_TAB = pair(SparklesIcon, SparklesSolid)
 export const CHANGES_TAB = pair(ArrowsRightLeftIcon, ArrowsRightLeftSolid)
+export const BOARD_TAB = pair(ViewColumnsIcon, ViewColumnsSolid)
 
 export const SCENE_TAB = pair(RectangleGroupIcon, RectangleGroupSolid)
 export const FILES_TAB = pair(FolderIcon, FolderSolid)
@@ -95,6 +100,7 @@ export const IMPORT_TAB = pair(ArrowDownTrayIcon, ArrowDownTraySolid)
 export const AI_SETTINGS_TAB = pair(LinkIcon, LinkSolid)
 export const PROMPT_SETTINGS_TAB = pair(PencilSquareIcon, PencilSquareSolid)
 export const GODOT_SETTINGS_TAB = pair(AdjustmentsHorizontalIcon, AdjustmentsHorizontalSolid)
+export const AGENTS_SETTINGS_TAB = pair(UsersIcon, UsersSolid)
 export const MODELS_SETTINGS_TAB = pair(CpuChipIcon, CpuChipSolid)
 export const STORAGE_SETTINGS_TAB = pair(CircleStackIcon, CircleStackSolid)
 

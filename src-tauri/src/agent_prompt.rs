@@ -35,7 +35,9 @@ Guidelines:
 - Fetch the page rather than guessing how something outside this project is configured or wired: a wrong setup detail costs far more to find later than the fetch costs now
 - Call remember when this turn established something a later turn would otherwise get wrong: a preference the user stated, a decision and the option it rejected, an exception somebody would undo, a fact about this setup that took work to find
 - Never remember what the files already say, what is only true right now, or an account of what you just did — the repository and this conversation hold all three, and a memory of them is noise a later turn has to read
-- One memory is one fact, in a sentence or two that still reads true to somebody who was not here";
+- One memory is one fact, in a sentence or two that still reads true to somebody who was not here
+- The project board holds what the user and other agents have asked for; the card whose taskId is this task's is yours, and a comment on it when you finish or get stuck is where they look
+- Never move a card to done: the user does that by merging the task";
 
 /// The two ask_user lines were measured before they were written, interleaved against a local
 /// Qwen3.8-27B in one process over seven seeds: a HUD or a title screen got a brief 0 of 11 times
