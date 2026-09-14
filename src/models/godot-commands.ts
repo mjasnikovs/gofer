@@ -7,7 +7,7 @@ export type GodotCommandSpec<Params extends GodotParams, Result extends GodotRes
     result: Result
 }>
 
-// GENERATED-BEGIN command-names sha256:cbfebab3c4281cf4
+// GENERATED-BEGIN command-names sha256:16ea29b9d6c446d0
 export type GodotCommandName =
     | 'session.get_state'
     | 'session.cancel'
@@ -198,6 +198,7 @@ export type GodotSession = Readonly<{
     dapPort: number
     godotVersion?: string | undefined
     worktree: string
+    headless: boolean
 }>
 
 /** One captured line of the session output. */

@@ -110,7 +110,11 @@ describe('loading', () => {
             response: {settings: sparse, storedSecrets: {}},
             cache: CACHE
         })
-        expect(state.settings?.godot).toEqual({strictTyping: true, embedGameWindow: true})
+        expect(state.settings?.godot).toEqual({
+            strictTyping: true,
+            embedGameWindow: true,
+            headless: false
+        })
     })
 
     it('warns when the credential store could not be reached', () => {
@@ -575,14 +579,21 @@ describe('the Godot rules', () => {
     })
 
     it('adopts what the backend stored and says when it applies', () => {
-        const stored = {...SETTINGS, godot: {strictTyping: false, embedGameWindow: true}}
+        const stored = {
+            ...SETTINGS,
+            godot: {strictTyping: false, embedGameWindow: true, headless: false}
+        }
         const state = apply(
             {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
             {type: 'godot-changed', update: {strictTyping: false}},
             {type: 'began', task: 'savingGodot'},
             {type: 'godot-saved', response: {settings: stored, storedSecrets: {}}}
         )
-        expect(state.settings?.godot).toEqual({strictTyping: false, embedGameWindow: true})
+        expect(state.settings?.godot).toEqual({
+            strictTyping: false,
+            embedGameWindow: true,
+            headless: false
+        })
         expect(state.busy.savingGodot).toBe(false)
         expect(state.notices.godot).toEqual({
             status: 'success',
@@ -592,7 +603,10 @@ describe('the Godot rules', () => {
     })
 
     it('leaves the page unedited, so another writer is still adopted after it', () => {
-        const stored = {...SETTINGS, godot: {strictTyping: false, embedGameWindow: true}}
+        const stored = {
+            ...SETTINGS,
+            godot: {strictTyping: false, embedGameWindow: true, headless: false}
+        }
         const saved = apply(
             {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
             {type: 'godot-changed', update: {strictTyping: false}},

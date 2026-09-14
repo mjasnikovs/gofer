@@ -3,6 +3,7 @@ import {act, cleanup, render, screen, waitFor} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {GameView} from './GameView'
 import {InEditorSession} from '../../test/editor-session'
+import {SESSION} from '../../test/backend'
 import {fakeSession} from '../../test/fake-session'
 import type {GodotSessionState} from '../../models/godot'
 import type {GodotCall} from '../../models/workspace'
@@ -52,6 +53,18 @@ describe('the game surface', () => {
             expect(isRefused('Stop')).toBe(false)
             cleanup()
         }
+    })
+
+    it('does not offer an editor capture when the editor has no window', () => {
+        render(
+            <InEditorSession
+                session={fakeSession({session: {...SESSION, state: 'ready', headless: true}})}
+            >
+                <GameView />
+            </InEditorSession>
+        )
+        expect(screen.queryByRole('button', {name: 'Capture editor'})).not.toBeInTheDocument()
+        expect(screen.getByRole('button', {name: 'Capture game'})).toBeInTheDocument()
     })
 
     it('stops showing a frame of the game once that game is gone', async () => {

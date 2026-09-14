@@ -19,7 +19,7 @@ export function forwardsScriptsToTheServer(tool, host) {
         execute: async (id, params, signal, onUpdate, context) => {
             if (!isAScript(params?.path)) return tool.execute(id, params, signal, onUpdate, context)
             const entry = asScriptOperation(tool.name, params)
-            const opened = `${tool.name} does not touch a .gd, so this went through ${entry.op}`
+            const opened = `${tool.name} touches a .gd, so this went through ${entry.op}`
             let answer
             try {
                 answer = await host.call(GODOT_TOOL_NAME, {ops: [entry]}, signal)

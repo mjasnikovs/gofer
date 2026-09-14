@@ -138,8 +138,9 @@ impl McpSettings {
 
 /// The rules Gofer holds a Godot project to, re-applied every time an editor session goes ready.
 ///
-/// Both are on by default and both are the user's to turn off. Neither is applied from here: this
-/// is only what was chosen. `godot_policy` turns a choice into the settings the editor is told.
+/// The two rules are on by default and the user's to turn off; headless is off by default. None is
+/// applied from here: this is only what was chosen. `godot_policy` turns a rule into the settings
+/// the editor is told, and `godot_session` turns headless into a launch argument.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GodotSettings {
@@ -149,6 +150,10 @@ pub(crate) struct GodotSettings {
     /// The running game is embedded in the editor rather than given a window of its own.
     #[serde(default = "rule_is_enforced")]
     pub(crate) embed_game_window: bool,
+    /// The editor runs without a window. Every tool still answers; only the editor viewport
+    /// capture cannot, and the embed rule has nothing to embed into.
+    #[serde(default)]
+    pub(crate) headless: bool,
 }
 
 fn rule_is_enforced() -> bool {
@@ -160,6 +165,7 @@ impl Default for GodotSettings {
         Self {
             strict_typing: rule_is_enforced(),
             embed_game_window: rule_is_enforced(),
+            headless: false,
         }
     }
 }
@@ -817,13 +823,13 @@ impl Default for GoferSettings {
             version: SETTINGS_VERSION,
             ai: AiSettings::default(),
             godot: GodotSettings::default(),
+            mcp: McpSettings::default(),
         }
     }
 }
 
 impl Default for AiSettings {
     fn default() -> Self {
-            mcp: McpSettings::default(),
         Self {
             connection_type: AiConnectionType::Local,
             connections: default_connections(default_local_profile()),
@@ -1800,13 +1806,13 @@ fn default_settings_from_pi_path(path: &Path) -> Option<GoferSettings> {
             plan: PlanSettings::default(),
         },
         godot: GodotSettings::default(),
+        mcp: McpSettings::default(),
     })
 }
 
 pub(crate) fn write_settings(app: &AppHandle, settings: &GoferSettings) -> Result<(), String> {
     let path = settings_path(app)?;
     write_settings_to_path(&path, settings)
-        mcp: McpSettings::default(),
 }
 
 /// Stores the Godot rules alone, leaving everything else in the file as it was.
@@ -1830,12 +1836,6 @@ fn save_godot_settings_at(path: &Path, godot: GodotSettings) -> Result<GoferSett
     Ok(settings)
 }
 
-fn write_settings_to_path(path: &Path, settings: &GoferSettings) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("Gofer settings path has no parent: {}", path.display()))?;
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
 /// Stores the door's settings alone, minting a token when there is none. The one place a token
 /// is ever invented: a read must answer what the file says, or the server and the page disagree.
 pub(crate) fn save_mcp_settings(
@@ -1870,6 +1870,12 @@ fn validate_mcp(mut mcp: McpSettings) -> Result<McpSettings, String> {
     Ok(mcp)
 }
 
+fn write_settings_to_path(path: &Path, settings: &GoferSettings) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("Gofer settings path has no parent: {}", path.display()))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
     let contents = serde_json::to_string_pretty(settings)
         .map_err(|error| format!("Could not serialize Gofer settings: {error}"))?;
     fs::write(path, format!("{contents}\n"))
@@ -1900,13 +1906,13 @@ pub(crate) fn validate_settings(mut settings: GoferSettings) -> Result<GoferSett
     if settings.ai.connection().is_none() {
         return Err("The chosen AI driver has no connection configured".to_owned());
     }
+    settings.mcp = validate_mcp(std::mem::take(&mut settings.mcp))?;
     if settings.ai.max_retries > 10 {
         return Err("Maximum retries cannot exceed 10".to_owned());
     }
     if !(50..=100).contains(&settings.ai.compaction_percent) {
         return Err("Compaction threshold must be between 50 and 100 percent".to_owned());
     }
-    settings.mcp = validate_mcp(std::mem::take(&mut settings.mcp))?;
     if !(1_000..=3_600_000).contains(&settings.ai.timeout_ms) {
         return Err("Request timeout must be between 1,000 and 3,600,000 milliseconds".to_owned());
     }
@@ -3477,12 +3483,6 @@ mod tests {
         assert!(!loaded.godot.embed_game_window);
     }
 
-    /// The Godot tab writes on every tick of a checkbox, with no Save of its own. It must therefore
-    /// write the two rules and nothing else: a connection half-typed on another tab is still a
-    /// draft, and ticking a box is not the user asking for it to be stored.
-    #[test]
-    fn saving_the_godot_rules_leaves_the_rest_of_the_file_alone() {
-        let directory = TempDir::new().expect("temporary directory");
     /// Found live: the door started with a token nobody was told. Reading validates, and a
     /// validator that mints on an empty token hands every reader a different one and writes none
     /// down. A read answers what the file says; only a save mints.
@@ -3509,6 +3509,12 @@ mod tests {
         assert_eq!(again.mcp, loaded.mcp, "a save with a token keeps that token");
     }
 
+    /// The Godot tab writes on every tick of a checkbox, with no Save of its own. It must therefore
+    /// write the two rules and nothing else: a connection half-typed on another tab is still a
+    /// draft, and ticking a box is not the user asking for it to be stored.
+    #[test]
+    fn saving_the_godot_rules_leaves_the_rest_of_the_file_alone() {
+        let directory = TempDir::new().expect("temporary directory");
         let path = directory.path().join("settings.json");
         let stored =
             validate_settings(settings("http://localhost:9999/v1", "stored-model")).expect("valid");
@@ -3519,6 +3525,7 @@ mod tests {
             GodotSettings {
                 strict_typing: false,
                 embed_game_window: true,
+                headless: false,
             },
         )
         .expect("save godot settings");

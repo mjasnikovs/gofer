@@ -572,6 +572,12 @@
                     "name": "worktree",
                     "kind": "text",
                     "required": true
+                },
+                {
+                    "name": "headless",
+                    "kind": "flag",
+                    "required": true,
+                    "note": "Whether the editor runs without a window. It answers every tool but the editor capture."
                 }
             ]
         },

@@ -260,6 +260,7 @@ mod tests {
         GodotSettings {
             strict_typing: true,
             embed_game_window: true,
+            headless: false,
         }
     }
 
@@ -267,6 +268,7 @@ mod tests {
         GodotSettings {
             strict_typing: false,
             embed_game_window: false,
+            headless: false,
         }
     }
 

@@ -126,6 +126,9 @@ pub struct LaunchRequest {
     /// [`wants_wayland_driver`].
     #[serde(default)]
     pub embed_game_window: bool,
+    /// Whether the editor runs without a window. The game it launches still gets one.
+    #[serde(default)]
+    pub headless: bool,
 }
 
 /// Whether this launch has to ask Godot for its Wayland driver.
@@ -159,6 +162,7 @@ pub struct SessionInfo {
     pub dap_port: u16,
     pub godot_version: String,
     pub worktree: String,
+    pub headless: bool,
 }
 
 /// How serious one captured log line is. Godot marks its own lines, so the classification is the
@@ -397,6 +401,7 @@ pub struct GodotSession {
     dap_port: u16,
     godot_version: String,
     worktree: PathBuf,
+    headless: bool,
     token: String,
     child: Arc<Mutex<Box<dyn ChildProcess>>>,
     pub rpc: godot_rpc::RpcSession,
@@ -408,23 +413,19 @@ pub struct GodotSession {
     noticed_exit: AtomicBool,
 }
 
-struct StartGuard;
+/// The one start in flight. Held from before the addon is staged until the editor is spawned or
+/// the start has failed, so nothing a second start does can touch the worktree the first is
+/// launching from.
+pub struct StartClaim(());
 
-impl Drop for StartGuard {
+impl Drop for StartClaim {
     fn drop(&mut self) {
         SESSION_STARTING.store(false, Ordering::Release);
     }
 }
 
-/// Starts a Godot editor session bound to the given worktree.
-pub fn start(request: LaunchRequest) -> Result<SessionInfo, SessionError> {
-    start_with(request, &crate::process::SystemProcessSpawner)
-}
-
-fn start_with(
-    request: LaunchRequest,
-    spawner: &impl ProcessSpawner,
-) -> Result<SessionInfo, SessionError> {
+/// Claims the right to start, or reports the start already in flight.
+pub fn claim_start() -> Result<StartClaim, SessionError> {
     if SESSION_STARTING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
@@ -434,7 +435,42 @@ fn start_with(
             "Another Godot session is already starting",
         ));
     }
-    let _guard = StartGuard;
+    Ok(StartClaim(()))
+}
+
+/// Whether a claimed start has not finished yet — an editor about to exist, which no state
+/// derived from the session record can show.
+pub fn start_in_flight() -> bool {
+    SESSION_STARTING.load(Ordering::Acquire)
+}
+
+/// Starts a Godot editor session bound to the given worktree.
+pub fn start(request: LaunchRequest) -> Result<SessionInfo, SessionError> {
+    start_claimed(claim_start()?, request)
+}
+
+/// Starts the editor under a claim the caller already holds.
+pub fn start_claimed(
+    claim: StartClaim,
+    request: LaunchRequest,
+) -> Result<SessionInfo, SessionError> {
+    start_claimed_with(claim, request, &crate::process::SystemProcessSpawner)
+}
+
+#[cfg(test)]
+fn start_with(
+    request: LaunchRequest,
+    spawner: &impl ProcessSpawner,
+) -> Result<SessionInfo, SessionError> {
+    start_claimed_with(claim_start()?, request, spawner)
+}
+
+fn start_claimed_with(
+    claim: StartClaim,
+    request: LaunchRequest,
+    spawner: &impl ProcessSpawner,
+) -> Result<SessionInfo, SessionError> {
+    let _claim = claim;
 
     {
         let mut active = ACTIVE_SESSION
@@ -516,7 +552,10 @@ fn start_with(
         arguments.insert(0, OsString::from("--single-window"));
     }
     #[cfg(any(feature = "webdriver", all(test, feature = "godot-acceptance")))]
-    if std::env::var_os("GOFER_GODOT_HEADLESS").is_some() {
+    let headless = request.headless || std::env::var_os("GOFER_GODOT_HEADLESS").is_some();
+    #[cfg(not(any(feature = "webdriver", all(test, feature = "godot-acceptance"))))]
+    let headless = request.headless;
+    if headless {
         arguments.insert(0, OsString::from("--headless"));
     }
     if !arguments.iter().any(|argument| argument == "--headless")
@@ -574,6 +613,7 @@ fn start_with(
         dap_port,
         godot_version: godot_version.clone(),
         worktree,
+        headless,
         token,
         child,
         rpc,
@@ -725,6 +765,7 @@ impl ExternalEditor {
             dap_port,
             godot_version: REQUIRED_ENGINE_VERSION.to_owned(),
             worktree: worktree.display().to_string(),
+            headless: true,
         })
     }
 
@@ -1230,6 +1271,7 @@ fn session_info(session: &GodotSession) -> SessionInfo {
         dap_port: session.dap_port,
         godot_version: session.godot_version.clone(),
         worktree: session.worktree.display().to_string(),
+        headless: session.headless,
     }
 }
 
@@ -2212,6 +2254,7 @@ mod tests {
                 worktree: worktree.clone(),
                 binary: None,
                 embed_game_window: false,
+                headless: false,
             },
             &spawner,
         )
@@ -2263,6 +2306,7 @@ mod tests {
                 worktree,
                 binary: None,
                 embed_game_window: false,
+                headless: false,
             },
             &spawner,
         )
@@ -2282,6 +2326,47 @@ mod tests {
 
         stop().expect("stop session");
         unsafe { std::env::remove_var("GOFER_GODOT_EDITOR_SETTINGS") };
+    }
+
+    /// The headless choice reaches the launch as `--headless`, and the session reports it, which is
+    /// how the renderer knows not to offer an editor capture. The Wayland driver is never asked
+    /// for: a windowless editor has nothing to embed into, whatever the embed rule says.
+    #[test]
+    fn a_headless_session_is_launched_without_a_window_and_says_so() {
+        let _test = SESSION_TEST_LOCK.lock().expect("session test lock");
+        let (_directory, worktree) = workspace();
+        let (_settings_dir, settings_path) = settings_file_with("127.0.0.1");
+        unsafe {
+            std::env::set_var(
+                "GOFER_GODOT_EDITOR_SETTINGS",
+                settings_path.display().to_string(),
+            );
+            std::env::set_var("WAYLAND_DISPLAY", "wayland-1");
+        };
+        let spawner = FakeSpawner::new("4.7.2.stable");
+
+        let info = start_with(
+            LaunchRequest {
+                worktree,
+                binary: None,
+                embed_game_window: true,
+                headless: true,
+            },
+            &spawner,
+        )
+        .expect("start session");
+
+        assert!(info.headless);
+        let arguments = spawner.arguments.lock().expect("arguments");
+        assert!(arguments.contains(&OsString::from("--headless")));
+        assert!(!arguments.contains(&OsString::from("--display-driver")));
+        drop(arguments);
+
+        stop().expect("stop session");
+        unsafe {
+            std::env::remove_var("GOFER_GODOT_EDITOR_SETTINGS");
+            std::env::remove_var("WAYLAND_DISPLAY");
+        };
     }
 
     /// The driver the rule needs reaches the launch, and it reaches it as a pair.
@@ -2308,6 +2393,7 @@ mod tests {
                 worktree,
                 binary: None,
                 embed_game_window: true,
+                headless: false,
             },
             &spawner,
         )
@@ -2344,6 +2430,7 @@ mod tests {
                 worktree,
                 binary: None,
                 embed_game_window: false,
+                headless: false,
             },
             &spawner,
         )
@@ -2375,6 +2462,7 @@ mod tests {
                 worktree: worktree.clone(),
                 binary: None,
                 embed_game_window: false,
+                headless: false,
             },
             &first,
         )
@@ -2386,6 +2474,7 @@ mod tests {
                 worktree: worktree.clone(),
                 binary: None,
                 embed_game_window: false,
+                headless: false,
             },
             &second,
         )
@@ -2414,6 +2503,7 @@ mod tests {
                 worktree,
                 binary: None,
                 embed_game_window: false,
+                headless: false,
             },
             &replacement,
         )
@@ -2441,6 +2531,7 @@ mod tests {
                 worktree,
                 binary: None,
                 embed_game_window: false,
+                headless: false,
             },
             &spawner,
         )
@@ -2468,6 +2559,7 @@ mod tests {
                 worktree,
                 binary: None,
                 embed_game_window: false,
+                headless: false,
             },
             &spawner,
         )
@@ -2495,6 +2587,7 @@ mod tests {
                 worktree,
                 binary: None,
                 embed_game_window: false,
+                headless: false,
             },
             &spawner,
         )
@@ -2507,6 +2600,7 @@ mod tests {
                     worktree: PathBuf::from("/tmp"),
                     binary: None,
                     embed_game_window: false,
+                    headless: false,
                 },
                 &spawner
             )
@@ -3272,6 +3366,7 @@ mod tests {
                 dap_port: 0,
                 godot_version: REQUIRED_ENGINE_VERSION.to_owned(),
                 worktree: worktree.path().display().to_string(),
+                headless: true,
             },
         ))));
 

@@ -8,7 +8,7 @@
 //!
 //! Every field is read by serde and by nothing else, which is what the allow above is for.
 
-// GENERATED-BEGIN results sha256:0fdb2f8493c964a9
+// GENERATED-BEGIN results sha256:2eb5ed97ae456490
 /// One node of a scene tree, and the nodes under it.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -199,6 +199,7 @@ pub struct GodotSession {
     #[serde(default)]
     pub godot_version: Option<String>,
     pub worktree: String,
+    pub headless: bool,
 }
 
 /// One captured line of the session output.

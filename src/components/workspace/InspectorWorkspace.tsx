@@ -26,6 +26,7 @@ import {Text} from '@astryxdesign/core/Text'
 import {Toolbar} from '@astryxdesign/core/Toolbar'
 import {useDebugSession} from '../../hooks/useDebugSession'
 import {EditorSessionContext, useEditorSession} from '../../hooks/useEditorSession'
+import {useGodotHeadless} from '../../hooks/useGodotHeadless'
 import {useGodotSession} from '../../hooks/useGodotSession'
 import {useScriptBuffers} from '../../hooks/useScriptBuffers'
 import {OpenCenterTabContext} from '../../hooks/useCenterTab'
@@ -53,8 +54,8 @@ import {ChangesView} from './ChangesView'
 import {DocsView} from './DocsView'
 import {MemoryView} from './MemoryView'
 import {SketchesView} from './SketchesView'
-import {SkillsView} from './SkillsView'
 import {BoardView} from './BoardView'
+import {SkillsView} from './SkillsView'
 import {ExplorerPanel} from './ExplorerPanel'
 import {GameView} from './GameView'
 import {InspectorPanel} from './InspectorPanel'
@@ -242,6 +243,7 @@ function FrameRegions({
 
     const isOffline = isSessionOffline(state)
     const isPlaying = isSessionPlaying(state)
+    const headless = useGodotHeadless()
 
     const breakpoints = useMemo<readonly DebugSourceBreakpoints[]>(
         () =>
@@ -390,15 +392,14 @@ function FrameRegions({
                                         variant={STATE_VARIANT[state]}
                                         label={`Editor: ${state}`}
                                     />
-                                    <Text
-                                        type='supporting'
-                                        color='secondary'
-                                    >
-                                        {isOffline ?
-                                            'Editor stopped'
-                                        :   `${session?.godotVersion ?? 'Godot'} · ${scenePath === '' ? 'no scene open' : scenePath}${scene?.dirty === true ? ' •' : ''}`
-                                        }
-                                    </Text>
+                                    {isOffline ? null : (
+                                        <Text
+                                            type='supporting'
+                                            color='secondary'
+                                        >
+                                            {`${session?.godotVersion ?? 'Godot'}${session?.headless === true ? ' · headless' : ''} · ${scenePath === '' ? 'no scene open' : scenePath}${scene?.dirty === true ? ' •' : ''}`}
+                                        </Text>
+                                    )}
                                 </HStack>
                             }
                             endContent={
@@ -441,6 +442,16 @@ function FrameRegions({
                                             else void stop()
                                         }}
                                     />
+                                    {isOffline && !isNarrow ?
+                                        <Switch
+                                            label='Headless'
+                                            size='sm'
+                                            value={headless.headless}
+                                            isLoading={headless.isSaving}
+                                            isDisabled={isBusy}
+                                            changeAction={next => headless.setHeadless(next)}
+                                        />
+                                    :   null}
                                 </HStack>
                             }
                         />
@@ -518,6 +529,12 @@ function FrameRegions({
                                         isLabelHidden={isCentreCompact}
                                         {...CHANGES_TAB}
                                     />
+                                    <Tab
+                                        value='board'
+                                        label='Board'
+                                        isLabelHidden={isCentreCompact}
+                                        {...BOARD_TAB}
+                                    />
                                 </TabList>
                             </HStack>
                         </StackItem>
@@ -529,12 +546,6 @@ function FrameRegions({
                                 >
                                     <OpenCenterTabContext value={openCenterTab}>
                                         {chat}
-                                    <Tab
-                                        value='board'
-                                        label='Board'
-                                        isLabelHidden={isCentreCompact}
-                                        {...BOARD_TAB}
-                                    />
                                     </OpenCenterTabContext>
                                 </VStack>
                             : layout.centerTab === 'scripts' ?
@@ -552,6 +563,8 @@ function FrameRegions({
                                 <MemoryView />
                             : layout.centerTab === 'skills' ?
                                 <SkillsView />
+                            : layout.centerTab === 'board' ?
+                                <BoardView />
                             : layout.centerTab === 'changes' ?
                                 <ChangesView
                                     isSideBySide={layout.isDiffSideBySide}
@@ -563,8 +576,6 @@ function FrameRegions({
                         </StackItem>
                         <Divider />
                         <VStack
-                            : layout.centerTab === 'board' ?
-                                <BoardView />
                             gap={0}
                             height={layout.isBottomCollapsed ? 'auto' : BOTTOM_HEIGHT}
                         >

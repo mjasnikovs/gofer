@@ -94,9 +94,9 @@ export type AiModelOption = Readonly<{
 export type GodotSettings = Readonly<{
     strictTyping: boolean
     embedGameWindow: boolean
+    headless: boolean
 }>
 
-export type GoferSettings = Readonly<{
 export type McpSettings = Readonly<{
     port: number
     token: string
@@ -110,11 +110,12 @@ export type McpStatus = Readonly<{
 
 export const DEFAULT_MCP_SETTINGS: McpSettings = {port: 47831, token: ''}
 
+export type GoferSettings = Readonly<{
     version: 2
     ai: AiSettings
     godot: GodotSettings
-}>
     mcp: McpSettings
+}>
 
 export type SettingsResponse = Readonly<{
     settings: GoferSettings
@@ -273,7 +274,8 @@ export function retriesLabel(retries: number) {
 
 export const DEFAULT_GODOT_SETTINGS: GodotSettings = {
     strictTyping: true,
-    embedGameWindow: true
+    embedGameWindow: true,
+    headless: false
 }
 
 export function normalizeSettings(settings: GoferSettings): GoferSettings {
@@ -281,9 +283,9 @@ export function normalizeSettings(settings: GoferSettings): GoferSettings {
     return {
         ...settings,
         godot: {...DEFAULT_GODOT_SETTINGS, ...settings.godot},
+        mcp: {...DEFAULT_MCP_SETTINGS, ...settings.mcp},
         ai: {
             ...tuning,
-        mcp: {...DEFAULT_MCP_SETTINGS, ...settings.mcp},
             ...settings.ai,
             connections: {...settings.ai.connections},
             subagent: {...DEFAULT_SUBAGENT_SETTINGS, ...settings.ai.subagent},

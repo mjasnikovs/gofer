@@ -167,18 +167,20 @@ export function GameView() {
                                 run('runtime.capture')
                             }}
                         />
-                        <Button
-                            label='Capture editor'
-                            size='sm'
-                            variant='ghost'
-                            isIconOnly
-                            icon={<Icon icon={ViewfinderCircleIcon} />}
-                            tooltip='Capture editor'
-                            isDisabled={isOffline || busy.has('runtime.capture:editor')}
-                            clickAction={() => {
-                                run('runtime.capture', 'editor')
-                            }}
-                        />
+                        {session?.headless === true ? null : (
+                            <Button
+                                label='Capture editor'
+                                size='sm'
+                                variant='ghost'
+                                isIconOnly
+                                icon={<Icon icon={ViewfinderCircleIcon} />}
+                                tooltip='Capture editor'
+                                isDisabled={isOffline || busy.has('runtime.capture:editor')}
+                                clickAction={() => {
+                                    run('runtime.capture', 'editor')
+                                }}
+                            />
+                        )}
                     </HStack>
                 }
             />

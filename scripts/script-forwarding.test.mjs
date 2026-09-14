@@ -45,7 +45,7 @@ test('an edit of a script goes through script.edit with the same anchors', async
     assert.deepEqual(below, [])
     assert.match(
         answer.content[0].text,
-        /^edit does not touch a \.gd, so this went through script\.edit: /u
+        /^edit touches a \.gd, so this went through script\.edit: /u
     )
     assert.match(answer.content[0].text, /diagnostics/u)
 })
@@ -84,6 +84,6 @@ test("the server's refusal comes back named as the operation that refused it", a
             path: 'a.gd',
             edits: [{oldText: 'x', newText: 'y'}]
         }),
-        /^Error: edit does not touch a \.gd, so this went through script\.edit, which refused it\. anchor_not_found/u
+        /^Error: edit touches a \.gd, so this went through script\.edit, which refused it\. anchor_not_found/u
     )
 })

@@ -35,6 +35,7 @@ export type GodotSessionSummary = Readonly<{
     dapPort: number
     godotVersion: string | undefined
     worktree: string
+    headless: boolean
 }>
 
 export type StartGodotSessionRequest = Readonly<Record<string, never>>

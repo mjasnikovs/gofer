@@ -185,6 +185,22 @@ describe('InspectorWorkspace', () => {
         expect(server.log.calls).toContain('scene.get_tree')
     })
 
+    it('lets the user choose a headless editor only while none is running', async () => {
+        const server = backend()
+        const user = userEvent.setup()
+        await renderWorkspace()
+        await flush()
+
+        const headless = () => screen.getByRole('switch', {name: 'Headless'})
+        expect(headless()).not.toBeChecked()
+        await user.click(headless())
+        await flushUntil(() => server.state.settings.settings.godot.headless)
+        expect(headless()).toBeChecked()
+
+        await startSession(user)
+        expect(screen.queryByRole('switch', {name: 'Headless'})).not.toBeInTheDocument()
+    })
+
     it('stops presenting an editor whose process is gone, within one tick', async () => {
         driveTheTick()
         const server = backend()
@@ -199,7 +215,7 @@ describe('InspectorWorkspace', () => {
         })
         await flush()
 
-        expect(screen.getByText('Editor stopped')).toBeInTheDocument()
+        expect(screen.getByRole('switch', {name: 'Headless'})).toBeInTheDocument()
         expect(startSessionButton()).toBeInTheDocument()
     })
 

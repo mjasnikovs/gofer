@@ -14,7 +14,8 @@ const SESSION: GodotSessionSummary = {
     lspPort: 6005,
     dapPort: 6006,
     godotVersion: 'Godot Engine v4.7.2.stable',
-    worktree: '/home/dev/game'
+    worktree: '/home/dev/game',
+    headless: false
 }
 
 const SCENE = {path: 'res://main.tscn', revision: 3, dirty: false}

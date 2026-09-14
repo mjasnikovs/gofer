@@ -161,7 +161,8 @@ export const SESSION = {
     lspPort: 6005,
     dapPort: 6006,
     godotVersion: '4.7.2.stable',
-    worktree: '/tmp/task'
+    worktree: '/tmp/task',
+    headless: false
 }
 
 export const SCRIPT = 'extends Node\n\nfunc _ready():\n\tpass\n'
@@ -299,9 +300,9 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
         briefs: new Map(Object.entries(options.briefs ?? {})),
         memories: [...(options.memories ?? [])],
         sketches: [...(options.sketches ?? [])],
-        changes: options.changes ?? NO_CHANGES,
         cards: [...(options.cards ?? [])],
         comments: [...(options.comments ?? [])],
+        changes: options.changes ?? NO_CHANGES,
         diffs: new Map(Object.entries(options.diffs ?? {})),
         skills: new Map((options.skills ?? []).map(one => [one.skill.name, one])),
         sketchHtml: options.sketchHtml ?? SKETCH_HTML,
@@ -329,7 +330,6 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
 
     const currentTask = () => state.tasks.find(task => task.isCurrent)
 
-    let stamped = 1_700_000_000_000
     const cardOf = (id: string) => {
         const card = state.cards.find(one => one.id === id)
         if (!card) throw new CommandFailure('card_not_found', 'The card was not found')
@@ -341,6 +341,7 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
         return changed
     }
 
+    let stamped = 1_700_000_000_000
     const stamp = () => {
         stamped += 1
         return stamped
@@ -465,7 +466,6 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
                 }
                 return state.settings
             }
-            case 'read_agent_prompt':
             case 'save_mcp_settings': {
                 const mcp = payload['mcp'] as GoferSettings['mcp']
                 state.settings = {
@@ -476,6 +476,7 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
             }
             case 'mcp_status':
                 return options.mcpStatus ?? {url: 'http://127.0.0.1:47831/mcp', error: null}
+            case 'read_agent_prompt':
             case 'save_agent_prompt':
                 return options.agentPrompt ?? PROMPT
             case 'get_rag_cache_status':
@@ -557,7 +558,6 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
             case 'list_project_sketches':
                 return [...state.sketches]
 
-            case 'list_task_changes':
             case 'board_list':
                 return [...state.cards]
             case 'card_read': {
@@ -607,6 +607,7 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
                 return chatOf(task.id)
             }
 
+            case 'list_task_changes':
                 return state.changes
 
             case 'read_task_change': {

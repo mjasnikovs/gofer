@@ -2003,7 +2003,7 @@ describe('the live workspace', () => {
     describe('shutting the session down', () => {
         it('stops the editor and removes the staged addon', async () => {
             await clickButton('Stop Godot')
-            await expectText(['Editor stopped', 'Start Godot'], {limitMs: 60_000})
+            await expectText(['Headless', 'Start Godot'], {limitMs: 60_000})
             expect(existsSync(join(bound, 'addons/gofer'))).toBe(false)
         })
 
@@ -2032,7 +2032,7 @@ describe('the live workspace', () => {
         })
 
         it('leaves the session offline rather than half started', async () => {
-            await expectText(['Start Godot', 'Editor stopped'], {allow: REFUSAL})
+            await expectText(['Start Godot', 'Headless'], {allow: REFUSAL})
         })
     })
 

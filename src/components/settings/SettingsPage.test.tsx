@@ -443,7 +443,7 @@ describe('the Godot rules', () => {
         await user.click(screen.getByLabelText(/Enforce strict typing/))
         await flush()
 
-        expect(savedGodot()).toEqual({strictTyping: false, embedGameWindow: true})
+        expect(savedGodot()).toEqual({strictTyping: false, embedGameWindow: true, headless: false})
         expect(screen.getByLabelText(/Enforce strict typing/)).not.toBeChecked()
         expect(screen.getByLabelText(/Enforce game window inline/)).toBeChecked()
     })
@@ -460,7 +460,7 @@ describe('the Godot rules', () => {
         await flush()
 
         expect(tauri.invoke).not.toHaveBeenCalledWith('save_settings', expect.anything())
-        expect(savedGodot()).toEqual({strictTyping: true, embedGameWindow: false})
+        expect(savedGodot()).toEqual({strictTyping: true, embedGameWindow: false, headless: false})
     })
 
     it('puts the tick back when the write fails, and says why', async () => {

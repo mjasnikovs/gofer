@@ -1925,6 +1925,7 @@ fn the_editor_takes_every_rule_gofer_enforces() {
         GodotSettings {
             strict_typing: true,
             embed_game_window: true,
+            headless: false,
         },
     );
     for warning in STRICT_TYPING_WARNINGS {
@@ -1947,6 +1948,7 @@ fn the_editor_takes_every_rule_gofer_enforces() {
         GodotSettings {
             strict_typing: false,
             embed_game_window: false,
+            headless: false,
         },
     );
     for warning in STRICT_TYPING_WARNINGS {

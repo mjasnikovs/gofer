@@ -387,12 +387,31 @@ fn route<R: Runtime>(
             params,
             |params| run_one(app, entry.domain, entry.operation, params),
             || {
-                godot_session_api::start_session(app, StartGodotSessionRequest {})?;
+                joining_a_start_in_flight(godot_session_api::start_session(
+                    app,
+                    StartGodotSessionRequest {},
+                ))?;
                 the_editor_once_it_can_answer(app).map(|_| ())
             },
         )
     };
     run_in_order(entries, step)
+}
+
+/// A start refused because another is in flight is a start to wait on, not a failure.
+///
+/// Two entries of one call, run side by side, both meet no session and both start one. The second
+/// used to answer the model "another session is already starting", and the edit it carried was
+/// lost. The editor it is told about is the one it needs, so it waits for that one the way the
+/// first entry does.
+fn joining_a_start_in_flight<T>(
+    started: Result<T, godot_session::SessionError>,
+) -> Result<(), ToolFailure> {
+    match started {
+        Ok(_) => Ok(()),
+        Err(error) if error.code == "session_already_starting" => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// The gated entries of a call, grouped by the domain whose name the dialog names, in list order.
@@ -1108,7 +1127,9 @@ fn the_editor_once_it_can_answer<R: Runtime>(
             | godot_session::SessionState::DebugPaused => {
                 return Ok(godot_session_api::get_session(app)?);
             }
-            godot_session::SessionState::Offline => return Err(the_editor_never_came_up()),
+            godot_session::SessionState::Offline if !godot_session::start_in_flight() => {
+                return Err(the_editor_never_came_up());
+            }
             godot_session::SessionState::Error if godot_session::editor_has_exited() => {
                 return Err(the_editor_never_came_up());
             }
@@ -3216,6 +3237,23 @@ mod tests {
         }
     }
 
+    /// A start another entry of the same call already began is joined, not reported.
+    #[test]
+    fn a_start_already_in_flight_is_waited_on_rather_than_refused() {
+        use crate::godot_session::SessionError;
+        joining_a_start_in_flight(Err::<(), _>(SessionError::new(
+            "session_already_starting",
+            "Another Godot session is already starting",
+        )))
+        .expect("the entry waits on the start in flight");
+        let refused = joining_a_start_in_flight(Err::<(), _>(SessionError::new(
+            "not_a_godot_project",
+            "no project.godot",
+        )))
+        .expect_err("any other refusal is the answer");
+        assert_eq!(refused.code, "not_a_godot_project");
+    }
+
     /// Issue #5. An editor operation asked with no session started one and answered, instead of
     /// refusing with a code the model can do nothing about.
     #[test]
@@ -4013,6 +4051,7 @@ mod tests {
         let relaxed = crate::settings::GodotSettings {
             strict_typing: false,
             embed_game_window: false,
+            headless: false,
         };
         let warning = json!({
             "name": "debug/gdscript/warnings/unsafe_method_access",

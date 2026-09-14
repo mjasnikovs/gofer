@@ -76,9 +76,18 @@ export function useGodotTab(view: SettingsView): SettingsTabView {
                                 label='Enforce game window inline'
                                 value={draft.godot.embedGameWindow}
                                 isLoading={busy.savingGodot}
-                                description='The running game is drawn inside the editor and cannot be torn out into a window of its own.'
+                                description='The running game is drawn inside the editor and cannot be torn out into a window of its own. A headless editor has nothing to draw into, so the game gets its own window regardless.'
                                 onChange={embedGameWindow => {
                                     void saveGodotSettings({embedGameWindow})
+                                }}
+                            />
+                            <CheckboxInput
+                                label='Run the editor headless'
+                                value={draft.godot.headless}
+                                isLoading={busy.savingGodot}
+                                description='The editor runs without a window. Every tool still answers; only the editor capture cannot. The game still opens its own window.'
+                                onChange={headless => {
+                                    void saveGodotSettings({headless})
                                 }}
                             />
                         </FormLayout>
