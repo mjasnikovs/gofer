@@ -184,6 +184,11 @@ test('a question is parsed, and NONE ends the round', () => {
     assert.equal(parseQuestion('NONE'), null)
     assert.equal(parseQuestion('  '), null)
     assert.equal(parseQuestion('I have no questions for you.'), null)
+    assert.equal(
+        parseQuestion('QUESTION: nothing settles here that the constraints do not already settle'),
+        null
+    )
+    assert.equal(parseQuestion('QUESTION: Which colour?\nA: red\nWHY: taste'), null)
 })
 
 test('only an ANSWER tag settles a question', () => {
@@ -251,6 +256,11 @@ test('the whole Q&A travels into the next question, answers included', async () 
     assert.match(worker.calls[1].prompt, /Where does the menu live\?/u)
     // The answer is the half that was missing: without it a later question cannot react.
     assert.match(worker.calls[1].prompt, /inside the HUD/u)
+    // On the tail, after the task, so every round shares the prompt prefix before it.
+    assert.ok(
+        worker.calls[1].prompt.indexOf('DECISIONS SO FAR')
+            > worker.calls[1].prompt.indexOf('TASK\n')
+    )
 })
 
 test('a skip is recorded as a decision, not as a missing answer', async () => {

@@ -35,7 +35,7 @@
 //! an editor. The prompt A/B that measured the strict-typing line ran on those two files.
 
 use crate::ai_tools;
-use crate::ai_turn::{AiWorkerMessage, ChatSender, Job, JobContext};
+use crate::ai_turn::{AiWorkerImage, AiWorkerMessage, ChatSender, Job, JobContext};
 use crate::godot_editor_harness::{self, Transports, free_port};
 use crate::process::SystemProcessSpawner;
 use crate::settings::AiSettings;
@@ -60,8 +60,42 @@ fn live_worktree(directory: &TempDir) -> PathBuf {
             crate::paths::canonical(&worktree).expect("canonical worktree")
         }
     };
+    silence_the_game(&worktree);
     make_it_a_repository(&worktree);
     worktree
+}
+
+/// A game the turn plays has a window on the virtual display but its sound goes to the real
+/// speakers; the model cannot hear, so nothing is lost. Committed with the fixture so it is not a
+/// change the turn is blamed for.
+fn silence_the_game(worktree: &std::path::Path) {
+    let project = worktree.join("project.godot");
+    let Ok(text) = std::fs::read_to_string(&project) else {
+        return;
+    };
+    let _ = std::fs::write(
+        project,
+        format!("{text}\n[audio]\n\ndriver/driver=\"Dummy\"\n"),
+    );
+}
+
+/// The picture `GOFER_LIVE_IMAGE` names, attached to the ask the way the application attaches a
+/// pasted screenshot; none when the variable is unset.
+fn attached_image() -> Vec<AiWorkerImage> {
+    use base64::Engine as _;
+    let Ok(path) = std::env::var("GOFER_LIVE_IMAGE") else {
+        return Vec::new();
+    };
+    let bytes = std::fs::read(&path).expect("GOFER_LIVE_IMAGE names a readable file");
+    let mime_type = if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+        "image/jpeg"
+    } else {
+        "image/png"
+    };
+    vec![AiWorkerImage {
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        mime_type: mime_type.to_owned(),
+    }]
 }
 
 /// Answers the prompts a turn raises, because nothing else here can.
@@ -333,9 +367,34 @@ fn live_agent_acceptance() {
     let directory = TempDir::new().expect("temporary directory");
     let worktree = live_worktree(&directory);
     let app = mock_app();
+    // SAFETY: the acceptance runner gives each test its own process.
+    unsafe {
+        std::env::set_var(
+            "GOFER_RAG_CACHE_DIR",
+            std::env::var("HOME")
+                .map(|home| format!("{home}/.cache/gofer-rag"))
+                .expect("HOME"),
+        );
+    }
+
     let data = TempDir::new().expect("temporary application data");
+    // `GOFER_LIVE_DATA_ROOT` names a copy of a real project's `.gofer`, so a turn can be given the
+    // memories the application would recall for it; the copy is written to, so never the original.
+    let data_root = std::env::var("GOFER_LIVE_DATA_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| data.path().to_path_buf());
     let storage =
-        crate::storage::ProjectStorage::open(data.path(), &worktree).expect("open project storage");
+        crate::storage::ProjectStorage::open(&data_root, &worktree).expect("open project storage");
+    // The application recalls memories for every turn; a live turn does only when asked, because
+    // a fixture has none and the retrieval needs the embedding cache.
+    let memory_context = std::env::var("GOFER_LIVE_MEMORY")
+        .ok()
+        .filter(|on| on == "on")
+        .and_then(|_| {
+            let recalled = crate::project_memory::retrieve_memory_context(&storage, &task, None);
+            println!("memory context: {recalled:?}");
+            recalled.ok()
+        });
     if let Ok(title) = std::env::var("GOFER_LIVE_CARD") {
         hand_the_task_a_card(&storage, &title, &task);
     }
@@ -345,16 +404,6 @@ fn live_agent_acceptance() {
     for call in crate::godot_policy::policy_calls(&crate::settings::GodotSettings::default()) {
         let answered = session.try_call(call.command, call.params.clone(), None);
         println!("policy {} -> {answered:?}", call.command);
-    }
-
-    // SAFETY: the acceptance runner gives each test its own process.
-    unsafe {
-        std::env::set_var(
-            "GOFER_RAG_CACHE_DIR",
-            std::env::var("HOME")
-                .map(|home| format!("{home}/.cache/gofer-rag"))
-                .expect("HOME"),
-        );
     }
 
     let trace = out.with_extension("jsonl");
@@ -403,11 +452,11 @@ fn live_agent_acceptance() {
                 sender: ChatSender::User,
                 text: task.clone(),
                 timestamp: 1,
-                images: Vec::new(),
+                images: attached_image(),
             }],
             agent_messages: None,
             is_retry: false,
-            memory_context: None,
+            memory_context,
         }),
         &SystemProcessSpawner,
     );

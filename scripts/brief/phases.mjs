@@ -201,10 +201,14 @@ export function parseQuestion(text) {
     if (!question) return null
     const a = /^A:\s*(.+)$/mu.exec(body)
     const b = /^B:\s*(.+)$/mu.exec(body)
+    // Measured on the local model at medium: "QUESTION: nothing settles here that the
+    // constraints don't already settle" arrived twice in one round, with no A and no B. That is
+    // NONE written in the wrong shape, not a question a person can answer.
+    if (!a || !b) return null
     const why = /^WHY:\s*(.+)$/mu.exec(body)
     return {
         question: question[1].trim(),
-        options: [a?.[1].trim(), b?.[1].trim()].filter(Boolean),
+        options: [a[1].trim(), b[1].trim()],
         why: why?.[1].trim() ?? ''
     }
 }
