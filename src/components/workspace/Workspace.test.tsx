@@ -11,6 +11,12 @@ import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../../te
 import {flush} from '../../test/flush'
 import {installBackend} from '../../test/backend'
 import {setTurnRunning} from '../../services/turn-activity'
+import {
+    AUTO_LINE,
+    autopilotState,
+    clearAutopilot,
+    setAutopilot
+} from '../../services/board-autopilot'
 import type {BriefEvent} from '../../models/brief'
 import type {Backend, BackendAnswers} from '../../test/backend'
 import {sketchMessage} from '../../models/sketch'
@@ -1241,5 +1247,123 @@ describe('Workspace chat scroll', () => {
         await reopenChat(user)
 
         expect(screen.getByTestId('chat-scroll').scrollTop).toBe(BOTTOM)
+    })
+})
+
+describe('Workspace under auto mode', () => {
+    const CARD = {id: 'card-1', number: 1, taskId: 'task-1'}
+
+    afterEach(clearAutopilot)
+
+    it('sends the card’s ask with the auto line once the draft and pictures have arrived', async () => {
+        server = installBackend(tauri, {
+            answers: {send_ai_message: runTurn},
+            stored: {'ui.draft.task-1': 'Make the hero jump higher'}
+        })
+        setAutopilot({phase: 'opening', card: CARD, send: {taskId: 'task-1', then: 'running'}})
+        render(<Workspace taskId='task-1' />)
+        await flush()
+        await flush()
+
+        expect(sent).toHaveLength(1)
+        expect(sent[0]?.messages.at(-1)?.text).toBe(`Make the hero jump higher\n\n${AUTO_LINE}`)
+        expect(autopilotState().send).toBeUndefined()
+    })
+
+    it('reports how the turn ended, for the loop’s task only', async () => {
+        server = installBackend(tauri, {
+            answers: {send_ai_message: runTurn},
+            stored: {'ui.draft.task-1': 'Make the hero jump higher'}
+        })
+        setAutopilot({phase: 'opening', card: CARD, send: {taskId: 'task-1', then: 'running'}})
+        render(<Workspace taskId='task-1' />)
+        await flush()
+        await flush()
+
+        expect(autopilotState()).toEqual({phase: 'running', card: CARD, ended: 'complete'})
+    })
+
+    it('sends the text it was handed instead of the draft, when there is one', async () => {
+        server = installBackend(tauri, {
+            answers: {send_ai_message: runTurn},
+            stored: {'ui.draft.task-1': 'left in the composer'}
+        })
+        setAutopilot({
+            phase: 'opening',
+            card: CARD,
+            resolvedOnce: true,
+            send: {taskId: 'task-1', text: 'resolve player.gd', then: 'resolving'}
+        })
+        render(<Workspace taskId='task-1' />)
+        await flush()
+        await flush()
+
+        expect(sent[0]?.messages.at(-1)?.text).toBe('resolve player.gd')
+        expect(autopilotState().phase).toBe('resolving')
+    })
+
+    it('leaves another task’s send alone', async () => {
+        server = installBackend(tauri, {
+            answers: {send_ai_message: runTurn},
+            stored: {'ui.draft.task-1': 'Make the hero jump higher'}
+        })
+        setAutopilot({
+            phase: 'opening',
+            card: {...CARD, taskId: 'task-2'},
+            send: {taskId: 'task-2', then: 'running'}
+        })
+        render(<Workspace taskId='task-1' />)
+        await flush()
+        await flush()
+
+        expect(sent).toHaveLength(0)
+        expect(autopilotState().send?.taskId).toBe('task-2')
+    })
+
+    it('sends the card’s pictures with the ask, and stops by name when they cannot be saved', async () => {
+        const picture = {id: 'shot-1', name: 'shot.png', mimeType: 'image/png', size: 3}
+        server = installBackend(tauri, {
+            answers: {
+                send_ai_message: runTurn,
+                save_chat_attachment: () => {
+                    throw new Error('disk full')
+                }
+            },
+            stored: {
+                'ui.draft.task-1': 'Make the hero jump higher',
+                'ui.draftAttachments.task-1': [picture]
+            }
+        })
+        setAutopilot({phase: 'opening', card: CARD, send: {taskId: 'task-1', then: 'running'}})
+        render(<Workspace taskId='task-1' />)
+        await flush()
+        await flush()
+        await flush()
+
+        expect(sent).toHaveLength(0)
+        expect(tauri.invoke).toHaveBeenCalledWith('save_chat_attachment', {
+            request: {attachment: picture, data: 'aGk='}
+        })
+        expect(autopilotState()).toEqual({
+            phase: 'off',
+            stop: 'send-failed',
+            detail: 'Error: disk full'
+        })
+    })
+
+    it('reports the turn as lost when the task is left while it runs', async () => {
+        server = installBackend(tauri, {
+            answers: {send_ai_message: () => new Promise(() => undefined)},
+            stored: {'ui.draft.task-1': 'Make the hero jump higher'}
+        })
+        setAutopilot({phase: 'opening', card: CARD, send: {taskId: 'task-1', then: 'running'}})
+        render(<Workspace taskId='task-1' />)
+        await flush()
+        await flush()
+        expect(autopilotState().phase).toBe('running')
+
+        cleanup()
+
+        expect(autopilotState()).toEqual({phase: 'running', card: CARD, ended: 'lost'})
     })
 })

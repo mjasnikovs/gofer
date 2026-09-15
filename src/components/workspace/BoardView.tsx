@@ -1,4 +1,4 @@
-import {useCallback, useEffect, useRef, useState} from 'react'
+import {useCallback, useEffect, useRef, useState, useSyncExternalStore} from 'react'
 import type {KeyboardEvent, ReactNode} from 'react'
 import {Badge} from '@astryxdesign/core/Badge'
 import {Banner} from '@astryxdesign/core/Banner'
@@ -10,6 +10,7 @@ import {Divider} from '@astryxdesign/core/Divider'
 import {Item} from '@astryxdesign/core/Item'
 import {Layout, LayoutContent, LayoutFooter} from '@astryxdesign/core/Layout'
 import {Selector} from '@astryxdesign/core/Selector'
+import {Switch} from '@astryxdesign/core/Switch'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {Text} from '@astryxdesign/core/Text'
 import {TextArea} from '@astryxdesign/core/TextArea'
@@ -32,6 +33,13 @@ import {
     watchBoard
 } from '../../services/board'
 import {isTauri} from '../../services/desktop'
+import {
+    autopilotState,
+    autopilotStatus,
+    startAutopilot,
+    stopAutopilot,
+    watchAutopilot
+} from '../../services/board-autopilot'
 import {listPendingChanges} from '../../services/task-actions'
 import {CARD_STATUSES, CARD_STATUS_LABELS, cardsIn} from '../../models/board'
 import type {Card, CardDetail, CardStatus} from '../../models/board'
@@ -110,6 +118,8 @@ export function BoardView() {
     }, [refresh])
 
     const all = cards ?? []
+    const autopilot = useSyncExternalStore(watchAutopilot, autopilotState, autopilotState)
+    const autoStatus = autopilotStatus(autopilot)
 
     return (
         <VStack
@@ -122,14 +132,34 @@ export function BoardView() {
                 align='center'
             >
                 <StackItem size='fill'>
-                    <Text
-                        type='supporting'
-                        color='secondary'
-                    >
-                        What is asked, what is being done, and what was reviewed. Other agents write
-                        here too.
-                    </Text>
+                    <VStack gap={1}>
+                        <Text
+                            type='supporting'
+                            color='secondary'
+                        >
+                            What is asked, what is being done, and what was reviewed. Other agents
+                            write here too.
+                        </Text>
+                        {autoStatus !== '' && <Text type='supporting'>{autoStatus}</Text>}
+                        {autopilot.detail !== undefined && (
+                            <Text
+                                type='supporting'
+                                color='secondary'
+                            >
+                                {autopilot.detail}
+                            </Text>
+                        )}
+                    </VStack>
                 </StackItem>
+                <Switch
+                    label='Auto'
+                    size='sm'
+                    value={autopilot.phase !== 'off'}
+                    onChange={on => {
+                        if (on) startAutopilot()
+                        else stopAutopilot()
+                    }}
+                />
                 <Button
                     label='New card'
                     size='sm'

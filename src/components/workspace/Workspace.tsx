@@ -25,6 +25,15 @@ import {
 } from '../../services/ui-state'
 import {isStoredAttachment} from '../../services/chat-storage'
 import {isTurnRunning, watchTurn} from '../../services/turn-activity'
+import {
+    AUTO_LINE,
+    autopilotState,
+    autopilotTurnEnded,
+    stopAutopilot,
+    takeAutopilotSend,
+    watchAutopilot
+} from '../../services/board-autopilot'
+import {conflictPrompt} from '../../models/merge-prompt'
 import {NO_THINKING_LEVELS, activeModel, thinkingLevelsFor} from '../../models/settings'
 import {useAiConnection} from '../../hooks/useAiConnection'
 import {useAttachmentPool} from '../../hooks/useAttachmentPool'
@@ -94,18 +103,6 @@ function mergeOffer(failure: CommandError): MergeOffer {
 const MERGE_FAILURE_MODES: Readonly<Record<string, MergeConflictMode | undefined>> = {
     task_merge_conflicted: 'clashed',
     task_merge_unfinished: 'unfinished'
-}
-
-function conflictPrompt(conflicts: readonly string[]): string {
-    return [
-        "I have brought the project's branch into this task and Git could not merge these files.",
-        'Each one now holds both versions, marked with <<<<<<<, ======= and >>>>>>>:',
-        ...conflicts.map(path => `- ${path}`),
-        '',
-        'Read each one, keep what both sides were trying to do, and remove every marker. Write a',
-        'scene through the scene tools and a script through script.edit, not as raw text. When',
-        'nothing is left holding both versions, say so and stop — I will merge from there.'
-    ].join('\n')
 }
 
 const DEFAULT_CONTEXT_WINDOW = 120_064
@@ -190,13 +187,19 @@ export function Workspace({
     const draft = storedDraft ?? ''
     // A card posted to this task leaves its pictures waiting under the task. They are taken the
     // moment they are read, so a picture the user then removes from the composer stays removed.
+    const [areCardPicturesRead, setAreCardPicturesRead] = useState(false)
     useEffect(() => {
         if (taskId === undefined) return undefined
         let cancelled = false
-        void readProjectState(draftAttachmentsKey(taskId)).then(stored => {
-            if (cancelled || !Array.isArray(stored) || !stored.every(isStoredAttachment)) return
-            writeProjectState(draftAttachmentsKey(taskId), undefined)
-            void restoreAttachments(stored)
+        // Read through a call, because the await in the middle is invisible to narrowing.
+        const isCancelled = () => cancelled
+        void readProjectState(draftAttachmentsKey(taskId)).then(async stored => {
+            if (isCancelled()) return
+            if (Array.isArray(stored) && stored.every(isStoredAttachment)) {
+                writeProjectState(draftAttachmentsKey(taskId), undefined)
+                await restoreAttachments(stored)
+            }
+            if (!isCancelled()) setAreCardPicturesRead(true)
         })
         return () => {
             cancelled = true
@@ -438,6 +441,59 @@ export function Workspace({
     useLayoutEffect(() => {
         newest.current = liveActions
     })
+
+    // Auto mode sends through this Workspace once the card's ask and pictures have arrived. The
+    // send is spent only as the turn starts, so a refusal on the way stops the loop by name
+    // rather than leaving it waiting for a turn that never began.
+    const autopilot = useSyncExternalStore(watchAutopilot, autopilotState, autopilotState)
+    const isAutoTurn = useRef(false)
+    useEffect(() => {
+        const send = autopilot.send
+        if (!send || taskId === undefined || send.taskId !== taskId) return
+        if (!isChatLoaded || storedDraft === undefined || !areCardPicturesRead || isBusy) return
+        if (!isTauri()) {
+            stopAutopilot('send-failed', 'There is no desktop to send through.')
+            return
+        }
+        let cancelled = false
+        void takeAttachments()
+            .then(attachments => {
+                if (cancelled || !takeAutopilotSend(taskId)) return
+                setDraft('')
+                isAutoTurn.current = true
+                start(
+                    send.text ?? `${storedDraft}${joinDraft(storedDraft, AUTO_LINE)}`,
+                    attachments
+                )
+            })
+            .catch((error: unknown) => {
+                if (!cancelled) stopAutopilot('send-failed', commandErrorMessage(error))
+            })
+        return () => {
+            cancelled = true
+        }
+        // takeAttachments is a fresh closure every render; the pool it reads is stable.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [autopilot, areCardPicturesRead, isBusy, isChatLoaded, setDraft, start, storedDraft, taskId])
+
+    // Only a turn this Workspace started for the loop ends it: a compaction moves the same
+    // streaming flag and is nobody's turn.
+    const lastStatus = messages.at(-1)?.status
+    useEffect(() => {
+        if (isStreaming || !isAutoTurn.current || taskId === undefined) return
+        isAutoTurn.current = false
+        autopilotTurnEnded(
+            taskId,
+            lastStatus === 'aborted' || lastStatus === 'error' ? lastStatus : 'complete'
+        )
+    }, [isStreaming, lastStatus, taskId])
+    useEffect(
+        () => () => {
+            // Leaving the task mid-turn takes the runner with it; the end will never be seen.
+            if (isAutoTurn.current && taskId !== undefined) autopilotTurnEnded(taskId, 'lost')
+        },
+        [taskId]
+    )
 
     const actions = useMemo<ComposerActions>(
         () => ({

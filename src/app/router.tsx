@@ -38,6 +38,7 @@ import {
     watchTaskOperation
 } from '../services/task-actions'
 import {OpenTaskContext} from '../hooks/useOpenTask'
+import {useBoardAutopilot} from '../hooks/useBoardAutopilot'
 import {isTurnRunning, watchTurn} from '../services/turn-activity'
 import {NewTaskDialog} from '../components/workspace/NewTaskDialog'
 import {toSideNavLayout} from '../models/ui-state'
@@ -132,6 +133,7 @@ function Application() {
         },
         [refreshTasks, tasksActions]
     )
+    useBoardAutopilot({tasks: tasksActions, openTask})
     const showApplication = useCallback(() => {
         setIsReady(true)
     }, [])

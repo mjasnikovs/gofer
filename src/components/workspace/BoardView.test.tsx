@@ -1,7 +1,13 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
-import {cleanup, render, screen, within} from '@testing-library/react'
+import {act, cleanup, render, screen, within} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {BoardView} from './BoardView'
+import {
+    autopilotState,
+    clearAutopilot,
+    setAutopilot,
+    stopAutopilot
+} from '../../services/board-autopilot'
 import {OpenCenterTabContext} from '../../hooks/useCenterTab'
 import {OpenTaskContext} from '../../hooks/useOpenTask'
 import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../../test/desktop-driver'
@@ -274,5 +280,48 @@ describe('the board', () => {
         const announce = tauri.listen.mock.calls.findLast(call => call[0] === 'board-changed')?.[1]
         announce?.({payload: undefined as never})
         await flushUntil(() => screen.queryByText('Done, the ladder holds.') !== null)
+    })
+})
+
+describe('auto mode on the board', () => {
+    afterEach(clearAutopilot)
+
+    it('is off until the switch is turned on, and then picks', async () => {
+        backend()
+        const user = userEvent.setup()
+        await open()
+
+        expect(autopilotState().phase).toBe('off')
+        expect(screen.queryByText(/^Auto[: ]/u)).not.toBeInTheDocument()
+        await user.click(screen.getByRole('switch', {name: 'Auto'}))
+
+        expect(autopilotState().phase).toBe('picking')
+        expect(screen.getByText('Auto: picking the next Ready card')).toBeInTheDocument()
+    })
+
+    it('shows which card it is on, and why it stopped, with the detail under it', async () => {
+        backend()
+        setAutopilot({phase: 'running', card: {id: 'card-1', number: 1, taskId: 'task-1'}})
+        await open()
+        expect(screen.getByText('Auto: running card #1')).toBeInTheDocument()
+
+        act(() => {
+            stopAutopilot('merge-failed', 'The editor did not answer.')
+        })
+        expect(screen.getByText('Auto stopped: the merge failed')).toBeInTheDocument()
+        expect(screen.getByText('The editor did not answer.')).toBeInTheDocument()
+        expect(screen.getByRole('switch', {name: 'Auto'})).not.toBeChecked()
+    })
+
+    it('turns off from the switch and leaves no reason behind', async () => {
+        backend()
+        const user = userEvent.setup()
+        setAutopilot({phase: 'running', card: {id: 'card-1', number: 1, taskId: 'task-1'}})
+        await open()
+
+        await user.click(screen.getByRole('switch', {name: 'Auto'}))
+
+        expect(autopilotState()).toEqual({phase: 'off'})
+        expect(screen.queryByText(/^Auto[: ]/u)).not.toBeInTheDocument()
     })
 })
