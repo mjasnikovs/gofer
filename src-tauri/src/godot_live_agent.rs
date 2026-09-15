@@ -28,7 +28,9 @@
 //! saying the model cannot see, and `GOFER_LIVE_FIXTURE`
 //! naming a project to work on other than the bare one — the defaults are a llama.cpp on
 //! `127.0.0.1:8080`. `GOFER_LIVE_KEEP` copies the worktree out before its temporary directory goes,
-//! which is the only way to look at what the agent built.
+//! which is the only way to look at what the agent built. `GOFER_LIVE_IMAGE` attaches a picture
+//! to the ask, `GOFER_LIVE_DATA_ROOT` opens a copied `.gofer` as the project's data, and
+//! `GOFER_LIVE_MEMORY=on` recalls that project's memories for the ask.
 //!
 //! [`dump_catalog_and_prompt`] writes the other half: the catalog and system prompt exactly as the
 //! worker receives them, so a harness outside Rust can pose the same turn to the same model without
@@ -80,14 +82,20 @@ fn silence_the_game(worktree: &std::path::Path) {
 }
 
 /// The picture `GOFER_LIVE_IMAGE` names, attached to the ask the way the application attaches a
-/// pasted screenshot; none when the variable is unset.
-fn attached_image() -> Vec<AiWorkerImage> {
+/// pasted screenshot; none when the variable is unset, or when the turn says the model cannot see
+/// — the worker attaches a user message's pictures without asking the model profile.
+fn attached_image(sees: bool) -> Vec<AiWorkerImage> {
     use base64::Engine as _;
     let Ok(path) = std::env::var("GOFER_LIVE_IMAGE") else {
         return Vec::new();
     };
+    if !sees {
+        println!("GOFER_LIVE_IMAGE is set but GOFER_LIVE_IMAGES=off: the picture is not attached");
+        return Vec::new();
+    }
     let bytes = std::fs::read(&path).expect("GOFER_LIVE_IMAGE names a readable file");
-    let mime_type = if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+    let lowered = path.to_ascii_lowercase();
+    let mime_type = if lowered.ends_with(".jpg") || lowered.ends_with(".jpeg") {
         "image/jpeg"
     } else {
         "image/png"
@@ -452,7 +460,7 @@ fn live_agent_acceptance() {
                 sender: ChatSender::User,
                 text: task.clone(),
                 timestamp: 1,
-                images: attached_image(),
+                images: attached_image(sees),
             }],
             agent_messages: None,
             is_retry: false,

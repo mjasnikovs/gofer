@@ -72,8 +72,12 @@ async function runArm(arm) {
     let steps = 0
     let usage = {}
     const started = Date.now()
+    let fellThrough = false
     const text = await refine(raw, {
         images,
+        log: () => {
+            fellThrough = true
+        },
         runWorker: async ({prompt, toolNames, images: pictures = []}) => {
             const outcome = await runSubagentOutcome({
                 progress: () => {
@@ -102,7 +106,10 @@ async function runArm(arm) {
         input: usage.input ?? 0,
         cacheRead: usage.cacheRead ?? 0,
         output: usage.output ?? 0,
-        ...judge(text),
+        // refine() hands the raw ask back when the worker produced nothing, and the raw ask
+        // matches every ask pattern by construction; that run is a miss, not a full score.
+        refined: fellThrough ? 0 : 1,
+        ...(fellThrough ? {} : judge(text)),
         text
     }
 }

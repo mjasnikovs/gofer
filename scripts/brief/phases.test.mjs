@@ -293,6 +293,19 @@ test('with nobody to ask, one question is recorded open and the loop ends', asyn
     assert.equal(settled[0].from, 'open')
 })
 
+test('a question with no options ends the asking and says so', async () => {
+    const worker = scriptedWorker([ok('QUESTION: Which colour?\nA: red\nWHY: taste')])
+    const logged = []
+    const settled = await grill(REFINED, 'RESEARCH', {
+        runWorker: worker.run,
+        log: line => logged.push(line),
+        askUser: said('red')
+    })
+    assert.deepEqual(settled, [])
+    assert.equal(logged.length, 1)
+    assert.match(logged[0], /no options/u)
+})
+
 test('a question already asked ends the grilling, whoever is answering', async () => {
     const worker = scriptedWorker([
         spec => ok(spec.label === 'grill' ? QUESTION : 'ANSWER: its own scene')

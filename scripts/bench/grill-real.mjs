@@ -6,7 +6,7 @@
 //     node scripts/bench/grill-real.mjs [seeds] [arms: medium,off]
 import {appendFile, readFile} from 'node:fs/promises'
 import {createModelContext} from '../ai-provider.mjs'
-import {noProgress, runSubagentOutcome} from '../ai-subagent.mjs'
+import {runSubagentOutcome} from '../ai-subagent.mjs'
 import {grill} from '../brief/phases.mjs'
 import {appendNoThink} from '../brief/prompts.mjs'
 
@@ -15,7 +15,8 @@ const WORKSPACE = process.env.WORKSPACE
 const OUT = process.env.OUT ?? `${DIR}/real-rows.jsonl`
 const SEEDS = Number(process.argv[2] ?? 3)
 // An arm is a thinking level, then flags: `noread` runs the grill call without its read tool,
-// `tail` moves the DECISIONS block from the head of the prompt to its tail.
+// `head` moves the DECISIONS block from the tail of the prompt back before RESEARCH, the order
+// shipped before 9a1c51e, for a baseline.
 const ARMS = (process.argv[3] ?? 'medium,off').split(',')
 const SETTINGS = `${process.env.HOME}/.config/com.gofer.desktop/settings.json`
 
@@ -54,19 +55,24 @@ function playUser(question) {
             best = entry
         }
     }
-    if (best && score >= 0.5) return {answer: best.answer, from: 'stored', score}
+    if (best && score >= REPLAY_MATCH) return {answer: best.answer, from: 'stored', score}
     return {answer: question.options[0] ?? '(skipped)', from: 'optionA', score}
 }
 
-// Same words, the decisions moved from the head of the prompt to its tail.
-function decisionsOnTail(text) {
-    const start = text.indexOf('DECISIONS SO FAR')
+// Bench-only cut-offs, judged by eye on this task's questions, not measured: below REPLAY_MATCH
+// a stored answer no longer fits the question it is replayed for, and above REPEAT_OVERLAP two
+// questions read as one asked twice.
+const REPLAY_MATCH = 0.5
+const REPEAT_OVERLAP = 0.6
+
+function decisionsAtHead(text) {
+    const start = text.indexOf('\n\nDECISIONS SO FAR')
     if (start === -1) return text
-    const end = text.indexOf('RESEARCH\n', start)
-    return `${text.slice(0, start)}${text.slice(end)}\n\n${text.slice(start, end).trimEnd()}`
+    const research = text.indexOf('RESEARCH\n')
+    const decisions = `${text.slice(start).trim()}\n\n`
+    return `${text.slice(0, research)}${decisions}${text.slice(research, start)}`
 }
 
-// A question that overlaps an earlier one this much was asked before in other words.
 function repeats(settled) {
     const seen = []
     let count = 0
@@ -75,7 +81,7 @@ function repeats(settled) {
         const again = seen.some(have => {
             let common = 0
             for (const w of asked) if (have.has(w)) common += 1
-            return common / Math.max(1, Math.min(asked.size, have.size)) >= 0.6
+            return common / Math.max(1, Math.min(asked.size, have.size)) >= REPEAT_OVERLAP
         })
         if (again) count += 1
         seen.push(asked)
@@ -87,7 +93,7 @@ async function runArm(arm, seed) {
     const calls = []
     const [level, ...flags] = arm.split(':')
     const noread = flags.includes('noread')
-    const tail = flags.includes('tail')
+    const head = flags.includes('head')
     // The call's own level wins, as it does in run.mjs; the arm is the sub-agent default.
     const runWorker = async ({label, prompt, toolNames, thinkingLevel}) => {
         const started = Date.now()
@@ -96,7 +102,7 @@ async function runArm(arm, seed) {
             progress: () => {
                 steps += 1
             },
-            prompt: appendNoThink(tail ? decisionsOnTail(prompt) : prompt),
+            prompt: appendNoThink(head ? decisionsAtHead(prompt) : prompt),
             toolNames: noread ? [] : toolNames,
             workspacePath: WORKSPACE,
             models,

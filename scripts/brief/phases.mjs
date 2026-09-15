@@ -253,7 +253,11 @@ export async function grill(refined, research, deps = {}) {
         })
         if (generated.kind !== 'ok') break
         const question = parseQuestion(generated.text)
-        if (!question) break
+        if (!question) {
+            if (/^QUESTION:/mu.test(generated.text ?? ''))
+                deps.log?.('the model asked a question with no options; ending the asking')
+            break
+        }
         // ALREADY ASKED is a sentence in a prompt, and a prompt enforces nothing. Without the round
         // count there is no other floor under a model that keeps putting the same question back —
         // and with the answering setting on, no user sees it happening.
