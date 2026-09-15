@@ -1098,6 +1098,45 @@ mod tests {
         assert_eq!(titles, ["earlier", "later"]);
     }
 
+    /// The board reads Done's order as finish order, so a task deleted later must not reorder it.
+    #[test]
+    fn deleting_a_finished_cards_task_keeps_its_place_in_done() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        make_repository(&directory.path().join("workspace"));
+        let board = storage.board();
+        let released = Released::default();
+        let recording = released.recording();
+        let switch = storage.switch_with_no_turn_to_refuse(&recording);
+        let mut tasks = Vec::new();
+        for title in ["first", "second"] {
+            let card = board.create(&new_card(title), Actor::User).expect("create");
+            let task_id = storage
+                .tasks()
+                .create(&switch)
+                .expect("task")
+                .task_id
+                .expect("task id");
+            board.attach_task(&card.id, &task_id).expect("attach");
+            {
+                let connection = storage.connection().expect("connection");
+                finish_cards_of_task(&connection, &task_id).expect("finish");
+            }
+            tasks.push(task_id);
+        }
+
+        storage.tasks().delete(&tasks[0], &switch).expect("delete");
+
+        let titles: Vec<String> = board
+            .list()
+            .expect("list")
+            .into_iter()
+            .filter(|card| card.status == CardStatus::Done)
+            .map(|card| card.title)
+            .collect();
+        assert_eq!(titles, ["first", "second"]);
+    }
+
     /// Claim 21: an owner is a name, one short line, not a document.
     #[test]
     fn an_owner_is_one_line() {

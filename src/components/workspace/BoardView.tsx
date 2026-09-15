@@ -1,12 +1,12 @@
 import {useCallback, useEffect, useRef, useState, useSyncExternalStore} from 'react'
 import type {KeyboardEvent, ReactNode} from 'react'
-import {Badge} from '@astryxdesign/core/Badge'
 import {Banner} from '@astryxdesign/core/Banner'
 import {Button} from '@astryxdesign/core/Button'
 import {ChatComposer, ChatComposerDrawer} from '@astryxdesign/core/Chat'
 import type {ChatComposerInputHandle} from '@astryxdesign/core/Chat'
 import {Dialog, DialogHeader} from '@astryxdesign/core/Dialog'
 import {Divider} from '@astryxdesign/core/Divider'
+import {Icon} from '@astryxdesign/core/Icon'
 import {Item} from '@astryxdesign/core/Item'
 import {Layout, LayoutContent, LayoutFooter} from '@astryxdesign/core/Layout'
 import {Selector} from '@astryxdesign/core/Selector'
@@ -15,7 +15,7 @@ import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {Text} from '@astryxdesign/core/Text'
 import {TextArea} from '@astryxdesign/core/TextArea'
 import {TextInput} from '@astryxdesign/core/TextInput'
-import {Token} from '@astryxdesign/core/Token'
+import PlusIcon from '@heroicons/react/24/outline/PlusIcon'
 import {AttachmentPicker, AttachmentThumbnails, GameCapturePicker} from './AttachmentControls'
 import {TextField} from '../TextField'
 import {clipboardItemImages, imageFiles} from '../../utils/chat-images'
@@ -41,7 +41,7 @@ import {
     watchAutopilot
 } from '../../services/board-autopilot'
 import {listPendingChanges} from '../../services/task-actions'
-import {CARD_STATUSES, CARD_STATUS_LABELS, cardsIn} from '../../models/board'
+import {CARD_STATUSES, CARD_STATUS_LABELS} from '../../models/board'
 import type {Card, CardDetail, CardStatus} from '../../models/board'
 import type {CommandError} from '../../models/errors'
 import type {PendingChange} from '../../models/app'
@@ -50,6 +50,7 @@ import type {AttachmentPool} from '../../hooks/useAttachmentPool'
 import {useFileMentionTrigger} from '../../hooks/useFileMentionTrigger'
 import {useOpenCenterTab} from '../../hooks/useCenterTab'
 import {useOpenTask} from '../../hooks/useOpenTask'
+import {Board} from './BoardLanes'
 import {NewTaskDialog} from './NewTaskDialog'
 import {PanelState} from './PanelState'
 
@@ -62,14 +63,6 @@ const STATUS_OPTIONS = CARD_STATUSES.map(status => ({
     value: status,
     label: CARD_STATUS_LABELS[status]
 }))
-
-function whoAndWhen(card: Card): string {
-    const comments =
-        card.commentCount === 0 ?
-            ''
-        :   ` · ${String(card.commentCount)} comment${card.commentCount === 1 ? '' : 's'}`
-    return `#${String(card.number)} · ${card.owner}${comments}`
-}
 
 export function BoardView() {
     const [cards, setCards] = useState<readonly Card[]>()
@@ -131,16 +124,25 @@ export function BoardView() {
                 padding={3}
                 align='center'
             >
+                <Switch
+                    label='Auto'
+                    size='sm'
+                    value={autopilot.phase !== 'off'}
+                    onChange={on => {
+                        if (on) startAutopilot()
+                        else stopAutopilot()
+                    }}
+                />
                 <StackItem size='fill'>
                     <VStack gap={1}>
-                        <Text
-                            type='supporting'
-                            color='secondary'
-                        >
-                            What is asked, what is being done, and what was reviewed. Other agents
-                            write here too.
-                        </Text>
-                        {autoStatus !== '' && <Text type='supporting'>{autoStatus}</Text>}
+                        {autoStatus !== '' && (
+                            <Text
+                                type='supporting'
+                                color='primary'
+                            >
+                                {autoStatus}
+                            </Text>
+                        )}
                         {autopilot.detail !== undefined && (
                             <Text
                                 type='supporting'
@@ -151,18 +153,16 @@ export function BoardView() {
                         )}
                     </VStack>
                 </StackItem>
-                <Switch
-                    label='Auto'
-                    size='sm'
-                    value={autopilot.phase !== 'off'}
-                    onChange={on => {
-                        if (on) startAutopilot()
-                        else stopAutopilot()
-                    }}
-                />
                 <Button
                     label='New card'
+                    variant='primary'
                     size='sm'
+                    icon={
+                        <Icon
+                            icon={PlusIcon}
+                            size='sm'
+                        />
+                    }
                     clickAction={() => {
                         setIsAdding(true)
                     }}
@@ -180,20 +180,15 @@ export function BoardView() {
                     isEmpty={false}
                     emptyTitle='Nothing on the board'
                 >
-                    <HStack
-                        gap={0}
-                        height='100%'
-                        align='stretch'
-                    >
-                        {CARD_STATUSES.map(status => (
-                            <Column
-                                key={status}
-                                status={status}
-                                cards={cardsIn(all, status)}
-                                onOpen={setOpenId}
-                            />
-                        ))}
-                    </HStack>
+                    <Board
+                        cards={all}
+                        auto={
+                            autopilot.phase !== 'off' && autopilot.card ?
+                                {cardId: autopilot.card.id, phase: autopilot.phase}
+                            :   undefined
+                        }
+                        onOpen={setOpenId}
+                    />
                 </PanelState>
             </StackItem>
             {openId !== undefined && (
@@ -215,64 +210,6 @@ export function BoardView() {
                 />
             )}
         </VStack>
-    )
-}
-
-type ColumnProps = Readonly<{
-    status: CardStatus
-    cards: readonly Card[]
-    onOpen: (id: string) => void
-}>
-
-function Column({status, cards, onOpen}: ColumnProps) {
-    return (
-        <StackItem size='fill'>
-            <VStack
-                gap={0}
-                height='100%'
-            >
-                <HStack
-                    gap={2}
-                    padding={2}
-                    align='center'
-                >
-                    <StackItem size='fill'>
-                        <Text type='label'>{CARD_STATUS_LABELS[status]}</Text>
-                    </StackItem>
-                    <Badge label={cards.length} />
-                </HStack>
-                <Divider />
-                <StackItem
-                    size='fill'
-                    isScrollable
-                >
-                    <VStack gap={0}>
-                        {cards.map(card => (
-                            <Item
-                                key={card.id}
-                                label={card.title}
-                                labelLines={2}
-                                description={whoAndWhen(card)}
-                                density='compact'
-                                align='start'
-                                {...(card.taskId !== null && {
-                                    endContent: (
-                                        <Token
-                                            size='sm'
-                                            label='task'
-                                        />
-                                    )
-                                })}
-                                onClick={() => {
-                                    onOpen(card.id)
-                                }}
-                            />
-                        ))}
-                    </VStack>
-                </StackItem>
-            </VStack>
-            <Divider orientation='vertical' />
-        </StackItem>
     )
 }
 

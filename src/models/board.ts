@@ -50,3 +50,12 @@ export type CardEdit = Readonly<{
 export function cardsIn(cards: readonly Card[], status: CardStatus): readonly Card[] {
     return cards.filter(card => card.status === status)
 }
+
+/**
+ * A lane's cards as the board shows them: Done keeps what was finished last on top. The backend
+ * lists Done in finish order; `updatedAt` is not that, because deleting a task touches its cards.
+ */
+export function laneCards(cards: readonly Card[], status: CardStatus): readonly Card[] {
+    const lane = cardsIn(cards, status)
+    return status === 'done' ? lane.toReversed() : lane
+}

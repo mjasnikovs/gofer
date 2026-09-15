@@ -1,7 +1,13 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
+import type {ReactElement} from 'react'
 import {act, cleanup, render, screen, within} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import {StackItem} from '@astryxdesign/core/Stack'
+import {Text} from '@astryxdesign/core/Text'
 import {BoardView} from './BoardView'
+import {noInterval, setIntervalScheduler} from '../../services/clock'
+import {useFileMentionTrigger} from '../../hooks/useFileMentionTrigger'
+import {MINUTE_MS} from '../../utils/relative-time'
 import {
     autopilotState,
     clearAutopilot,
@@ -58,6 +64,29 @@ function backend(rows: readonly Card[] = [card(), DOING], answers: BackendAnswer
 
 const calls = () => tauri.invoke.mock.calls.map(call => call[0])
 
+const lane = (name: string) => screen.getByRole('region', {name})
+
+vi.mock('../../hooks/useFileMentionTrigger', async importOriginal => {
+    const actual = await importOriginal<{useFileMentionTrigger: typeof useFileMentionTrigger}>()
+    return {...actual, useFileMentionTrigger: vi.fn(actual.useFileMentionTrigger)}
+})
+
+/** A card field's renders, counted through the one hook every render of it calls. */
+const cardFieldRenders = () => vi.mocked(useFileMentionTrigger).mock.calls.length
+
+function classesOf(element: ReactElement): readonly string[] {
+    const {container, unmount} = render(element)
+    const classes = [...(container.firstElementChild?.classList ?? [])]
+    unmount()
+    return classes
+}
+
+// StyleX class names are hashes, so a prop's classes are found by what it adds to a bare render.
+function classesAddedBy(withProp: ReactElement, without: ReactElement): readonly string[] {
+    const plain = classesOf(without)
+    return classesOf(withProp).filter(one => !plain.includes(one))
+}
+
 async function open(openTask = vi.fn(), openTab = vi.fn()) {
     render(
         <OpenTaskContext value={openTask}>
@@ -87,18 +116,128 @@ describe('the board', () => {
         await open()
 
         for (const column of ['Backlog', 'Ready', 'Doing', 'Review', 'Done'])
-            expect(screen.getByText(column)).toBeInTheDocument()
-        expect(screen.getByText('Make the hero jump higher')).toBeInTheDocument()
-        expect(screen.getByText('#2 · claude · 1 comment')).toBeInTheDocument()
-        expect(screen.getByText('task')).toBeInTheDocument()
+            expect(lane(column)).toBeInTheDocument()
+        expect(within(lane('Ready')).getByText('Make the hero jump higher')).toBeInTheDocument()
+        const doing = within(lane('Doing'))
+        expect(doing.getByText('Fix the ladder')).toBeInTheDocument()
+        expect(doing.getByText('#2')).toBeInTheDocument()
+        expect(doing.getByText(/^claude · /u)).toBeInTheDocument()
+        expect(doing.getByLabelText('1 comment')).toBeInTheDocument()
+        const hiddenCounts = doing
+            .getAllByText('1')
+            .filter(one => one.getAttribute('aria-hidden') === 'true')
+        expect(hiddenCounts).toHaveLength(1)
+        expect(doing.queryByText('Posted')).not.toBeInTheDocument()
     })
 
     it('keeps every column when there is nothing on it', async () => {
         backend([])
         await open()
 
-        expect(screen.getByText('Done')).toBeInTheDocument()
+        expect(within(lane('Done')).getByText('Nothing finished yet')).toBeInTheDocument()
         expect(screen.queryAllByRole('button', {name: /jump/u})).toHaveLength(0)
+    })
+
+    it('says how long ago a card last changed', async () => {
+        vi.useFakeTimers({toFake: ['Date']})
+        vi.setSystemTime(DOING.updatedAt + 5 * 60_000)
+        try {
+            backend([DOING])
+            await open()
+
+            expect(within(lane('Doing')).getByText('claude · 5 minutes ago')).toBeInTheDocument()
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('shows the card finished last at the top of Done, even when an older one changed since', async () => {
+        backend([
+            card({id: 'card-3', number: 3, title: 'Finished first', status: 'done', updatedAt: 9}),
+            card({id: 'card-4', number: 4, title: 'Finished last', status: 'done', updatedAt: 2})
+        ])
+        await open()
+
+        const names = within(lane('Done'))
+            .getAllByRole('button')
+            .map(button => button.getAttribute('aria-label'))
+        expect(names).toEqual(['Finished last', 'Finished first'])
+    })
+
+    it('marks a card waiting to be started that already has a task', async () => {
+        backend([card({taskId: 'task-1'}), DOING])
+        await open()
+
+        expect(within(lane('Ready')).getByText('Posted')).toBeInTheDocument()
+        expect(within(lane('Doing')).queryByText('Posted')).not.toBeInTheDocument()
+    })
+
+    it('moves the time on a card each minute without redrawing an open dialog', async () => {
+        const ticks: (() => void)[] = []
+        setIntervalScheduler((work, everyMs) => {
+            if (everyMs === MINUTE_MS) ticks.push(work)
+            return () => undefined
+        })
+        vi.useFakeTimers({toFake: ['Date']})
+        vi.setSystemTime(DOING.updatedAt + 5 * MINUTE_MS)
+        try {
+            backend([DOING])
+            await open()
+            await userEvent.click(screen.getByRole('button', {name: 'New card'}))
+            await flush()
+            const rendersBefore = cardFieldRenders()
+
+            vi.setSystemTime(DOING.updatedAt + 6 * MINUTE_MS)
+            act(() => {
+                for (const tick of ticks) tick()
+            })
+
+            expect(screen.getByText('claude · 6 minutes ago')).toBeInTheDocument()
+            expect(cardFieldRenders()).toBe(rendersBefore)
+        } finally {
+            vi.useRealTimers()
+            setIntervalScheduler(noInterval)
+        }
+    })
+
+    it('scrolls a failure too long for the tab', async () => {
+        backend([], {
+            board_list: () => {
+                throw new CommandFailure('database', 'The board file is locked. '.repeat(40))
+            }
+        })
+        render(<BoardView />)
+        await flushUntil(() => screen.queryByText('The board could not be read') !== null)
+
+        const scrollable = classesAddedBy(
+            <StackItem isScrollable>content</StackItem>,
+            <StackItem>content</StackItem>
+        )
+        expect(scrollable.length).toBeGreaterThan(0)
+        const banner = screen.getByText('The board could not be read')
+        const scroller = banner.closest(scrollable.map(one => `.${one}`).join(''))
+        expect(scroller).not.toBeNull()
+    })
+
+    it('opens a card from the keyboard', async () => {
+        backend()
+        await open()
+
+        screen.getByRole('button', {name: 'Fix the ladder'}).focus()
+        await userEvent.keyboard('{Enter}')
+        await flushUntil(() => screen.queryByText('Halfway there.') !== null)
+    })
+
+    it('stacks the columns when the board is too narrow for them side by side', async () => {
+        vi.spyOn(Element.prototype, 'scrollWidth', 'get').mockReturnValue(1100)
+        vi.spyOn(Element.prototype, 'clientWidth', 'get').mockReturnValue(620)
+        backend()
+        await open()
+
+        expect(document.querySelector('.gofer-board-lane')).toBeNull()
+        for (const column of ['Backlog', 'Ready', 'Doing', 'Review', 'Done'])
+            expect(lane(column)).toBeInTheDocument()
+        expect(within(lane('Doing')).getByText('Fix the ladder')).toBeInTheDocument()
     })
 
     it('redraws when the backend says the board changed', async () => {
@@ -132,7 +271,9 @@ describe('the board', () => {
 
         await userEvent.click(screen.getByText('Fix the ladder'))
         await flushUntil(() => screen.queryByText('Halfway there.') !== null)
-        expect(screen.getByText('#2 · claude · 1 comment')).toBeInTheDocument()
+        expect(
+            within(screen.getByRole('dialog')).getByText('#2 · Doing · claude')
+        ).toBeInTheDocument()
 
         await userEvent.click(screen.getByRole('combobox', {name: 'Column'}))
         await userEvent.click(await screen.findByRole('option', {name: 'Review'}))
@@ -304,13 +445,27 @@ describe('auto mode on the board', () => {
         setAutopilot({phase: 'running', card: {id: 'card-1', number: 1, taskId: 'task-1'}})
         await open()
         expect(screen.getByText('Auto: running card #1')).toBeInTheDocument()
+        expect(within(lane('Ready')).getByLabelText('Auto is on this card')).toBeInTheDocument()
+        expect(within(lane('Ready')).getByText('Running')).toBeInTheDocument()
 
         act(() => {
             stopAutopilot('merge-failed', 'The editor did not answer.')
         })
         expect(screen.getByText('Auto stopped: the merge failed')).toBeInTheDocument()
-        expect(screen.getByText('The editor did not answer.')).toBeInTheDocument()
+        const detail = screen.getByText('The editor did not answer.')
+        const clamp = classesAddedBy(
+            <Text
+                type='supporting'
+                maxLines={2}
+            >
+                detail
+            </Text>,
+            <Text type='supporting'>detail</Text>
+        )
+        expect(clamp.length).toBeGreaterThan(0)
+        for (const one of clamp) expect(detail).not.toHaveClass(one)
         expect(screen.getByRole('switch', {name: 'Auto'})).not.toBeChecked()
+        expect(screen.queryByLabelText('Auto is on this card')).not.toBeInTheDocument()
     })
 
     it('turns off from the switch and leaves no reason behind', async () => {

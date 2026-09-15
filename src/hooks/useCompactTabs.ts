@@ -1,4 +1,5 @@
 import {useCallback, useLayoutEffect, useRef, useState} from 'react'
+import {settleCollapse} from '../utils/collapse'
 
 type CompactTabs = readonly [isCompact: boolean, onStrip: (node: HTMLElement | null) => void]
 
@@ -35,11 +36,13 @@ export function useCompactTabs(): CompactTabs {
         if (!root) return undefined
         const node = stripOf(root)
         const measure = () => {
-            setIsCompact(compact => {
-                if (compact) return node.clientWidth < widthWithLabels.current
-                widthWithLabels.current = node.scrollWidth
-                return node.scrollWidth > node.clientWidth
-            })
+            setIsCompact(compact =>
+                settleCollapse(
+                    compact,
+                    {available: node.clientWidth, content: node.scrollWidth},
+                    widthWithLabels
+                )
+            )
         }
         const observer = new ResizeObserver(measure)
         observer.observe(node)

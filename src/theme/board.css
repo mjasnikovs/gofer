@@ -1,0 +1,5 @@
+/* size='fill' grows from each lane's content, so an empty lane shrinks to its label; no StackItem prop sets a basis or a floor. */
+.astryx-stack-item.gofer-board-lane {
+    flex: 1 1 0;
+    min-inline-size: 180px;
+}
