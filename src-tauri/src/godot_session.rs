@@ -413,9 +413,8 @@ pub struct GodotSession {
     noticed_exit: AtomicBool,
 }
 
-/// The one start in flight. Held from before the addon is staged until the editor is spawned or
-/// the start has failed, so nothing a second start does can touch the worktree the first is
-/// launching from.
+/// The one start in flight. Held from before the addon is staged until the session is visible or
+/// a failed start has unstaged, so a second start cannot touch the worktree the first launches from.
 pub struct StartClaim(());
 
 impl Drop for StartClaim {
@@ -444,14 +443,9 @@ pub fn start_in_flight() -> bool {
     SESSION_STARTING.load(Ordering::Acquire)
 }
 
-/// Starts a Godot editor session bound to the given worktree.
-pub fn start(request: LaunchRequest) -> Result<SessionInfo, SessionError> {
-    start_claimed(claim_start()?, request)
-}
-
 /// Starts the editor under a claim the caller already holds.
 pub fn start_claimed(
-    claim: StartClaim,
+    claim: &StartClaim,
     request: LaunchRequest,
 ) -> Result<SessionInfo, SessionError> {
     start_claimed_with(claim, request, &crate::process::SystemProcessSpawner)
@@ -462,16 +456,14 @@ fn start_with(
     request: LaunchRequest,
     spawner: &impl ProcessSpawner,
 ) -> Result<SessionInfo, SessionError> {
-    start_claimed_with(claim_start()?, request, spawner)
+    start_claimed_with(&claim_start()?, request, spawner)
 }
 
 fn start_claimed_with(
-    claim: StartClaim,
+    _claim: &StartClaim,
     request: LaunchRequest,
     spawner: &impl ProcessSpawner,
 ) -> Result<SessionInfo, SessionError> {
-    let _claim = claim;
-
     {
         let mut active = ACTIVE_SESSION
             .lock()
@@ -551,10 +543,11 @@ fn start_claimed_with(
     if cfg!(target_os = "macos") {
         arguments.insert(0, OsString::from("--single-window"));
     }
-    #[cfg(any(feature = "webdriver", all(test, feature = "godot-acceptance")))]
-    let headless = request.headless || std::env::var_os("GOFER_GODOT_HEADLESS").is_some();
-    #[cfg(not(any(feature = "webdriver", all(test, feature = "godot-acceptance"))))]
-    let headless = request.headless;
+    let headless = request.headless
+        || (cfg!(any(
+            feature = "webdriver",
+            all(test, feature = "godot-acceptance")
+        )) && std::env::var_os("GOFER_GODOT_HEADLESS").is_some());
     if headless {
         arguments.insert(0, OsString::from("--headless"));
     }

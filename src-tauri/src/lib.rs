@@ -155,7 +155,10 @@ async fn save_godot_settings(
     godot: GodotSettings,
 ) -> Result<SettingsResponse, CommandError> {
     off_thread_coded("save_godot_settings", "settings_unwritable", move || {
-        Ok(settings_response(store_godot_settings(&app, godot)?))
+        Ok(announce_settings(
+            &app,
+            settings_response(store_godot_settings(&app, godot)?),
+        ))
     })
     .await
 }
@@ -1457,6 +1460,26 @@ mod tests {
             .build()
             .expect("build mock webview");
         app
+    }
+
+    /// Every screen holding a copy of the settings writes all of it back, so a write it never
+    /// hears of is a write the next one reverts.
+    #[test]
+    fn every_command_that_writes_the_settings_file_announces_it() {
+        let writers = [
+            "write_settings(",
+            "store_godot_settings(",
+            "settings::save_mcp_settings(",
+        ];
+        let silent: Vec<&str> = include_str!("lib.rs")
+            .split("#[tauri::command]\n")
+            .skip(1)
+            .map(|command| command.split("\n}\n").next().unwrap_or(command))
+            .filter(|body| writers.iter().any(|writer| body.contains(writer)))
+            .filter(|body| !body.contains("announce_settings("))
+            .filter_map(|body| body.lines().find(|line| line.contains("fn ")))
+            .collect();
+        assert!(silent.is_empty(), "{silent:#?}");
     }
 
     /**

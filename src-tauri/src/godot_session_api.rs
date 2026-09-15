@@ -419,11 +419,8 @@ static RUN_LOGGER: Mutex<Option<RunLogger>> = Mutex::new(None);
 
 /// Starts a Godot editor session bound to the active task's worktree.
 ///
-/// Starting a session that is already running answers with the one that is running. The AI agent is
-/// told to start the session when it is offline and cannot always tell, and the cost of getting it
-/// wrong used to be severe: staging the addon begins by *unstaging* it, so a redundant start pulled
-/// `addons/gofer` out from under the live editor and rewrote its `project.godot`, killing the very
-/// session it was asked to make sure of — and only then failed with "already active".
+/// Starting a session that is already running answers with the one that is running, because the
+/// agent cannot always tell and a redundant start would re-stage the addon under the live editor.
 pub fn start_session<R: Runtime>(
     app: &AppHandle<R>,
     _request: StartGodotSessionRequest,
@@ -437,23 +434,6 @@ pub fn start_session<R: Runtime>(
     })?;
 
     noticed_editor_exit(app);
-    if let Some(running) = godot_session::current_info()
-        && !godot_session::editor_has_exited()
-    {
-        let resolved = crate::paths::canonical(&worktree).unwrap_or_else(|_| worktree.clone());
-        if Path::new(&running.worktree) == resolved {
-            return Ok(to_response(&running));
-        }
-        return Err(SessionError::new(
-            "session_already_active",
-            format!(
-                "A Godot session is already running for {}. Stop it before starting one for {}.",
-                running.worktree,
-                worktree.display()
-            ),
-        ));
-    }
-
     let stager = addon_stager(app);
     let workspace = Workspace::open(&worktree).map_err(|error| {
         SessionError::new(
@@ -465,7 +445,7 @@ pub fn start_session<R: Runtime>(
         )
     })?;
     let godot = read_godot_settings(app).unwrap_or_default();
-    let info = stage_and_start(&stager, &workspace, |claim| {
+    let launched = stage_and_start(&stager, &workspace, |claim| {
         godot_session::start_claimed(
             claim,
             LaunchRequest {
@@ -476,34 +456,63 @@ pub fn start_session<R: Runtime>(
             },
         )
     })?;
+    let info = match launched {
+        Launch::Running(running) => return Ok(to_response(&running)),
+        Launch::Started(info) => info,
+    };
     remember_session_task(storage.tasks().active());
     start_run_logging(&storage, &info, &worktree);
     start_session_watch(app);
     Ok(to_response(&info))
 }
 
-/// Stages the addon and starts the editor as one claimed step.
-///
-/// The claim has to come first. Staging begins by unstaging whatever the ledger holds for the
-/// worktree, and a failed start unstages too, so a second start that reached either while the
-/// first was spawning took the addon out from under an editor that had not read `project.godot`
-/// yet. Task 1e in swarm sent two script edits at once: the editor came up without the plugin,
-/// sat in `error` for a minute, and never answered.
+#[derive(Debug)]
+enum Launch {
+    Running(SessionInfo),
+    Started(SessionInfo),
+}
+
+/// Checks, stages and starts under one claim, which a failed start keeps until it has unstaged.
 fn stage_and_start(
     stager: &AddonStager,
     workspace: &Workspace,
-    start: impl FnOnce(godot_session::StartClaim) -> Result<SessionInfo, SessionError>,
-) -> Result<SessionInfo, SessionError> {
+    start: impl FnOnce(&godot_session::StartClaim) -> Result<SessionInfo, SessionError>,
+) -> Result<Launch, SessionError> {
     let claim = godot_session::claim_start()?;
+    if let Some(running) = the_running_editor(workspace.root())? {
+        return Ok(Launch::Running(running));
+    }
     stager.stage(workspace).map_err(|error| {
         SessionError::new(
             "addon_stage_failed",
             format!("The Gofer addon could not be staged: {}", error.message),
         )
     })?;
-    start(claim).inspect_err(|_| {
+    start(&claim).map(Launch::Started).inspect_err(|_| {
         let _ = stager.unstage(workspace.root());
     })
+}
+
+/// The live editor already running for `worktree`, refused when it runs for another.
+fn the_running_editor(worktree: &Path) -> Result<Option<SessionInfo>, SessionError> {
+    let Some(running) = godot_session::current_info() else {
+        return Ok(None);
+    };
+    if godot_session::editor_has_exited() {
+        return Ok(None);
+    }
+    let resolved = crate::paths::canonical(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+    if Path::new(&running.worktree) == resolved {
+        return Ok(Some(running));
+    }
+    Err(SessionError::new(
+        "session_already_active",
+        format!(
+            "A Godot session is already running for {}. Stop it before starting one for {}.",
+            running.worktree,
+            worktree.display()
+        ),
+    ))
 }
 
 /// Opens the stored run for a session and starts draining the session buffer into it.
@@ -1348,11 +1357,6 @@ mod tests {
     }
 
     /// A start refused because another is in flight must leave that start's staging alone.
-    ///
-    /// Two script edits sent at once each met no session and each started one. The first staged
-    /// and spawned; the second re-staged over it and, refused at the spawn, unstaged on the way
-    /// out. The editor then read a `project.godot` that no longer named the plugin, and sat in
-    /// `error` for a minute with nothing to announce.
     #[test]
     fn a_start_refused_as_already_in_flight_leaves_the_staged_addon_alone() {
         let _test = godot_session::SESSION_TEST_LOCK
@@ -1386,6 +1390,83 @@ mod tests {
         );
         drop(first);
         stager.unstage(&worktree).expect("cleanup");
+    }
+
+    fn godot_worktree(directory: &TempDir) -> (PathBuf, Workspace, AddonStager) {
+        let worktree = directory.path().join("worktree");
+        std::fs::create_dir(&worktree).expect("create worktree");
+        std::fs::write(worktree.join("project.godot"), "config_version=5\n").expect("project file");
+        let worktree = crate::paths::canonical(&worktree).expect("canonical worktree");
+        let workspace = Workspace::open(&worktree).expect("workspace");
+        let stager = AddonStager::new(directory.path().join("ledger.json"));
+        (worktree, workspace, stager)
+    }
+
+    fn addon_is_staged(worktree: &Path) -> bool {
+        std::fs::read_to_string(worktree.join("project.godot"))
+            .is_ok_and(|project| project.contains("res://addons/gofer/plugin.cfg"))
+            && worktree.join("addons/gofer/plugin.gd").is_file()
+    }
+
+    fn a_launch_that_fails(directory: &TempDir, worktree: &Path) -> LaunchRequest {
+        LaunchRequest {
+            worktree: worktree.to_path_buf(),
+            binary: Some(directory.path().join("no-godot-here").display().to_string()),
+            embed_game_window: false,
+            headless: false,
+        }
+    }
+
+    /// A start that claims just after another finished answers with that editor and leaves its
+    /// addon where it is.
+    #[test]
+    fn a_start_claimed_after_another_finished_leaves_the_running_editors_addon_alone() {
+        let _test = godot_session::SESSION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let directory = TempDir::new().expect("temporary directory");
+        let (worktree, workspace, stager) = godot_worktree(&directory);
+        stager.stage(&workspace).expect("the first start stages");
+        let _running = PlantedSession::new(&worktree, "task");
+
+        let launched = stage_and_start(&stager, &workspace, |claim| {
+            godot_session::start_claimed(claim, a_launch_that_fails(&directory, &worktree))
+        });
+
+        assert!(
+            addon_is_staged(&worktree),
+            "the running editor's addon must still be staged"
+        );
+        assert!(
+            matches!(launched, Ok(Launch::Running(_))),
+            "the running editor is the answer: {launched:?}"
+        );
+        stager.unstage(&worktree).expect("cleanup");
+    }
+
+    /// A failed start keeps its claim until its staging is undone, so no start slips in between.
+    #[test]
+    fn a_failed_start_holds_its_claim_until_the_addon_is_unstaged() {
+        let _test = godot_session::SESSION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let directory = TempDir::new().expect("temporary directory");
+        let (worktree, workspace, stager) = godot_worktree(&directory);
+        let held = std::cell::Cell::new(false);
+
+        let launched = stage_and_start(&stager, &workspace, |claim| {
+            let failed =
+                godot_session::start_claimed(claim, a_launch_that_fails(&directory, &worktree));
+            held.set(godot_session::start_in_flight());
+            failed
+        });
+
+        launched.expect_err("a Godot binary that is not there cannot start");
+        assert!(
+            held.get(),
+            "the claim was released before the addon was unstaged"
+        );
+        assert!(!addon_is_staged(&worktree), "a failed start unstages");
     }
 
     /// Releasing a worktree no editor is holding still has to unstage the addon.

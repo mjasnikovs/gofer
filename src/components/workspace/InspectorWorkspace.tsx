@@ -243,7 +243,7 @@ function FrameRegions({
 
     const isOffline = isSessionOffline(state)
     const isPlaying = isSessionPlaying(state)
-    const headless = useGodotHeadless()
+    const headless = useGodotHeadless({onError: report})
 
     const breakpoints = useMemo<readonly DebugSourceBreakpoints[]>(
         () =>

@@ -399,11 +399,6 @@ fn route<R: Runtime>(
 }
 
 /// A start refused because another is in flight is a start to wait on, not a failure.
-///
-/// Two entries of one call, run side by side, both meet no session and both start one. The second
-/// used to answer the model "another session is already starting", and the edit it carried was
-/// lost. The editor it is told about is the one it needs, so it waits for that one the way the
-/// first entry does.
 fn joining_a_start_in_flight<T>(
     started: Result<T, godot_session::SessionError>,
 ) -> Result<(), ToolFailure> {
@@ -1121,19 +1116,14 @@ fn the_editor_once_it_can_answer<R: Runtime>(
 ) -> Result<Option<crate::godot_session_api::GodotSessionResponse>, ToolFailure> {
     let deadline = std::time::Instant::now() + SESSION_START_TIMEOUT;
     loop {
-        match godot_session::current_state() {
-            godot_session::SessionState::Ready
-            | godot_session::SessionState::Playing
-            | godot_session::SessionState::DebugPaused => {
-                return Ok(godot_session_api::get_session(app)?);
-            }
-            godot_session::SessionState::Offline if !godot_session::start_in_flight() => {
-                return Err(the_editor_never_came_up());
-            }
-            godot_session::SessionState::Error if godot_session::editor_has_exited() => {
-                return Err(the_editor_never_came_up());
-            }
-            _ => {}
+        match the_start_so_far(
+            godot_session::start_in_flight,
+            godot_session::current_state,
+            godot_session::editor_has_exited,
+        ) {
+            StartSoFar::Answering => return Ok(godot_session_api::get_session(app)?),
+            StartSoFar::Gone => return Err(the_editor_never_came_up()),
+            StartSoFar::Coming => {}
         }
         if std::time::Instant::now() >= deadline {
             let state = godot_session::current_state();
@@ -1148,6 +1138,30 @@ fn the_editor_once_it_can_answer<R: Runtime>(
             ));
         }
         std::thread::sleep(SESSION_START_POLL);
+    }
+}
+
+/// Where a start the caller is waiting on has got to.
+enum StartSoFar {
+    Answering,
+    Gone,
+    Coming,
+}
+
+fn the_start_so_far(
+    in_flight: impl Fn() -> bool,
+    state: impl Fn() -> godot_session::SessionState,
+    exited: impl Fn() -> bool,
+) -> StartSoFar {
+    // The flag first: a start clears it only after its session is visible to `state`.
+    let in_flight = in_flight();
+    match state() {
+        godot_session::SessionState::Ready
+        | godot_session::SessionState::Playing
+        | godot_session::SessionState::DebugPaused => StartSoFar::Answering,
+        godot_session::SessionState::Offline if !in_flight => StartSoFar::Gone,
+        godot_session::SessionState::Error if exited() => StartSoFar::Gone,
+        _ => StartSoFar::Coming,
     }
 }
 
@@ -3252,6 +3266,32 @@ mod tests {
         )))
         .expect_err("any other refusal is the answer");
         assert_eq!(refused.code, "not_a_godot_project");
+    }
+
+    /// A start that finishes between the two reads is a start that finished, not one that died.
+    #[test]
+    fn a_start_finishing_between_the_reads_is_not_reported_gone() {
+        use crate::godot_session::SessionState;
+        // The first read of either lets the start finish, so the second read sees it done.
+        let finished = std::cell::Cell::new(false);
+        let in_flight = || {
+            let answer = !finished.get();
+            finished.set(true);
+            answer
+        };
+        let state = || {
+            let answer = if finished.get() {
+                SessionState::Ready
+            } else {
+                SessionState::Offline
+            };
+            finished.set(true);
+            answer
+        };
+        assert!(matches!(
+            the_start_so_far(in_flight, state, || false),
+            StartSoFar::Answering
+        ));
     }
 
     /// Issue #5. An editor operation asked with no session started one and answered, instead of

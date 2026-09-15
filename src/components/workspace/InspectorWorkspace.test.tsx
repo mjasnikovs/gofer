@@ -18,7 +18,14 @@ import {
 } from '../../services/clock'
 import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../../test/desktop-driver'
 import {flush, flushUntil} from '../../test/flush'
-import {FRAME, ICON_PNG, MAIN_SCENE, SCRIPT, installBackend} from '../../test/backend'
+import {
+    CommandFailure,
+    FRAME,
+    ICON_PNG,
+    MAIN_SCENE,
+    SCRIPT,
+    installBackend
+} from '../../test/backend'
 import type {BackendOptions} from '../../test/backend'
 
 const tauri = createDesktopFake()
@@ -199,6 +206,25 @@ describe('InspectorWorkspace', () => {
 
         await startSession(user)
         expect(screen.queryByRole('switch', {name: 'Headless'})).not.toBeInTheDocument()
+    })
+
+    it('reports a headless choice that could not be saved and leaves the switch as it was', async () => {
+        backend({
+            answers: {
+                save_godot_settings: () =>
+                    Promise.reject(
+                        new CommandFailure('settings_unwritable', 'The settings file is read-only')
+                    )
+            }
+        })
+        const user = userEvent.setup()
+        await renderWorkspace()
+        await flush()
+
+        const headless = () => screen.getByRole('switch', {name: 'Headless'})
+        await user.click(headless())
+        expect(await screen.findByText(/The settings file is read-only/)).toBeInTheDocument()
+        expect(headless()).not.toBeChecked()
     })
 
     it('stops presenting an editor whose process is gone, within one tick', async () => {

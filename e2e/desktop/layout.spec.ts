@@ -8,13 +8,25 @@ const CONTROLS = 'button, a[href], input, textarea, select, [role="button"]'
 // metrics differ enough between engines to change which controls fit, so the only
 // honest answer about what the user sees comes from the shipped binary's own view.
 // Nothing excuses a control off the window: the strips draw no scrollbar, so what
-// leaves the frame is gone as far as anyone using it can tell.
+// leaves the frame is gone as far as anyone using it can tell. The one strip that does
+// is a TabList past its width: it draws a scroll button, so a tab beyond the edge is one
+// press away, and at 800 the centre strip's ninth tab sits there.
 async function offTheWindow(): Promise<readonly string[]> {
     return browser.execute((selector: string) => {
+        const scrollsByButton = (one: Element) => {
+            let strip = one.parentElement
+            for (let depth = 0; depth < 4 && strip !== null; depth += 1) {
+                const button = strip.querySelector('.astryx-tab-scroll-button')
+                if (button !== null && button.getBoundingClientRect().width > 0) return true
+                strip = strip.parentElement
+            }
+            return false
+        }
         return [...document.querySelectorAll(selector)]
             .filter(one => {
                 const box = one.getBoundingClientRect()
                 if (box.width === 0) return false
+                if (scrollsByButton(one)) return false
                 return box.right > window.innerWidth + 1 || box.left < -1
             })
             .map(one => {
