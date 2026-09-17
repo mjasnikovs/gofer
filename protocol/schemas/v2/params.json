@@ -3406,7 +3406,7 @@
         {
             "tool": "godot_script",
             "op": "save",
-            "summary": "Writes a whole file, creating it when it is new, and answers with the file's diagnostics the same way `edit` does. A script or a shader (.gdshader, .gdshaderinc); a shader gets no diagnostics, because the language server does not read it. Over a file that exists, the save needs the hash `script.open` or `edit` answered for it; a plain read does not arm one.",
+            "summary": "Writes a whole file, creating it when it is new, and answers with the file's diagnostics the same way `edit` does. A script or a shader (.gdshader, .gdshaderinc); a shader gets no diagnostics, because the language server does not read it. Over a file that exists, open it with `script.open` first, or change it with `edit`: a file read any other way cannot be saved over, and the router carries the guard, so no hash is ever sent.",
             "params": [
                 {
                     "name": "path",

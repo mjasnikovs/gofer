@@ -841,7 +841,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:4a59e09f9867f800
+// GENERATED-BEGIN operations sha256:1c160452de9f8446
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -1533,7 +1533,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
         op(
             "godot_script",
             "save",
-            "Writes a whole file, creating it when it is new, and answers with the file's diagnostics the same way `edit` does. A script or a shader (.gdshader, .gdshaderinc); a shader gets no diagnostics, because the language server does not read it. Over a file that exists, the save needs the hash `script.open` or `edit` answered for it; a plain read does not arm one.",
+            "Writes a whole file, creating it when it is new, and answers with the file's diagnostics the same way `edit` does. A script or a shader (.gdshader, .gdshaderinc); a shader gets no diagnostics, because the language server does not read it. Over a file that exists, open it with `script.open` first, or change it with `edit`: a file read any other way cannot be saved over, and the router carries the guard, so no hash is ever sent.",
             Answers::Rust,
             &[
                 need("path", Text),

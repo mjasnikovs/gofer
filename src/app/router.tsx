@@ -25,6 +25,7 @@ import {
 import type {RouterHistory} from '@tanstack/react-router'
 import {AppShell} from '@astryxdesign/core/AppShell'
 import {defer} from '../services/clock'
+import {isTauri, listen} from '../services/desktop'
 import {HealthGate} from '../components/application/HealthGate'
 import {InitializationSplash} from '../components/application/InitializationSplash'
 import {Navigation} from '../components/application/Navigation'
@@ -164,6 +165,20 @@ function Application() {
     const tasksChanged = useCallback(() => {
         void refreshTasks()
     }, [refreshTasks])
+    // The door opens a task when an outside agent takes a card; the list has to show it.
+    useEffect(() => {
+        if (!isTauri()) return undefined
+        let unlisten: (() => void) | undefined
+        let cancelled = false
+        void listen('tasks-changed', tasksChanged).then(stop => {
+            if (cancelled) stop()
+            else unlisten = stop
+        })
+        return () => {
+            cancelled = true
+            unlisten?.()
+        }
+    }, [tasksChanged])
     const newTask = useCallback(
         (bringChanges: boolean) => {
             void tasksActions.create(bringChanges).catch(() => undefined)

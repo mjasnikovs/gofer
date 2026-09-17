@@ -312,9 +312,11 @@ type DesktopEventMap = Readonly<{
     'ai-memory-judge': MemoryJudgeEvent
     'ai-memory-sweep': MemorySweepEvent
     'board-changed': undefined
+    'chat-changed': Readonly<{taskId: string}>
     'godot-session-event': GodotSessionEvent
     'rag-download-progress': DownloadProgress
     'settings-saved': SettingsResponse
+    'tasks-changed': undefined
 }>
 
 export type DesktopCommand = keyof DesktopCommandMap

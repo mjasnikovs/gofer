@@ -182,11 +182,15 @@ node scripts/gofer.mjs godot_scene list                one operation, flags are 
 node scripts/gofer.mjs board comment --id 4 --body "…" a board write is signed by --owner or GOFER_OWNER
 ```
 
-A call goes through the same router as the model's, so it carries the same revision check, undo
-stack and worktree. It also takes the turn's own lock: while the model is in a turn every tool but
-the board answers `turn_running`, and while a door call runs the model cannot start one. What the
-door cannot do is wait on the user: a gated operation answers `approval_needed`, and `ask_user`
-answers `needs_user`. Either one has to happen in Gofer's window.
+A `board move` to `doing` from outside opens the card's task: a branch, a row in the task list, and
+a chat every later door call is written into as a tool card. Every tool but the board is refused
+with `no_card_in_doing` until a card in doing holds the active task. Review the diff and merge or
+abandon it in the Tasks tab, as with the model's own work. A call goes through the same router as
+the model's, so it carries the same revision check, undo stack and worktree. It also takes the
+turn's own lock: while the model is in a turn every tool but the board answers `turn_running`, and
+while a door call runs the model cannot start one. What the door cannot do is wait on the user: a
+gated operation answers `approval_needed`, and `ask_user` answers `needs_user`. Either one has to
+happen in Gofer's window.
 
 The first Godot call starts the editor session itself; `godot_session status` answers `null` until
 then, and the start costs the editor's import scan, tens of seconds on a first open.

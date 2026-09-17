@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Emitter, Runtime};
 
 use crate::ai_tools::{CATALOG, ToolRequest, dispatch_from_outside};
 use crate::settings::DoorSettings;
@@ -438,11 +438,26 @@ fn call<R: Runtime>(id: &Value, params: &Value, app: &AppHandle<R>) -> Result<Va
             Value::Null,
         ));
     };
+    let sent = params.get("params").cloned().unwrap_or_else(|| json!({}));
     let request = ToolRequest {
         tool: tool.to_owned(),
-        params: params.get("params").cloned().unwrap_or_else(|| json!({})),
+        params: sent.clone(),
     };
-    dispatch_from_outside(app, request).map_err(|failure| {
+    let started = now_millis();
+    // A tool the router does not have is refused by name there; the gate is for the ones it has.
+    let known = tool == "godot"
+        || CATALOG.iter().any(|domain| domain.name == tool)
+        || tool == crate::remember::REMEMBER_TOOL
+        || tool == crate::ask::ASK_USER_TOOL;
+    let answered = if known {
+        inside_a_card_in_doing(app).and_then(|()| dispatch_from_outside(app, request))
+    } else {
+        dispatch_from_outside(app, request)
+    };
+    if tool != crate::board::BOARD_TOOL {
+        noted_in_the_task_chat(app, tool, &sent, &answered, started);
+    }
+    answered.map_err(|failure| {
         rpc_error(
             id.clone(),
             TOOL_REFUSED,
@@ -450,6 +465,126 @@ fn call<R: Runtime>(id: &Value, params: &Value, app: &AppHandle<R>) -> Result<Va
             serde_json::to_value(&failure).unwrap_or(Value::Null),
         )
     })
+}
+
+/// Every tool but the board works inside a task, and the door's only way into one is a card moved
+/// to doing. Without this, a call landed on whatever the checkout held, with nothing to review and
+/// nothing to revert — the user's finding after five cards were worked that way.
+fn inside_a_card_in_doing<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(), crate::ai_tools::ToolFailure> {
+    let refusal = || {
+        crate::ai_tools::ToolFailure::new(
+            "no_card_in_doing",
+            "The door works inside a card's task, and no card in doing has the active task. Move \
+             the card you are working on to doing first: that opens its task, and every call after \
+             it is written there for review.",
+        )
+    };
+    let storage = crate::workspace::project_storage(app).map_err(|failure| {
+        crate::ai_tools::ToolFailure::new("board_unavailable", failure.message)
+    })?;
+    let Some(active) = storage.tasks().active()? else {
+        return Err(refusal());
+    };
+    let doing = storage.board().list()?.into_iter().any(|card| {
+        card.task_id.as_deref() == Some(active.as_str())
+            && card.status == crate::storage::CardStatus::Doing
+    });
+    if doing { Ok(()) } else { Err(refusal()) }
+}
+
+/// Fired after the door wrote a call into a task's chat, so a window showing it reloads.
+pub const CHAT_EVENT: &str = "chat-changed";
+
+/// How much of an answer the chat keeps. A tool card is for reading what happened, and a scene
+/// tree is not.
+const NOTED_OUTPUT_CHARS: usize = 4000;
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64)
+}
+
+/// Writes one door call into the active task's chat as a tool card, the way the worker's calls
+/// are shown, so the user reviews an outside agent's work where they review the model's. A call
+/// with no active task is noted nowhere; the board is the only door that opens one.
+fn noted_in_the_task_chat<R: Runtime>(
+    app: &AppHandle<R>,
+    tool: &str,
+    params: &Value,
+    answered: &Result<Value, crate::ai_tools::ToolFailure>,
+    started: u64,
+) {
+    let Ok(storage) = crate::workspace::project_storage(app) else {
+        return;
+    };
+    let Ok(Some(task_id)) = storage.tasks().active() else {
+        return;
+    };
+    let Ok(mut chat) = storage.chats().load(Some(&task_id)) else {
+        return;
+    };
+    let ended = now_millis();
+    let ops: Vec<&str> = params
+        .get("ops")
+        .and_then(Value::as_array)
+        .map(|ops| {
+            ops.iter()
+                .filter_map(|op| op.get("op").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    let target = if ops.is_empty() {
+        params
+            .get("op")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    } else {
+        ops.join(", ")
+    };
+    let (output, status) = match answered {
+        Ok(answer) => (answer.to_string(), "complete"),
+        Err(failure) => (format!("{}: {}", failure.code, failure.message), "error"),
+    };
+    let output: String = output.chars().take(NOTED_OUTPUT_CHARS).collect();
+    let tool_id = format!("door-{ended}-{}", chat.messages.len());
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "tools".to_owned(),
+        json!([{
+            "id": tool_id,
+            "name": tool,
+            "target": target,
+            "output": output,
+            "status": status,
+            "startedAt": started,
+            "endedAt": ended,
+        }]),
+    );
+    extra.insert(
+        "parts".to_owned(),
+        json!([{"kind": "tool", "toolId": tool_id}]),
+    );
+    extra.insert("status".to_owned(), json!("complete"));
+    extra.insert("model".to_owned(), json!("agent door"));
+    chat.messages.push(crate::storage::StoredMessage {
+        id: ended,
+        sender: "assistant".to_owned(),
+        text: String::new(),
+        timestamp: ended,
+        attachments: Vec::new(),
+        extra,
+    });
+    if storage.chats().save(&chat).is_ok() {
+        let _ = app.emit_to(
+            crate::ask::MAIN_WINDOW,
+            CHAT_EVENT,
+            json!({"taskId": task_id}),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -737,6 +872,7 @@ pub(crate) mod tests {
         let directory = TempDir::new().expect("temporary directory");
         let app = app_with_storage(&directory);
         let server = started(&app, "secret");
+        a_card_in_doing(server.address);
 
         let body = call_between_turns(
             server.address,
@@ -928,8 +1064,33 @@ pub(crate) mod tests {
     fn call_between_turns(address: SocketAddr, tool: &str, params: Value) -> Value {
         until(|| {
             let (_, body) = post(address, PATH, Some("secret"), &call(tool, params.clone()));
-            (body.get("error").is_none() || refusal(&body) != "turn_running").then_some(body)
+            let between = body.get("error").is_none()
+                || !matches!(
+                    refusal(&body),
+                    "turn_running" | "ai_request_in_progress" | "card_in_progress"
+                );
+            between.then_some(body)
         })
+    }
+
+    /// A card moved to doing through the door, which is the only way a tool call gets in.
+    fn a_card_in_doing(address: SocketAddr) {
+        let (_, made) = post(
+            address,
+            PATH,
+            Some("secret"),
+            &call(
+                "board",
+                json!({"op": "create", "title": "Work", "owner": "claude", "status": "ready"}),
+            ),
+        );
+        let id = made["result"]["id"].as_u64().expect("a card number");
+        let moved = call_between_turns(
+            address,
+            "board",
+            json!({"op": "move", "id": id, "status": "doing", "owner": "claude"}),
+        );
+        assert!(moved.get("error").is_none(), "{moved}");
     }
 
     /// The bit is process-wide and other tests take it; wait for a turn at holding it.
@@ -945,6 +1106,7 @@ pub(crate) mod tests {
         let directory = TempDir::new().expect("temporary directory");
         let app = app_with_storage(&directory);
         let server = started(&app, "secret");
+        a_card_in_doing(server.address);
         let token = Some("secret");
 
         let turn = holding_the_provider_bit();
@@ -1119,6 +1281,7 @@ pub(crate) mod tests {
         let directory = TempDir::new().expect("temporary directory");
         let app = app_with_storage(&directory);
         let server = started(&app, "secret");
+        a_card_in_doing(server.address);
         let body = call_between_turns(
             server.address,
             "godot",
@@ -1154,6 +1317,87 @@ pub(crate) mod tests {
             &rpc("call", json!({"params": {}})),
         );
         assert_eq!(body["id"], json!(1), "an error keeps the request's id");
+        stop(server);
+    }
+
+    /// The user's finding: five cards were worked through the door and none of them was in the
+    /// task list, so there was no diff to review and nothing to revert.
+    #[test]
+    fn a_move_to_doing_from_outside_opens_the_cards_task_and_the_calls_land_in_its_chat() {
+        let directory = TempDir::new().expect("temporary directory");
+        let app = app_with_storage(&directory);
+        let server = started(&app, "secret");
+        let token = Some("secret");
+
+        let (_, body) = post(
+            server.address,
+            PATH,
+            token,
+            &call(
+                "board",
+                json!({"op": "create", "title": "Roads", "owner": "claude", "status": "ready"}),
+            ),
+        );
+        let card_id = body["result"]["id"].as_u64().expect("a card number");
+        let storage = crate::workspace::project_storage(app.handle()).expect("storage");
+        let task_of = |number: u64| {
+            storage
+                .board()
+                .list()
+                .expect("cards")
+                .into_iter()
+                .find(|card| card.number == number)
+                .expect("the card")
+                .task_id
+        };
+        assert!(task_of(card_id).is_none(), "a fresh card has no task");
+        let outside = call_between_turns(
+            server.address,
+            "godot_scene",
+            json!({"ops": [{"op": "list"}]}),
+        );
+        assert_eq!(refusal(&outside), "no_card_in_doing", "{outside}");
+
+        let moved = call_between_turns(
+            server.address,
+            "board",
+            json!({"op": "move", "id": card_id, "status": "doing", "owner": "claude"}),
+        );
+        assert_eq!(moved["result"]["status"], json!("doing"), "{moved}");
+        let task_id = task_of(card_id).expect("the card has a task now");
+        assert_eq!(
+            storage.tasks().active().expect("active").as_deref(),
+            Some(task_id.as_str()),
+            "and the checkout is on it"
+        );
+
+        let refused = call_between_turns(
+            server.address,
+            "godot_scene",
+            json!({"ops": [{"op": "list"}]}),
+        );
+        assert!(refused.get("error").is_some(), "no editor here: {refused}");
+        let chat = storage
+            .chats()
+            .load(Some(&task_id))
+            .expect("the task's chat");
+        let noted = chat.messages.last().expect("the call was noted");
+        assert_eq!(noted.sender, "assistant");
+        let tools = noted.extra["tools"].as_array().expect("a tool card");
+        assert_eq!(tools[0]["name"], json!("godot_scene"), "{noted:?}");
+        assert_eq!(tools[0]["target"], json!("list"), "{noted:?}");
+        assert_eq!(tools[0]["status"], json!("error"), "{noted:?}");
+
+        let again = call_between_turns(
+            server.address,
+            "board",
+            json!({"op": "move", "id": card_id, "status": "doing", "owner": "claude"}),
+        );
+        assert!(
+            again.get("error").is_none(),
+            "a card with a task keeps it: {again}"
+        );
+        assert_eq!(task_of(card_id).as_deref(), Some(task_id.as_str()));
         stop(server);
     }
 

@@ -23,8 +23,16 @@ const USER_OWNER: &str = "user";
 /// Fired after any write through any door, with no payload: the window refetches.
 pub const CHANGED_EVENT: &str = "board-changed";
 
+/// Fired when a task was made or moved onto by something other than the window — the door
+/// opening a card's task — so the task list refetches.
+pub const TASKS_EVENT: &str = "tasks-changed";
+
 pub(crate) fn announce_change<R: Runtime>(app: &AppHandle<R>) {
     let _ = app.emit_to(MAIN_WINDOW, CHANGED_EVENT, ());
+}
+
+pub(crate) fn announce_tasks_change<R: Runtime>(app: &AppHandle<R>) {
+    let _ = app.emit_to(MAIN_WINDOW, TASKS_EVENT, ());
 }
 
 /// The worker as an actor. It is the turn, so nothing is in progress from where it stands.
@@ -204,6 +212,14 @@ pub(crate) fn board_tool_from_outside<R: Runtime>(
             ));
         }
     };
+    if op == Some("move") && params.get("status").and_then(Value::as_str) == Some("doing") {
+        let storage = crate::workspace::project_storage(app)
+            .map_err(|failure| ToolFailure::new("board_unavailable", failure.message))?;
+        let reference = given_reference(params.get("id"))?
+            .ok_or_else(|| ToolFailure::new("invalid_params", "`id` is required"))?;
+        let card = storage.board().resolve(&reference)?;
+        on_the_cards_task(app, &storage, &card)?;
+    }
     board_tool_as(app, params, writer)
 }
 
@@ -390,7 +406,19 @@ pub(crate) fn card_post_to_gofer(
             "A finished card is not posted again",
         ));
     }
-    let release = crate::switch_for(&app);
+    let chat = open_task_for_card(&app, &storage, &id, bring_changes)?;
+    announce_change(&app);
+    Ok(chat)
+}
+
+/// Makes a task for a card and hands the card to it: the one way a card gets a branch.
+fn open_task_for_card<R: Runtime>(
+    app: &AppHandle<R>,
+    storage: &crate::storage::ProjectStorage,
+    card_id: &str,
+    bring_changes: bool,
+) -> Result<crate::storage::StoredChat, CommandError> {
+    let release = |workspace: &std::path::Path| crate::leave_task(app, workspace);
     let switch = storage.switch(&release)?;
     let chat = if bring_changes {
         storage.tasks().create_carrying_changes(&switch)?
@@ -401,9 +429,32 @@ pub(crate) fn card_post_to_gofer(
         .task_id
         .clone()
         .ok_or_else(|| CommandError::from("The new task has no identifier".to_owned()))?;
-    storage.board().hand_to_task(&id, &task_id)?;
-    announce_change(&app);
+    storage.board().hand_to_task(card_id, &task_id)?;
     Ok(chat)
+}
+
+/// Puts the checkout on the card's task before an outside agent starts on it, making the task
+/// when the card has none. Without this the door edited whatever branch was checked out, and the
+/// work had no task to review, no diff to read and nothing to merge or abandon.
+fn on_the_cards_task<R: Runtime>(
+    app: &AppHandle<R>,
+    storage: &crate::storage::ProjectStorage,
+    card: &CardRecord,
+) -> Result<(), ToolFailure> {
+    match &card.task_id {
+        None => {
+            open_task_for_card(app, storage, &card.id, false)?;
+        }
+        Some(task_id) => {
+            if storage.tasks().active()?.as_deref() != Some(task_id.as_str()) {
+                let release = |workspace: &std::path::Path| crate::leave_task(app, workspace);
+                let switch = storage.switch(&release)?;
+                storage.tasks().activate(task_id, &switch)?;
+            }
+        }
+    }
+    announce_tasks_change(app);
+    Ok(())
 }
 
 #[cfg(test)]
