@@ -385,7 +385,7 @@ describe('Workspace', () => {
         expect(window.localStorage.getItem('gofer.agent-chat.v1')).toBeNull()
     })
 
-    it('loads project chat from Rust storage', async () => {
+    it('loads project chat from Rust storage and does not save it back', async () => {
         backend({
             load_chat: () => ({
                 taskId: '0198f4c0-02ef-7000-8000-000000000001',
@@ -402,10 +402,9 @@ describe('Workspace', () => {
         expect(screen.getByText('Persisted project message')).toBeInTheDocument()
         await flush()
 
-        const saveCall = tauri.invoke.mock.calls.find(call => call[0] === 'save_chat')
-        expect(saveCall?.[1]).toMatchObject({
-            chat: {taskId: '0198f4c0-02ef-7000-8000-000000000001'}
-        })
+        // A chat read back is already stored; writing it back raced the door's own writes and
+        // was refused for losing rows.
+        expect(tauri.invoke.mock.calls.some(call => call[0] === 'save_chat')).toBe(false)
     })
 
     it('keeps an unsent message with its task and restores it', async () => {
@@ -494,10 +493,11 @@ describe('Workspace', () => {
 
         await flush()
 
-        expect(tauri.invoke.mock.calls.filter(call => call[0] === 'save_chat')).toHaveLength(1)
+        expect(tauri.invoke.mock.calls.filter(call => call[0] === 'save_chat')).toHaveLength(0)
         await flush()
         await userEvent.type(screen.getByRole('combobox', {name: 'Message input'}), 'First{enter}')
         await flush()
+        expect(tauri.invoke.mock.calls.filter(call => call[0] === 'save_chat')).toHaveLength(1)
 
         expect(screen.getByRole('combobox', {name: 'Message input'})).toBeEnabled()
         await flush()

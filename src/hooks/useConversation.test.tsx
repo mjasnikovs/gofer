@@ -69,6 +69,12 @@ describe('the chat and the door', () => {
         chatChanged?.({taskId: 't1'})
         await flushUntil(() => result.current.messages.length === 1)
         const [message] = result.current.messages
+        // The user's screenshot: the window saved its stale copy over what the door had written,
+        // and storage refused it for losing rows. A chat read back is never saved back.
+        await flushUntil(
+            () => tauri.invoke.mock.calls.filter(call => call[0] === 'load_chat').length === 2
+        )
+        expect(tauri.invoke.mock.calls.some(call => call[0] === 'save_chat')).toBe(false)
         expect(message?.tools?.[0]?.name).toBe('godot_scene')
     })
 })

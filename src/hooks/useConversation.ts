@@ -10,6 +10,22 @@ import {clearLegacyChat, isStoredChat, loadLegacyChat} from '../services/chat-st
 
 const SAVE_DEBOUNCE_MS = 150
 
+type ChatLike = Readonly<{
+    taskId?: string | undefined
+    messages: StoredChat['messages']
+    agentMessages: StoredChat['agentMessages']
+}>
+
+/** The chat as it is stored. A queued message is not a fact about the conversation until the
+ * model has taken it; stored, it would be replayed into context as though it had been asked. */
+function snapshotOf(chat: ChatLike): StoredChat {
+    return {
+        ...(chat.taskId !== undefined && {taskId: chat.taskId}),
+        messages: chat.messages.filter(message => message.status !== 'queued'),
+        agentMessages: chat.agentMessages
+    }
+}
+
 type ConversationOptions = Readonly<{
     taskId?: string | undefined
     onError: (message: string) => void
@@ -23,6 +39,9 @@ export function useConversation({taskId, onError, onTasksChanged}: ConversationO
     const latestChat = useRef<StoredChat | undefined>(undefined)
     const savedChat = useRef<StoredChat | undefined>(undefined)
     const isSaveRunning = useRef(false)
+    // What the last load answered, serialized: a chat read back from storage is already saved,
+    // and saving it again over a door that has written since would be refused for losing rows.
+    const loadedChat = useRef<string | undefined>(undefined)
 
     const [runner] = useState(() =>
         createTurnRunner({
@@ -86,6 +105,12 @@ export function useConversation({taskId, onError, onTasksChanged}: ConversationO
                         await invoke('import_legacy_chat', {chat: legacy})
                     :   stored
                 if (isCancelled) return
+                pendingSave.current = undefined
+                // As storage sent it, before the runner settles it: a message left streaming is
+                // opened as aborted, and that is a change storage has to be told about.
+                loadedChat.current = JSON.stringify(snapshotOf(chat))
+                // The unmount flush reads this; the chat it held is gone with the load.
+                latestChat.current = snapshotOf(chat)
                 runner.open(chat)
                 clearLegacyChat()
                 setIsChatLoaded(true)
@@ -115,14 +140,9 @@ export function useConversation({taskId, onError, onTasksChanged}: ConversationO
 
     useEffect(() => {
         if (!isChatLoaded || !isTauri()) return
-        const snapshot: StoredChat = {
-            ...(state.taskId !== undefined && {taskId: state.taskId}),
-            // A queued message is not a fact about the conversation until the model has taken it;
-            // stored, it would be replayed into context as though it had been asked.
-            messages: state.messages.filter(message => message.status !== 'queued'),
-            agentMessages: state.agentMessages
-        }
+        const snapshot = snapshotOf(state)
         latestChat.current = snapshot
+        if (JSON.stringify(snapshot) === loadedChat.current) return undefined
         return schedule(() => {
             pendingSave.current = snapshot
             void savePending()
@@ -133,6 +153,7 @@ export function useConversation({taskId, onError, onTasksChanged}: ConversationO
         () => () => {
             const pending = latestChat.current
             if (pending === undefined || pending === savedChat.current) return
+            if (JSON.stringify(pending) === loadedChat.current) return
             pendingSave.current = pending
             void savePending()
         },
