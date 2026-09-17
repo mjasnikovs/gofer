@@ -169,6 +169,22 @@ fails the lane, so a new one needs a real call in a `godot_*_acceptance` test â€
 editor, with an assertion on the answer. Driving the addon command straight down the wire does not
 count: the router is the door the model knocks on.
 
+## Driving Gofer from a terminal
+
+Every tool the model has is behind the agent door, a loopback JSON-RPC server in
+`src-tauri/src/agent_door.rs`, and `scripts/gofer.mjs` is its client. It reads the port and token
+from the settings file, so it needs no configuration of its own. Gofer must be open on the project.
+
+```
+node scripts/gofer.mjs tools                           every tool and its operations
+node scripts/gofer.mjs godot_scene list                one operation, flags are its parameters
+node scripts/gofer.mjs board comment --id 4 --body "â€¦" a board write is signed by --owner or GOFER_OWNER
+```
+
+A call goes through the same router as the model's, so it carries the same revision check, undo
+stack and worktree. What the door cannot do is wait on the user: a gated operation answers
+`approval_needed`, and `ask_user` answers `needs_user`. Either one has to happen in Gofer's window.
+
 ## Waiting
 
 Never sleep. Never use a fixed timeout to wait for something when an event, a condition, or a

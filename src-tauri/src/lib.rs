@@ -9,6 +9,7 @@ use unsaved_work::UnsavedWork;
 use workspace::{chat_attachments_path, open_project_storage, project_storage};
 
 pub mod addon;
+mod agent_door;
 mod agent_prompt;
 mod ai_tools;
 mod ai_turn;
@@ -53,7 +54,6 @@ mod godot_script_acceptance;
 mod godot_session;
 mod godot_session_api;
 mod health;
-mod mcp_server;
 mod memory;
 mod model_server;
 mod off_thread;
@@ -128,7 +128,7 @@ async fn save_settings(
             return Err(error);
         }
 
-        mcp_server::apply(&app, &settings.mcp);
+        agent_door::apply(&app, &settings.door);
         Ok(announce_settings(&app, settings_response(settings)))
     })
     .await
@@ -615,37 +615,37 @@ fn run_storage_maintenance_in(app: &AppHandle) -> Result<MaintenanceResult, Comm
     project_storage(app)?.project().run_maintenance()
 }
 
-/// Starts the MCP server from the settings, minting the token the first time there is none.
-fn open_mcp_door(app: &AppHandle) {
-    let Ok(mut mcp) = settings::read_mcp_settings(app) else {
+/// Opens the agent door from the settings, minting the token the first time there is none.
+fn open_agent_door(app: &AppHandle) {
+    let Ok(mut door) = settings::read_door_settings(app) else {
         return;
     };
-    if mcp.token.is_empty() {
-        mcp = match settings::save_mcp_settings(app, mcp) {
-            Ok(settings) => settings.mcp,
+    if door.token.is_empty() {
+        door = match settings::save_door_settings(app, door) {
+            Ok(settings) => settings.door,
             Err(_) => return,
         };
     }
-    mcp_server::apply(app, &mcp);
+    agent_door::apply(app, &door);
 }
 
-/// The MCP settings alone, applied to the live server as they are written.
+/// The door settings alone, applied to the live door as they are written.
 #[tauri::command]
-async fn save_mcp_settings(
+async fn save_door_settings(
     app: AppHandle,
-    mcp: settings::McpSettings,
+    door: settings::DoorSettings,
 ) -> Result<SettingsResponse, CommandError> {
-    off_thread_coded("save_mcp_settings", "settings_unwritable", move || {
-        let settings = settings::save_mcp_settings(&app, mcp)?;
-        mcp_server::apply(&app, &settings.mcp);
+    off_thread_coded("save_door_settings", "settings_unwritable", move || {
+        let settings = settings::save_door_settings(&app, door)?;
+        agent_door::apply(&app, &settings.door);
         Ok(announce_settings(&app, settings_response(settings)))
     })
     .await
 }
 
 #[tauri::command]
-fn mcp_status() -> Result<mcp_server::McpStatus, CommandError> {
-    Ok(mcp_server::status())
+fn door_status() -> Result<agent_door::DoorStatus, CommandError> {
+    Ok(agent_door::status())
 }
 
 /// Searches the stored warning and error history of every recorded run.
@@ -1331,7 +1331,7 @@ pub fn run() {
         workers::remember_resource_dir(app.path().resource_dir().ok());
         godot_session_api::remember_app(app.handle().clone());
         app.manage(StorageSlot::new(open_project_storage(app.handle())));
-        open_mcp_door(app.handle());
+        open_agent_door(app.handle());
         Ok(())
     });
 
@@ -1386,7 +1386,7 @@ pub fn run() {
         load_settings,
         login_chatgpt,
         logout_chatgpt,
-        mcp_status,
+        door_status,
         merge_task_branch,
         move_workspace_path,
         open_script_document,
@@ -1414,7 +1414,7 @@ pub fn run() {
         save_script_document,
         save_settings,
         save_godot_settings,
-        save_mcp_settings,
+        save_door_settings,
         save_chat_attachment,
         search_godot_log_history,
         send_ai_message,
@@ -1469,7 +1469,7 @@ mod tests {
         let writers = [
             "write_settings(",
             "store_godot_settings(",
-            "settings::save_mcp_settings(",
+            "settings::save_door_settings(",
         ];
         let silent: Vec<&str> = include_str!("lib.rs")
             .split("#[tauri::command]\n")

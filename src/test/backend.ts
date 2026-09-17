@@ -1,6 +1,6 @@
 import {
     DEFAULT_GODOT_SETTINGS,
-    DEFAULT_MCP_SETTINGS,
+    DEFAULT_DOOR_SETTINGS,
     DEFAULT_SUBAGENT_SETTINGS,
     DEFAULT_PLAN_SETTINGS,
     DEFAULT_WEB_SETTINGS,
@@ -18,7 +18,7 @@ import type {
     GoferSettings,
     SettingsRequest,
     SettingsResponse,
-    McpStatus
+    DoorStatus
 } from '../models/settings'
 import type {TaskSummary} from '../models/app'
 import type {HealthReport} from '../models/health'
@@ -90,7 +90,7 @@ export type BackendOptions = Readonly<{
     changes?: TaskChanges
     diffs?: Readonly<Record<string, FileDiff>>
     sketchHtml?: SketchHtml
-    mcpStatus?: McpStatus
+    doorStatus?: DoorStatus
     skills?: readonly {skill: Skill; text: string}[]
     files?: readonly {path: string; bytes: number}[]
     thumbnails?: Readonly<Record<string, string>>
@@ -228,7 +228,7 @@ const STORED_SETTINGS: GoferSettings = {
         plan: DEFAULT_PLAN_SETTINGS
     },
     godot: DEFAULT_GODOT_SETTINGS,
-    mcp: DEFAULT_MCP_SETTINGS
+    door: DEFAULT_DOOR_SETTINGS
 }
 
 export const SETTINGS: SettingsResponse = {settings: STORED_SETTINGS, storedSecrets: {}}
@@ -468,16 +468,16 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
                 }
                 return state.settings
             }
-            case 'save_mcp_settings': {
-                const mcp = payload['mcp'] as GoferSettings['mcp']
+            case 'save_door_settings': {
+                const door = payload['door'] as GoferSettings['door']
                 state.settings = {
                     ...state.settings,
-                    settings: {...state.settings.settings, mcp}
+                    settings: {...state.settings.settings, door}
                 }
                 return state.settings
             }
-            case 'mcp_status':
-                return options.mcpStatus ?? {url: 'http://127.0.0.1:47831/mcp', error: null}
+            case 'door_status':
+                return options.doorStatus ?? {url: 'http://127.0.0.1:47831/door', error: null}
             case 'read_agent_prompt':
             case 'save_agent_prompt':
                 return options.agentPrompt ?? PROMPT

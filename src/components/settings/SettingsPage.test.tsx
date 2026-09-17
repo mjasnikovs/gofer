@@ -718,19 +718,18 @@ describe('when the settings cannot be read at all', () => {
 })
 
 describe('the other agents door', () => {
-    const savedMcp = () =>
+    const savedDoor = () =>
         (
-            tauri.invoke.mock.calls.filter(call => call[0] === 'save_mcp_settings').at(-1)?.[1] as
-                {mcp: {port: number; token: string}} | undefined
-        )?.mcp
+            tauri.invoke.mock.calls.filter(call => call[0] === 'save_door_settings').at(-1)?.[1] as
+                {door: {port: number; token: string}} | undefined
+        )?.door
 
-    it('shows where the door is and how Claude Code connects to it', async () => {
+    it('shows where the door is and how a terminal reaches it', async () => {
         await open()
         await openTab('Other agents')
 
-        expect(
-            screen.getByText(/claude mcp add --scope user --transport http gofer/)
-        ).toBeInTheDocument()
+        expect(await screen.findByText('http://127.0.0.1:47831/door')).toBeInTheDocument()
+        expect(screen.getByText(/gofer board list/)).toBeInTheDocument()
         expect(screen.getByRole('button', {name: 'Save'})).toBeDisabled()
     })
 
@@ -762,13 +761,13 @@ describe('the other agents door', () => {
         await user.click(screen.getByRole('button', {name: 'Save'}))
         await flush()
 
-        expect(savedMcp()?.port).toBe(5005)
-        expect(savedMcp()?.token).toMatch(/^[0-9a-f]{32}$/)
+        expect(savedDoor()?.port).toBe(5005)
+        expect(savedDoor()?.token).toMatch(/^[0-9a-f]{32}$/)
         expect(screen.getByText('Agent door saved')).toBeInTheDocument()
     })
 
     it('says when the door could not open', async () => {
-        answer({mcp_status: {url: null, error: 'Port 47831 could not be opened: in use'}})
+        answer({door_status: {url: null, error: 'Port 47831 could not be opened: in use'}})
         await open()
         await openTab('Other agents')
 

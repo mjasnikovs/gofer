@@ -93,12 +93,13 @@ pub(crate) struct GoferSettings {
     /// on, because that is what a project opened for the first time gets.
     #[serde(default)]
     pub(crate) godot: GodotSettings,
-    /// The door other agents come through. Defaults for the same reason `godot` does.
-    #[serde(default)]
-    pub(crate) mcp: McpSettings,
+    /// The door other agents come through. Defaults for the same reason `godot` does. The alias
+    /// keeps the token a file wrote under the door's old name.
+    #[serde(default, alias = "mcp")]
+    pub(crate) door: DoorSettings,
 }
 
-/// Where the MCP server listens and what it asks for at the door.
+/// Where the agent door listens and what it asks for.
 ///
 /// The token is the whole of the authentication, so it is the one value here that must never be
 /// a default: an empty one means "not made yet", and the server mints one the first time it
@@ -106,30 +107,30 @@ pub(crate) struct GoferSettings {
 /// out to paste into another agent's configuration, and the keyring hides exactly that.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct McpSettings {
-    #[serde(default = "default_mcp_port")]
+pub(crate) struct DoorSettings {
+    #[serde(default = "default_door_port")]
     pub(crate) port: u16,
     #[serde(default)]
     pub(crate) token: String,
 }
 
-impl Default for McpSettings {
+impl Default for DoorSettings {
     fn default() -> Self {
         Self {
-            port: default_mcp_port(),
+            port: default_door_port(),
             token: String::new(),
         }
     }
 }
 
 /// Above the well-known and registered ranges, and not one any common local service takes.
-pub(crate) const DEFAULT_MCP_PORT: u16 = 47831;
+pub(crate) const DEFAULT_DOOR_PORT: u16 = 47831;
 
-fn default_mcp_port() -> u16 {
-    DEFAULT_MCP_PORT
+fn default_door_port() -> u16 {
+    DEFAULT_DOOR_PORT
 }
 
-impl McpSettings {
+impl DoorSettings {
     /// A token nobody could guess, from the operating system's randomness.
     pub(crate) fn mint_token() -> String {
         uuid::Uuid::new_v4().simple().to_string()
@@ -823,7 +824,7 @@ impl Default for GoferSettings {
             version: SETTINGS_VERSION,
             ai: AiSettings::default(),
             godot: GodotSettings::default(),
-            mcp: McpSettings::default(),
+            door: DoorSettings::default(),
         }
     }
 }
@@ -1806,7 +1807,7 @@ fn default_settings_from_pi_path(path: &Path) -> Option<GoferSettings> {
             plan: PlanSettings::default(),
         },
         godot: GodotSettings::default(),
-        mcp: McpSettings::default(),
+        door: DoorSettings::default(),
     })
 }
 
@@ -1838,36 +1839,36 @@ fn save_godot_settings_at(path: &Path, godot: GodotSettings) -> Result<GoferSett
 
 /// Stores the door's settings alone, minting a token when there is none. The one place a token
 /// is ever invented: a read must answer what the file says, or the server and the page disagree.
-pub(crate) fn save_mcp_settings(
+pub(crate) fn save_door_settings(
     app: &AppHandle,
-    mcp: McpSettings,
+    door: DoorSettings,
 ) -> Result<GoferSettings, String> {
     let path = settings_path(app)?;
-    save_mcp_settings_at(&path, mcp)
+    save_door_settings_at(&path, door)
 }
 
-fn save_mcp_settings_at(path: &Path, mcp: McpSettings) -> Result<GoferSettings, String> {
+fn save_door_settings_at(path: &Path, door: DoorSettings) -> Result<GoferSettings, String> {
     let mut settings = read_settings_from_path(path)?;
-    settings.mcp = validate_mcp(mcp)?;
-    if settings.mcp.token.is_empty() {
-        settings.mcp.token = McpSettings::mint_token();
+    settings.door = validate_door(door)?;
+    if settings.door.token.is_empty() {
+        settings.door.token = DoorSettings::mint_token();
     }
     write_settings_to_path(path, &settings)?;
     Ok(settings)
 }
 
-/// The MCP settings alone, without asking any model server what it is serving.
-pub(crate) fn read_mcp_settings<R: Runtime>(app: &AppHandle<R>) -> Result<McpSettings, String> {
+/// The door settings alone, without asking any model server what it is serving.
+pub(crate) fn read_door_settings<R: Runtime>(app: &AppHandle<R>) -> Result<DoorSettings, String> {
     let path = settings_path(app)?;
-    Ok(read_settings_unprobed_from_path(&path)?.mcp)
+    Ok(read_settings_unprobed_from_path(&path)?.door)
 }
 
-fn validate_mcp(mut mcp: McpSettings) -> Result<McpSettings, String> {
-    if mcp.port == 0 {
-        return Err("The MCP port must be between 1 and 65535".to_owned());
+fn validate_door(mut door: DoorSettings) -> Result<DoorSettings, String> {
+    if door.port == 0 {
+        return Err("The door port must be between 1 and 65535".to_owned());
     }
-    mcp.token = mcp.token.trim().to_owned();
-    Ok(mcp)
+    door.token = door.token.trim().to_owned();
+    Ok(door)
 }
 
 fn write_settings_to_path(path: &Path, settings: &GoferSettings) -> Result<(), String> {
@@ -1906,7 +1907,7 @@ pub(crate) fn validate_settings(mut settings: GoferSettings) -> Result<GoferSett
     if settings.ai.connection().is_none() {
         return Err("The chosen AI driver has no connection configured".to_owned());
     }
-    settings.mcp = validate_mcp(std::mem::take(&mut settings.mcp))?;
+    settings.door = validate_door(std::mem::take(&mut settings.door))?;
     if settings.ai.max_retries > 10 {
         return Err("Maximum retries cannot exceed 10".to_owned());
     }
@@ -3493,21 +3494,21 @@ mod tests {
         let stored =
             validate_settings(settings("http://localhost:9999/v1", "stored-model")).expect("valid");
         let mut without = serde_json::to_value(&stored).expect("json");
-        without.as_object_mut().expect("object").remove("mcp");
+        without.as_object_mut().expect("object").remove("door");
         fs::write(&path, without.to_string()).expect("write settings");
 
         let first = read_settings_from_path(&path).expect("read");
         let second = read_settings_from_path(&path).expect("read again");
-        assert_eq!(first.mcp.token, "", "nothing has been minted yet");
-        assert_eq!(first.mcp, second.mcp);
+        assert_eq!(first.door.token, "", "nothing has been minted yet");
+        assert_eq!(first.door, second.door);
 
-        let saved = save_mcp_settings_at(&path, McpSettings::default()).expect("save");
-        assert_eq!(saved.mcp.token.len(), 32, "a save mints one");
+        let saved = save_door_settings_at(&path, DoorSettings::default()).expect("save");
+        assert_eq!(saved.door.token.len(), 32, "a save mints one");
         let loaded = read_settings_from_path(&path).expect("read");
-        assert_eq!(loaded.mcp, saved.mcp, "and the file keeps it");
-        let again = save_mcp_settings_at(&path, loaded.mcp.clone()).expect("save again");
+        assert_eq!(loaded.door, saved.door, "and the file keeps it");
+        let again = save_door_settings_at(&path, loaded.door.clone()).expect("save again");
         assert_eq!(
-            again.mcp, loaded.mcp,
+            again.door, loaded.door,
             "a save with a token keeps that token"
         );
     }

@@ -62,8 +62,8 @@ import type {
     SettingsRequest,
     SettingsResponse,
     StorageMaintenanceResult,
-    McpSettings,
-    McpStatus
+    DoorSettings,
+    DoorStatus
 } from '../models/settings'
 import type {
     CallGodotRequest,
@@ -210,6 +210,7 @@ export type DesktopCommandMap = Readonly<{
     delete_rag_cache: CommandSpec<undefined, CacheStatus>
     delete_skill: CommandSpec<{name: string}, SkillsResponse>
     delete_workspace_path: CommandSpec<{request: DeleteWorkspacePathRequest}, void>
+    door_status: CommandSpec<undefined, DoorStatus>
     edit_workspace_file: CommandSpec<{request: EditWorkspaceFileRequest}, WorkspaceFileStamp>
     format_gdscript: CommandSpec<{request: FormatGdscriptRequest}, FormatGdscriptResponse>
     get_godot_session: CommandSpec<undefined, GodotSessionSummary | undefined>
@@ -235,7 +236,6 @@ export type DesktopCommandMap = Readonly<{
         void
     >
     logout_chatgpt: CommandSpec<undefined, void>
-    mcp_status: CommandSpec<undefined, McpStatus>
     merge_task_branch: CommandSpec<{taskId: string; unsavedWork?: UnsavedWork}, unknown>
     move_workspace_path: CommandSpec<{request: MoveWorkspacePathRequest}, void>
     open_script_document: CommandSpec<{request: OpenScriptRequest}, ScriptDocument>
@@ -265,8 +265,8 @@ export type DesktopCommandMap = Readonly<{
     save_agent_prompt: CommandSpec<{prompt: string}, AgentPrompt>
     save_chat: CommandSpec<{chat: StoredChatPayload}, void>
     save_chat_attachment: CommandSpec<{request: AttachmentUpload}, void>
+    save_door_settings: CommandSpec<{door: DoorSettings}, SettingsResponse>
     save_godot_settings: CommandSpec<{godot: GodotSettings}, SettingsResponse>
-    save_mcp_settings: CommandSpec<{mcp: McpSettings}, SettingsResponse>
     save_project_memory: CommandSpec<{edit: MemoryEdit}, ProjectMemory>
     save_script_document: CommandSpec<{request: SaveScriptRequest}, ScriptStamp>
     save_settings: CommandSpec<{request: SettingsRequest}, SettingsResponse>

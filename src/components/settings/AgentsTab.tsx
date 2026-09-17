@@ -12,7 +12,7 @@ import {TextInput} from '@astryxdesign/core/TextInput'
 import UsersIcon from '@heroicons/react/24/outline/UsersIcon'
 import {invoke} from '../../services/desktop'
 import {commandErrorMessage} from '../../utils/command-error'
-import type {McpStatus} from '../../models/settings'
+import type {DoorStatus} from '../../models/settings'
 import {SETTINGS_GRID_COLUMNS, settingsBanner} from './settings-view'
 import type {SettingsTabView, SettingsView} from './settings-view'
 
@@ -29,32 +29,29 @@ function parsePort(typed: string): number | undefined {
     return port >= 1 && port <= LAST_PORT ? port : undefined
 }
 
-function connectCommand(url: string, token: string) {
-    // User scope, because the agent that needs the board is working in some other directory.
-    return `claude mcp add --scope user --transport http gofer ${url} --header "Authorization: Bearer ${token}"`
-}
+const CLI_EXAMPLE = 'gofer tools\ngofer godot_scene list\ngofer board list'
 
 export function useAgentsTab(view: SettingsView): SettingsTabView {
     const {state, dispatch, run} = view
     const draft = state.settings
     const {busy} = state
-    const [status, setStatus] = useState<McpStatus | undefined>()
+    const [status, setStatus] = useState<DoorStatus | undefined>()
     // The field holds what was typed, not the number: a port being retyped passes through
     // nothing and through 7, and neither of those is a port the draft should hold.
     const [portText, setPortText] = useState<string>()
-    const savedMcp = state.savedSettings?.mcp
-    const typedPort = portText === undefined ? draft?.mcp.port : parsePort(portText)
+    const savedDoor = state.savedSettings?.door
+    const typedPort = portText === undefined ? draft?.door.port : parsePort(portText)
     const isPortValid = typedPort !== undefined
     const isDirty =
         draft !== undefined
-        && savedMcp !== undefined
+        && savedDoor !== undefined
         && isPortValid
-        && (draft.mcp.port !== savedMcp.port || draft.mcp.token !== savedMcp.token)
+        && (draft.door.port !== savedDoor.port || draft.door.token !== savedDoor.token)
 
     useEffect(() => {
-        if (!savedMcp) return undefined
+        if (!savedDoor) return undefined
         let cancelled = false
-        void invoke('mcp_status')
+        void invoke('door_status')
             .then(read => {
                 if (!cancelled) setStatus(read)
             })
@@ -64,13 +61,13 @@ export function useAgentsTab(view: SettingsView): SettingsTabView {
         return () => {
             cancelled = true
         }
-    }, [savedMcp])
+    }, [savedDoor])
 
     const save = () =>
-        run('savingMcp', 'The agent door could not be saved', async () => {
+        run('savingDoor', 'The agent door could not be saved', async () => {
             if (!draft) return
-            const response = await invoke('save_mcp_settings', {mcp: draft.mcp})
-            dispatch({type: 'mcp-saved', response})
+            const response = await invoke('save_door_settings', {door: draft.door})
+            dispatch({type: 'door-saved', response})
         })
 
     const url = status?.url ?? undefined
@@ -97,9 +94,10 @@ export function useAgentsTab(view: SettingsView): SettingsTabView {
                             <Heading level={2}>Other agents</Heading>
                         </HStack>
                         <Text color='secondary'>
-                            Any MCP client on this machine can read and write the project board with
-                            this address and token. It reaches cards and comments only, never files.
-                            The door is open while Gofer is open.
+                            An agent in a terminal on this machine can call every tool the model
+                            has, editor and board alike, through this address and token. The gofer
+                            command in Gofer's repository reads both from the settings file. The
+                            door is open while Gofer is open.
                         </Text>
                         {status?.error ?
                             <Banner
@@ -114,7 +112,7 @@ export function useAgentsTab(view: SettingsView): SettingsTabView {
                         <FormLayout>
                             <TextInput
                                 label='Port'
-                                value={portText ?? String(draft.mcp.port)}
+                                value={portText ?? String(draft.door.port)}
                                 description='On this machine only. Two open projects need two ports.'
                                 {...(!isPortValid && {
                                     status: {
@@ -126,29 +124,28 @@ export function useAgentsTab(view: SettingsView): SettingsTabView {
                                     setPortText(typed)
                                     const port = parsePort(typed)
                                     if (port !== undefined)
-                                        dispatch({type: 'mcp-changed', update: {port}})
+                                        dispatch({type: 'door-changed', update: {port}})
                                 }}
                             />
                             <TextInput
                                 label='Token'
-                                value={draft.mcp.token}
+                                value={draft.door.token}
                                 description='Every request must carry it. Anyone who has it can write to the board.'
                                 onChange={token => {
-                                    dispatch({type: 'mcp-changed', update: {token}})
+                                    dispatch({type: 'door-changed', update: {token}})
                                 }}
                             />
                             <Button
                                 label='New token'
                                 variant='secondary'
                                 clickAction={() => {
-                                    dispatch({type: 'mcp-changed', update: {token: mintToken()}})
+                                    dispatch({type: 'door-changed', update: {token: mintToken()}})
                                 }}
                             />
-                            {url && savedMcp ?
+                            {url ?
                                 <CodeBlock
-                                    title='Connect Claude Code'
-                                    code={connectCommand(url, savedMcp.token)}
-                                    isWrapped
+                                    title={url}
+                                    code={CLI_EXAMPLE}
                                     width='100%'
                                 />
                             :   null}
@@ -174,7 +171,7 @@ export function useAgentsTab(view: SettingsView): SettingsTabView {
                     <Button
                         label='Save'
                         variant='primary'
-                        isLoading={busy.savingMcp}
+                        isLoading={busy.savingDoor}
                         isDisabled={!isDirty}
                         clickAction={save}
                     />

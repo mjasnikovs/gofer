@@ -32,7 +32,7 @@ const WORKER: Actor = Actor::Tool {
     turn_running: false,
 };
 
-/// A client of the MCP door, which is locked out of a card the model is working on right now.
+/// A client of the agent door, which is locked out of a card the model is working on right now.
 pub(crate) fn outside_actor() -> Actor {
     Actor::Tool {
         turn_running: crate::ai_turn::provider_operation_running(),
@@ -139,10 +139,72 @@ fn no_card_for_task() -> CommandError {
     )
 }
 
+/// Who writes a card through the tool: the worker as itself, or an outside agent by the name it
+/// gave. The name is not a parameter the model sees; the door alone requires it.
+enum Writer {
+    Worker,
+    Outside { owner: String },
+}
+
+impl Writer {
+    fn owner(&self) -> &str {
+        match self {
+            Writer::Worker => WORKER_OWNER,
+            Writer::Outside { owner } => owner,
+        }
+    }
+
+    fn actor(&self) -> Actor {
+        match self {
+            Writer::Worker => WORKER,
+            Writer::Outside { .. } => outside_actor(),
+        }
+    }
+}
+
 /// Answers the worker's `board` tool, or refuses in a sentence the model can act on.
 pub(crate) fn board_tool<R: Runtime>(
     app: &AppHandle<R>,
     params: &Value,
+) -> Result<Value, ToolFailure> {
+    board_tool_as(app, params, Writer::Worker)
+}
+
+/// The same tool for an agent at the door, which names itself in `owner` on every write.
+pub(crate) fn board_tool_from_outside<R: Runtime>(
+    app: &AppHandle<R>,
+    params: &Value,
+) -> Result<Value, ToolFailure> {
+    let reads = matches!(
+        params.get("op").and_then(Value::as_str),
+        Some("list" | "read")
+    );
+    let owner = params
+        .get("owner")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|owner| !owner.is_empty());
+    let writer = match owner {
+        Some(owner) => Writer::Outside {
+            owner: owner.to_owned(),
+        },
+        None if reads => Writer::Outside {
+            owner: String::new(),
+        },
+        None => {
+            return Err(ToolFailure::new(
+                "invalid_params",
+                "`owner` is required: name yourself on every write",
+            ));
+        }
+    };
+    board_tool_as(app, params, writer)
+}
+
+fn board_tool_as<R: Runtime>(
+    app: &AppHandle<R>,
+    params: &Value,
+    writer: Writer,
 ) -> Result<Value, ToolFailure> {
     if params
         .get(crate::ai_tools::PROBE_KEY)
@@ -166,6 +228,7 @@ pub(crate) fn board_tool<R: Runtime>(
         None => own.clone().ok_or_else(no_card_for_task),
     };
     let reads = matches!(call, BoardCall::List | BoardCall::Read { .. });
+    let actor = writer.actor();
     let answer = match call {
         BoardCall::List => tool_list(&board.list()?, own.as_ref()),
         BoardCall::Read { id } => tool_detail(&board.read(&target(id)?.id)?, own.as_ref()),
@@ -177,21 +240,21 @@ pub(crate) fn board_tool<R: Runtime>(
             let card = NewCard {
                 title,
                 body,
-                owner: WORKER_OWNER.to_owned(),
+                owner: writer.owner().to_owned(),
                 status: status.unwrap_or(CardStatus::Backlog),
                 attachments: Vec::new(),
             };
-            tool_card(&board.create(&card, WORKER)?, own.as_ref())
+            tool_card(&board.create(&card, actor)?, own.as_ref())
         }
         BoardCall::Move { id, status } => tool_card(
-            &board.move_to(&target(id)?.id, status, WORKER)?,
+            &board.move_to(&target(id)?.id, status, actor)?,
             own.as_ref(),
         ),
         BoardCall::Comment { id, body } => {
             let card = target(id)?;
             tool_comment(
                 &card,
-                &board.comment(&card.id, WORKER_OWNER, &body, WORKER)?,
+                &board.comment(&card.id, writer.owner(), &body, actor)?,
             )
         }
         BoardCall::Edit { id, title, body } => {
@@ -201,7 +264,7 @@ pub(crate) fn board_tool<R: Runtime>(
                 owner: None,
                 attachments: None,
             };
-            tool_card(&board.edit(&target(id)?.id, &edit, WORKER)?, own.as_ref())
+            tool_card(&board.edit(&target(id)?.id, &edit, actor)?, own.as_ref())
         }
     };
     if !reads {
@@ -386,7 +449,7 @@ mod tests {
     #[test]
     fn a_call_with_no_id_works_the_card_its_task_was_opened_from() {
         let directory = tempfile::TempDir::new().expect("temporary directory");
-        let app = crate::mcp_server::tests::app_with_storage(&directory);
+        let app = crate::agent_door::tests::app_with_storage(&directory);
         let storage = crate::workspace::project_storage(app.handle()).expect("storage");
         let refused = board_tool(app.handle(), &json!({"op": "comment", "body": "Done"}))
             .expect_err("no task yet");

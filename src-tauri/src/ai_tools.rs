@@ -251,13 +251,40 @@ fn note_a_read<R: Runtime>(app: &AppHandle<R>, params: &Value) -> Result<Value, 
     Ok(json!({"noted": hash.is_some()}))
 }
 
+/// Who is calling: the worker in a turn, or an agent at the door with no turn and no dialog.
+///
+/// An outside caller has nobody to click for it, so a call that would wait on the user is refused
+/// with a code instead of hanging the door until the timeout: the approval gate and `ask_user`.
+/// The board also needs a name from it, where the worker writes as itself.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Caller {
+    Worker,
+    Outside,
+}
+
 /// Answers one tool call by routing it to the handler the renderer uses for the same operation.
 pub fn dispatch<R: Runtime>(
     app: &AppHandle<R>,
     request: ToolRequest,
 ) -> Result<Value, ToolFailure> {
+    dispatch_as(app, request, Caller::Worker)
+}
+
+/// The same door, for an agent outside the turn.
+pub fn dispatch_from_outside<R: Runtime>(
+    app: &AppHandle<R>,
+    request: ToolRequest,
+) -> Result<Value, ToolFailure> {
+    dispatch_as(app, request, Caller::Outside)
+}
+
+fn dispatch_as<R: Runtime>(
+    app: &AppHandle<R>,
+    request: ToolRequest,
+    caller: Caller,
+) -> Result<Value, ToolFailure> {
     let rules = crate::settings::read_godot_settings(app).unwrap_or_default();
-    dispatch_under(app, request, &rules)
+    dispatch_under(app, request, &rules, caller)
 }
 
 /// The router, with the user's Godot rules passed in rather than read.
@@ -272,13 +299,14 @@ fn dispatch_under<R: Runtime>(
     app: &AppHandle<R>,
     request: ToolRequest,
     rules: &crate::settings::GodotSettings,
+    caller: Caller,
 ) -> Result<Value, ToolFailure> {
     let listed = request
         .params
         .get("ops")
         .and_then(Value::as_array)
         .map_or(0, Vec::len);
-    route(app, request, rules).map_err(|failure| said_that_none_of_it_ran(listed, failure))
+    route(app, request, rules, caller).map_err(|failure| said_that_none_of_it_ran(listed, failure))
 }
 
 /// Says that a refused list left nothing behind, for a model that would otherwise assume it did.
@@ -318,6 +346,7 @@ fn route<R: Runtime>(
     app: &AppHandle<R>,
     request: ToolRequest,
     rules: &crate::settings::GodotSettings,
+    caller: Caller,
 ) -> Result<Value, ToolFailure> {
     if crate::cancel::is_cancelled() {
         return Err(ToolFailure::new(
@@ -326,13 +355,22 @@ fn route<R: Runtime>(
         ));
     }
     if request.tool == crate::ask::ASK_USER_TOOL {
+        if caller == Caller::Outside {
+            return Err(ToolFailure::new(
+                "needs_user",
+                "ask_user waits on the user in Gofer's window, and the door has no turn to ask in",
+            ));
+        }
         return crate::ask::ask_user(app, &request.params);
     }
     if request.tool == crate::remember::REMEMBER_TOOL {
         return crate::remember::remember(app, &request.params);
     }
     if request.tool == crate::board::BOARD_TOOL {
-        return crate::board::board_tool(app, &request.params);
+        return match caller {
+            Caller::Worker => crate::board::board_tool(app, &request.params),
+            Caller::Outside => crate::board::board_tool_from_outside(app, &request.params),
+        };
     }
     if request.tool == crate::read_ledger::NOTED_READ_TOOL {
         return note_a_read(app, &request.params);
@@ -378,6 +416,9 @@ fn route<R: Runtime>(
     refuse_a_list_that_holds_a_lone_operation(&entries)?;
 
     for (domain, gated) in gated_per_domain(app, &entries)? {
+        if caller == Caller::Outside {
+            return Err(refused_without_a_user_to_ask(domain, &gated));
+        }
         approvals::require(app, domain.name, &gated)?;
     }
 
@@ -396,6 +437,29 @@ fn route<R: Runtime>(
         )
     };
     run_in_order(entries, step)
+}
+
+/// The refusal an outside caller gets where the worker would get a dialog. It names every gated
+/// operation and why, so the caller can ask the user itself — in whatever window it has.
+fn refused_without_a_user_to_ask(
+    domain: &ToolDomain,
+    gated: &[approvals::GatedCall],
+) -> ToolFailure {
+    let named: Vec<String> = gated
+        .iter()
+        .map(|call| format!("{}.{} ({})", domain.name, call.op, call.reason))
+        .collect();
+    ToolFailure {
+        code: "approval_needed".to_owned(),
+        message: format!(
+            "{} needs the user's approval, and the door has no dialog to ask in. Nothing ran. \
+             Have the user do it in Gofer, or ask them yourself and send an operation that \
+             is not gated.",
+            named.join(", ")
+        ),
+        retryable: false,
+        details: json!({"tool": domain.name, "gated": gated}),
+    }
 }
 
 /// A start refused because another is in flight is a start to wait on, not a failure.
@@ -4102,6 +4166,7 @@ mod tests {
             app.handle(),
             call("godot_project", "set_setting", warning.clone()),
             &enforcing,
+            Caller::Worker,
         )
         .expect_err("an enforced warning is not the agent's to write");
         assert_eq!(failure.code, "policy_enforced");
@@ -4112,6 +4177,7 @@ mod tests {
                 app.handle(),
                 call("godot_project", "set_setting", warning),
                 &relaxed,
+                Caller::Worker,
             )
             .expect_err("no session is active")
             .code,
@@ -4130,6 +4196,7 @@ mod tests {
                     }),
                 ),
                 &enforcing,
+                Caller::Worker,
             )
             .expect_err("an enforced editor rule is refused rather than prompted")
             .code,
@@ -4721,6 +4788,7 @@ mod tests {
             app.handle(),
             call("godot_runtime", "input", json!({"events": [{"key": "A"}]})),
             &crate::settings::GodotSettings::default(),
+            Caller::Worker,
         )
         .expect_err("an event with no kind is refused");
         assert_eq!(refused.code, "missing_param");
@@ -4746,6 +4814,7 @@ mod tests {
                 json!({"events": [{"kind": "keyboard", "key": "A"}]}),
             ),
             &crate::settings::GodotSettings::default(),
+            Caller::Worker,
         )
         .expect_err("a kind outside the five is refused");
         assert!(wrong.message.contains("mouse_motion"), "{}", wrong.message);
@@ -4765,6 +4834,7 @@ mod tests {
                 ]}),
             ),
             &crate::settings::GodotSettings::default(),
+            Caller::Worker,
         )
         .expect_err("no session is active");
         assert_ne!(complete.code, "missing_param", "{}", complete.message);
@@ -4830,6 +4900,7 @@ mod tests {
                 json!({"files": [{"edits": [{"oldText": "a", "newText": "b"}]}]}),
             ),
             &crate::settings::GodotSettings::default(),
+            Caller::Worker,
         )
         .expect_err("an entry with no path is refused");
         assert_eq!(refused.code, "missing_param");

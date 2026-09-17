@@ -23,7 +23,7 @@ import type {
     CacheStatus,
     GodotSettings,
     GoferSettings,
-    McpSettings,
+    DoorSettings,
     ModelChoice,
     Notice,
     SecretName,
@@ -38,7 +38,7 @@ export type SettingsTask =
     | 'saving'
     | 'savingPrompt'
     | 'savingGodot'
-    | 'savingMcp'
+    | 'savingDoor'
     | 'downloading'
     | 'deleting'
     | 'backingUp'
@@ -53,7 +53,7 @@ export const TASK_TABS: Readonly<Record<SettingsTask, SettingsTab>> = {
     saving: 'ai',
     savingPrompt: 'prompt',
     savingGodot: 'godot',
-    savingMcp: 'agents',
+    savingDoor: 'agents',
     downloading: 'models',
     deleting: 'models',
     backingUp: 'storage',
@@ -132,8 +132,8 @@ export type SettingsAction =
     | Readonly<{type: 'prompt-saved'; prompt: AgentPrompt}>
     | Readonly<{type: 'godot-changed'; update: Partial<GodotSettings>}>
     | Readonly<{type: 'godot-saved'; response: SettingsResponse}>
-    | Readonly<{type: 'mcp-changed'; update: Partial<McpSettings>}>
-    | Readonly<{type: 'mcp-saved'; response: SettingsResponse}>
+    | Readonly<{type: 'door-changed'; update: Partial<DoorSettings>}>
+    | Readonly<{type: 'door-saved'; response: SettingsResponse}>
     | Readonly<{type: 'noticed'; tab: SettingsTab; notice: Notice}>
     | Readonly<{type: 'cache-read'; cache: CacheStatus}>
     | Readonly<{type: 'cache-downloading'}>
@@ -146,7 +146,7 @@ const NOTHING_RUNNING: SettingsBusy = {
     saving: false,
     savingPrompt: false,
     savingGodot: false,
-    savingMcp: false,
+    savingDoor: false,
     downloading: false,
     deleting: false,
     backingUp: false,
@@ -535,20 +535,20 @@ export function reduce(
             }
         }
 
-        case 'mcp-changed':
+        case 'door-changed':
             if (!state.settings) return state
             return {
                 ...state,
-                settings: {...state.settings, mcp: {...state.settings.mcp, ...action.update}}
+                settings: {...state.settings, door: {...state.settings.door, ...action.update}}
             }
 
-        case 'mcp-saved': {
+        case 'door-saved': {
             const saved = normalizeSettings(action.response.settings)
             return {
                 ...state,
                 settings: saved,
                 savedSettings: saved,
-                busy: busyWith(state.busy, 'savingMcp', false),
+                busy: busyWith(state.busy, 'savingDoor', false),
                 notices: noticedOn(state.notices, 'agents', {
                     status: 'success',
                     title: 'Agent door saved',

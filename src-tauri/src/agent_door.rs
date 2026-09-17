@@ -1,13 +1,15 @@
-//! The door other agents come through: an MCP server over HTTP on the loopback interface.
+//! The door other agents come through: JSON-RPC over HTTP on the loopback interface.
 //!
-//! It speaks the streamable-HTTP transport in its plainest form — one JSON-RPC request per `POST`,
-//! one JSON reply, no event stream — which is all a client needs to list and call tools. Spoken
-//! over `std::net` on a thread of its own, like `godot_rpc` and `model_server`, because the process
-//! has no async runtime outside tests and five JSON-RPC methods are not a reason to grow one.
+//! One request per `POST`, one JSON reply, no event stream. Spoken over `std::net` on a thread of
+//! its own, like `godot_rpc` and `model_server`, because the process has no async runtime outside
+//! tests and three JSON-RPC methods are not a reason to grow one.
 //!
-//! Six tools, one per board operation, and nothing that reaches a file. A caller names itself in
-//! `owner` on every write, because the token is shared and the board is the only place the name
-//! is kept.
+//! Every tool the worker has is behind it, through the same router, so an agent in a terminal
+//! edits the scene the way the model does: same revision check, same undo stack, same worktree.
+//! What the door cannot do is wait on the user — it has no turn and no dialog — so a gated
+//! operation and `ask_user` are refused by code, and the board asks the caller to name itself in
+//! `owner` because the token is shared. It used to speak MCP and reach the board alone; the
+//! `scripts/gofer.mjs` CLI is the client it is shaped for now.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -20,16 +22,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tauri::{AppHandle, Runtime};
 
-use crate::board::{
-    announce_change, given_reference, outside_actor, tool_card, tool_comment, tool_detail,
-    tool_list,
-};
-use crate::command_error::CommandError;
-use crate::settings::McpSettings;
-use crate::storage::{Board, CardEdit, CardRecord, CardStatus, NewCard};
+use crate::ai_tools::{CATALOG, ToolRequest, dispatch_from_outside};
+use crate::settings::DoorSettings;
 
-const PATH: &str = "/mcp";
-const PROTOCOL_VERSION: &str = "2025-06-18";
+const PATH: &str = "/door";
 /// Longest request body that will be read. A card is bounded at a chat message's size, and one
 /// request carries one card.
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
@@ -51,20 +47,20 @@ struct Running {
 /// What the settings page shows about the door: where it is, whether it is open, and why not.
 #[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct McpStatus {
+pub(crate) struct DoorStatus {
     pub(crate) url: Option<String>,
     pub(crate) error: Option<String>,
 }
 
 static LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
 
-pub(crate) fn status() -> McpStatus {
+pub(crate) fn status() -> DoorStatus {
     let url = SERVER
         .lock()
         .ok()
         .and_then(|server| server.as_ref().map(|running| url_of(running.address)));
     let error = LAST_ERROR.lock().ok().and_then(|error| error.clone());
-    McpStatus { url, error }
+    DoorStatus { url, error }
 }
 
 fn url_of(address: SocketAddr) -> String {
@@ -74,7 +70,7 @@ fn url_of(address: SocketAddr) -> String {
 /// Brings the server in line with the settings: started, moved to another port, or given the
 /// new token. A bind that fails is remembered for the settings page and is not fatal — the
 /// window is the door that matters, and it is open regardless.
-pub(crate) fn apply<R: Runtime>(app: &AppHandle<R>, settings: &McpSettings) {
+pub(crate) fn apply<R: Runtime>(app: &AppHandle<R>, settings: &DoorSettings) {
     let mut server = match SERVER.lock() {
         Ok(server) => server,
         Err(_) => return,
@@ -114,22 +110,22 @@ fn stop(mut running: Running) {
     }
 }
 
-fn start<R: Runtime>(app: AppHandle<R>, settings: &McpSettings) -> Result<Running, String> {
+fn start<R: Runtime>(app: AppHandle<R>, settings: &DoorSettings) -> Result<Running, String> {
     let listener = TcpListener::bind(("127.0.0.1", settings.port))
         .map_err(|error| format!("Port {} could not be opened: {error}", settings.port))?;
     let address = listener
         .local_addr()
-        .map_err(|error| format!("The MCP port could not be read back: {error}"))?;
+        .map_err(|error| format!("The door port could not be read back: {error}"))?;
     let token = Arc::new(Mutex::new(settings.token.clone()));
     let stop = Arc::new(AtomicBool::new(false));
     let thread = thread::Builder::new()
-        .name("gofer-mcp".to_owned())
+        .name("gofer-door".to_owned())
         .spawn({
             let token = Arc::clone(&token);
             let stop = Arc::clone(&stop);
             move || accept_loop(listener, app, token, stop)
         })
-        .map_err(|error| format!("The MCP thread could not be started: {error}"))?;
+        .map_err(|error| format!("The door thread could not be started: {error}"))?;
     Ok(Running {
         address,
         token,
@@ -152,7 +148,7 @@ fn accept_loop<R: Runtime>(
         let app = app.clone();
         let token = Arc::clone(&token);
         let _ = thread::Builder::new()
-            .name("gofer-mcp-request".to_owned())
+            .name("gofer-door-request".to_owned())
             .spawn(move || serve(stream, &app, &token));
     }
 }
@@ -273,7 +269,7 @@ fn answer<R: Runtime>(body: &[u8], app: &AppHandle<R>) -> String {
         return http(
             400,
             "Bad Request",
-            &rpc_error(Value::Null, -32700, "The body is not JSON").to_string(),
+            &rpc_error(Value::Null, -32700, "The body is not JSON", Value::Null).to_string(),
         );
     };
     match respond(&message, app) {
@@ -283,6 +279,11 @@ fn answer<R: Runtime>(body: &[u8], app: &AppHandle<R>) -> String {
 }
 
 /// One JSON-RPC message in, one reply out — or none, for a notification.
+///
+/// Three methods. `tools` is the catalogue the worker is given, whole, so the caller reads the
+/// same operations and parameters the model does. `call` is one tool call in the worker's own
+/// shape, `{tool, params}`, routed through the same door: a refusal arrives as a JSON-RPC error
+/// whose `data` is the router's failure, code and all, rather than as prose to parse.
 fn respond<R: Runtime>(message: &Value, app: &AppHandle<R>) -> Option<Value> {
     let id = message.get("id").cloned().unwrap_or(Value::Null);
     let method = message
@@ -294,209 +295,82 @@ fn respond<R: Runtime>(message: &Value, app: &AppHandle<R>) -> Option<Value> {
         return None;
     }
     let result = match method {
-        "initialize" => Ok(json!({
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {"tools": {}},
-            "serverInfo": {"name": "gofer", "version": env!("CARGO_PKG_VERSION")},
-            "instructions": INSTRUCTIONS,
-        })),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({"tools": tools()})),
-        "tools/call" => Ok(call(&params, app)),
-        _ => Err((-32601, format!("There is no method {method}"))),
+        "tools" => Ok(tools()),
+        "call" => call(&params, app),
+        _ => Err(rpc_error(
+            id.clone(),
+            -32601,
+            &format!("There is no method {method}; the door answers ping, tools and call"),
+            Value::Null,
+        )),
     };
     Some(match result {
         Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
-        Err((code, message)) => rpc_error(id, code, &message),
+        Err(error) => error,
     })
 }
 
-fn rpc_error(id: Value, code: i64, message: &str) -> Value {
-    json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+fn rpc_error(id: Value, code: i64, message: &str, data: Value) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message, "data": data}})
 }
 
-const INSTRUCTIONS: &str = "This is the project board of a Gofer workspace: cards in five columns \
-    (backlog, ready, doing, review, done). You may read and write cards and comments and nothing \
-    else. Name yourself in `owner` on every write. A card in `done` is locked, and so is a card \
-    whose task Gofer is working on right now; only the user finishes a card, by merging its task.";
+/// A tool call that was refused, as JSON-RPC spells it. The router's failure rides in `data`.
+const TOOL_REFUSED: i64 = -32000;
 
-fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
-    json!({
-        "name": name,
-        "description": description,
-        "inputSchema": {
-            "type": "object",
-            "properties": properties,
-            "required": required,
-            "additionalProperties": false
-        }
-    })
+/// Every tool the door answers: the Godot domains as the worker receives them, and the board and
+/// the memory beside them. The names are the `tool` of a `call`.
+fn tools() -> Value {
+    let mut listed: Vec<Value> = CATALOG
+        .iter()
+        .map(|domain| serde_json::to_value(domain).unwrap_or(Value::Null))
+        .collect();
+    listed.push(json!({
+        "name": crate::board::BOARD_TOOL,
+        "operations": [
+            {"op": "list", "summary": "Every card without its body."},
+            {"op": "read", "summary": "One card with its comments.", "params": {"id": "number"}},
+            {"op": "create", "summary": "Adds a card to backlog unless a status is given.", "params": {"title": "text", "body": "text", "status": "column", "owner": "your name"}},
+            {"op": "move", "summary": "Moves a card to a column other than done.", "params": {"id": "number", "status": "column", "owner": "your name"}},
+            {"op": "comment", "summary": "Adds a comment under a card.", "params": {"id": "number", "body": "text", "owner": "your name"}},
+            {"op": "edit", "summary": "Changes a card's title or body.", "params": {"id": "number", "title": "text", "body": "text", "owner": "your name"}}
+        ]
+    }));
+    listed.push(json!({
+        "name": crate::remember::REMEMBER_TOOL,
+        "operations": [{"op": "remember", "summary": "Keeps a fact about this project for the model's later turns."}]
+    }));
+    json!({"tools": listed})
 }
 
-fn tools() -> Vec<Value> {
-    let owner = json!({"type": "string", "description": "Who is writing: your own name."});
-    let id = json!({"type": ["integer", "string"], "description": "The card's number."});
-    let status = json!({"type": "string", "enum": CardStatus::ALL.map(CardStatus::as_str)});
-    vec![
-        tool(
-            "board_list",
-            "Every card on the board, column by column, without its body; card_read opens one.",
-            json!({}),
-            &[],
-        ),
-        tool(
-            "card_read",
-            "One card with all of its comments.",
-            json!({"id": id}),
-            &["id"],
-        ),
-        tool(
-            "card_create",
-            "Adds a card. Goes to backlog unless a status is given; done is not allowed.",
-            json!({"title": {"type": "string"}, "body": {"type": "string"}, "status": status, "owner": owner}),
-            &["title", "owner"],
-        ),
-        tool(
-            "card_move",
-            "Moves a card to another column. Never to done.",
-            json!({"id": id, "status": status, "owner": owner}),
-            &["id", "status", "owner"],
-        ),
-        tool(
-            "card_comment",
-            "Adds a comment under a card.",
-            json!({"id": id, "body": {"type": "string"}, "owner": owner}),
-            &["id", "body", "owner"],
-        ),
-        tool(
-            "card_edit",
-            "Changes a card's title or body. A field left out is left alone.",
-            json!({"id": id, "title": {"type": "string"}, "body": {"type": "string"}, "owner": owner}),
-            &["id", "owner"],
-        ),
-    ]
-}
-
-/// Runs one tool call and shapes the outcome the way MCP wants it: a result either way, with
-/// `isError` saying which, so the calling model reads the refusal rather than a transport fault.
-fn call<R: Runtime>(params: &Value, app: &AppHandle<R>) -> Value {
-    let name = params
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let arguments = params
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    match run(name, &arguments, app) {
-        Ok(result) => json!({
-            "content": [{"type": "text", "text": result.to_string()}],
-            "structuredContent": result,
-            "isError": false
-        }),
-        Err(failure) => json!({
-            "content": [{"type": "text", "text": format!("{}: {}", failure.code, failure.message)}],
-            "isError": true
-        }),
-    }
-}
-
-fn text<'a>(arguments: &'a Value, key: &str) -> Option<&'a str> {
-    arguments.get(key).and_then(Value::as_str)
-}
-
-fn required<'a>(arguments: &'a Value, key: &str) -> Result<&'a str, CommandError> {
-    text(arguments, key)
-        .ok_or_else(|| CommandError::new("invalid_params", format!("`{key}` is required")))
-}
-
-fn status_of(arguments: &Value) -> Result<Option<CardStatus>, CommandError> {
-    let Some(named) = text(arguments, "status") else {
-        return Ok(None);
+/// Routes one call and shapes what came back: the answer, or the failure with its code.
+fn call<R: Runtime>(params: &Value, app: &AppHandle<R>) -> Result<Value, Value> {
+    let Some(tool) = params.get("tool").and_then(Value::as_str) else {
+        return Err(rpc_error(
+            params.get("id").cloned().unwrap_or(Value::Null),
+            -32602,
+            "`tool` names the tool to call, and `params` carries its parameters",
+            Value::Null,
+        ));
     };
-    CardStatus::parse(named).map(Some).ok_or_else(|| {
-        CommandError::new(
-            "invalid_params",
-            "`status` is one of backlog, ready, doing, review, done",
+    let request = ToolRequest {
+        tool: tool.to_owned(),
+        params: params.get("params").cloned().unwrap_or_else(|| json!({})),
+    };
+    dispatch_from_outside(app, request).map_err(|failure| {
+        rpc_error(
+            Value::Null,
+            TOOL_REFUSED,
+            &format!("{}: {}", failure.code, failure.message),
+            serde_json::to_value(&failure).unwrap_or(Value::Null),
         )
     })
-}
-
-/// An outside agent has no task, so unlike the worker it always names the card.
-fn named_card(board: &Board, arguments: &Value) -> Result<CardRecord, CommandError> {
-    let reference = given_reference(arguments.get("id"))?
-        .ok_or_else(|| CommandError::new("invalid_params", "`id` is required"))?;
-    board.resolve(&reference)
-}
-
-fn run<R: Runtime>(
-    name: &str,
-    arguments: &Value,
-    app: &AppHandle<R>,
-) -> Result<Value, CommandError> {
-    let storage = crate::workspace::project_storage(app)
-        .map_err(|failure| CommandError::new("workspace_not_open", failure.message))?;
-    let board = storage.board();
-    let answer = match name {
-        "board_list" => tool_list(&board.list()?, None),
-        "card_read" => tool_detail(&board.read(&named_card(&board, arguments)?.id)?, None),
-        "card_create" => {
-            let owner = required(arguments, "owner")?;
-            let card = NewCard {
-                title: required(arguments, "title")?.to_owned(),
-                body: text(arguments, "body").unwrap_or_default().to_owned(),
-                owner: owner.to_owned(),
-                status: status_of(arguments)?.unwrap_or(CardStatus::Backlog),
-                attachments: Vec::new(),
-            };
-            tool_card(&board.create(&card, outside_actor())?, None)
-        }
-        "card_move" => {
-            required(arguments, "owner")?;
-            let status = status_of(arguments)?
-                .ok_or_else(|| CommandError::new("invalid_params", "`status` is required"))?;
-            let card = named_card(&board, arguments)?;
-            tool_card(&board.move_to(&card.id, status, outside_actor())?, None)
-        }
-        "card_comment" => {
-            let owner = required(arguments, "owner")?;
-            let card = named_card(&board, arguments)?;
-            let comment = board.comment(
-                &card.id,
-                owner,
-                required(arguments, "body")?,
-                outside_actor(),
-            )?;
-            tool_comment(&card, &comment)
-        }
-        "card_edit" => {
-            required(arguments, "owner")?;
-            let edit = CardEdit {
-                title: text(arguments, "title").map(str::to_owned),
-                body: text(arguments, "body").map(str::to_owned),
-                owner: None,
-                attachments: None,
-            };
-            let card = named_card(&board, arguments)?;
-            tool_card(&board.edit(&card.id, &edit, outside_actor())?, None)
-        }
-        other => {
-            return Err(CommandError::new(
-                "unknown_tool",
-                format!("There is no tool {other}"),
-            ));
-        }
-    };
-    if name != "board_list" && name != "card_read" {
-        announce_change(app);
-    }
-    Ok(answer)
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::storage::{ProjectStorage, StorageSlot};
+    use crate::storage::{CardStatus, NewCard, ProjectStorage, StorageSlot};
     use std::fs;
     use tauri::Manager;
     use tempfile::TempDir;
@@ -545,19 +419,26 @@ pub(crate) mod tests {
         json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).to_string()
     }
 
-    fn call(name: &str, arguments: Value) -> String {
-        rpc("tools/call", json!({"name": name, "arguments": arguments}))
+    fn call(tool: &str, params: Value) -> String {
+        rpc("call", json!({"tool": tool, "params": params}))
     }
 
     fn started(app: &tauri::App<tauri::test::MockRuntime>, token: &str) -> Running {
         start(
             app.handle().clone(),
-            &McpSettings {
+            &DoorSettings {
                 port: 0,
                 token: token.to_owned(),
             },
         )
         .expect("the server starts on a free port")
+    }
+
+    /// The code the router refused with, off a `call` that was refused.
+    fn refusal(body: &Value) -> &str {
+        body["error"]["data"]["code"]
+            .as_str()
+            .expect("a refused call carries the router's failure in data")
     }
 
     #[test]
@@ -585,15 +466,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_client_initializes_lists_the_tools_and_works_a_card() {
+    fn a_client_lists_every_tool_and_works_a_card_by_its_own_name() {
         let directory = TempDir::new().expect("temporary directory");
         let app = app_with_storage(&directory);
         let server = started(&app, "secret");
         let token = Some("secret");
-
-        let (_, body) = post(server.address, PATH, token, &rpc("initialize", json!({})));
-        assert_eq!(body["result"]["protocolVersion"], json!(PROTOCOL_VERSION));
-        assert_eq!(body["result"]["capabilities"]["tools"], json!({}));
 
         let (status, body) = post(
             server.address,
@@ -604,23 +481,34 @@ pub(crate) mod tests {
         assert_eq!(status, 202, "a notification gets no reply");
         assert_eq!(body, Value::Null);
 
-        let (_, body) = post(server.address, PATH, token, &rpc("tools/list", json!({})));
+        let (_, body) = post(server.address, PATH, token, &rpc("tools", json!({})));
         let names: Vec<&str> = body["result"]["tools"]
             .as_array()
             .expect("tools")
             .iter()
             .map(|tool| tool["name"].as_str().expect("name"))
             .collect();
-        assert_eq!(
-            names,
-            [
-                "board_list",
-                "card_read",
-                "card_create",
-                "card_move",
-                "card_comment",
-                "card_edit"
-            ]
+        for domain in CATALOG {
+            assert!(
+                names.contains(&domain.name),
+                "{} is behind the door",
+                domain.name
+            );
+        }
+        assert!(names.contains(&"board"));
+        let node = body["result"]["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .find(|tool| tool["name"] == "godot_node")
+            .expect("the node domain");
+        assert!(
+            node["operations"]
+                .as_array()
+                .expect("operations")
+                .iter()
+                .any(|operation| operation["op"] == "inspect"),
+            "a domain is listed with the operations the worker sees"
         );
 
         let (_, body) = post(
@@ -628,83 +516,71 @@ pub(crate) mod tests {
             PATH,
             token,
             &call(
-                "card_create",
-                json!({"title": "Jump", "body": "Higher", "owner": "claude"}),
+                "board",
+                json!({"op": "create", "title": "Jump", "body": "Higher", "owner": "claude"}),
             ),
         );
-        assert_eq!(body["result"]["isError"], json!(false));
-        let card_id = body["result"]["structuredContent"]["id"]
+        let card_id = body["result"]["id"]
             .as_u64()
             .expect("the card is named by its number");
-        assert_eq!(
-            body["result"]["structuredContent"]["owner"],
-            json!("claude")
-        );
+        assert_eq!(body["result"]["owner"], json!("claude"));
 
         let (_, body) = post(
             server.address,
             PATH,
             token,
             &call(
-                "card_comment",
-                json!({"id": card_id, "body": "On it", "owner": "claude"}),
+                "board",
+                json!({"op": "comment", "id": card_id, "body": "On it", "owner": "claude"}),
             ),
         );
-        assert_eq!(body["result"]["isError"], json!(false));
+        assert!(body.get("error").is_none(), "{body}");
 
         let (_, body) = post(
             server.address,
             PATH,
             token,
             &call(
-                "card_move",
-                json!({"id": card_id, "status": "ready", "owner": "claude"}),
+                "board",
+                json!({"op": "move", "id": card_id, "status": "ready", "owner": "claude"}),
             ),
         );
-        assert_eq!(
-            body["result"]["structuredContent"]["status"],
-            json!("ready")
-        );
+        assert_eq!(body["result"]["status"], json!("ready"));
 
         let (_, body) = post(
             server.address,
             PATH,
             token,
-            &call("card_read", json!({"id": format!("#{card_id}")})),
+            &call("board", json!({"op": "read", "id": format!("#{card_id}")})),
         );
-        assert_eq!(
-            body["result"]["structuredContent"]["comments"][0]["author"],
-            json!("claude")
-        );
+        assert_eq!(body["result"]["comments"][0]["author"], json!("claude"));
 
-        let (_, body) = post(server.address, PATH, token, &call("board_list", json!({})));
-        let cards = &body["result"]["structuredContent"]["cards"];
+        let (_, body) = post(
+            server.address,
+            PATH,
+            token,
+            &call("board", json!({"op": "list"})),
+        );
+        let cards = &body["result"]["cards"];
         assert_eq!(cards.as_array().map(Vec::len), Some(1));
-        assert_eq!(
-            cards[0].get("body"),
-            None,
-            "the list leaves bodies to card_read"
-        );
+        assert_eq!(cards[0].get("body"), None, "the list leaves bodies to read");
 
         let (_, body) = post(
             server.address,
             PATH,
             token,
             &call(
-                "card_edit",
-                json!({"id": card_id, "title": "Jump higher", "owner": "claude"}),
+                "board",
+                json!({"op": "edit", "id": card_id, "title": "Jump higher", "owner": "claude"}),
             ),
         );
-        assert_eq!(
-            body["result"]["structuredContent"]["title"],
-            json!("Jump higher")
-        );
+        assert_eq!(body["result"]["title"], json!("Jump higher"));
 
         stop(server);
     }
 
     #[test]
-    fn a_refusal_is_a_result_the_model_can_read_not_a_transport_fault() {
+    fn a_refusal_is_a_coded_error_the_caller_can_branch_on() {
         let directory = TempDir::new().expect("temporary directory");
         let app = app_with_storage(&directory);
         let server = started(&app, "secret");
@@ -715,42 +591,25 @@ pub(crate) mod tests {
             PATH,
             token,
             &call(
-                "card_move",
-                json!({"id": "x", "status": "done", "owner": "claude"}),
+                "board",
+                json!({"op": "move", "id": "x", "status": "done", "owner": "claude"}),
             ),
         );
-        assert_eq!(status, 200);
-        assert_eq!(body["result"]["isError"], json!(true));
-        assert!(
-            body["result"]["content"][0]["text"]
-                .as_str()
-                .expect("text")
-                .starts_with("card_not_found")
-        );
+        assert_eq!(status, 200, "a refusal is a reply, not a transport fault");
+        assert_eq!(body["error"]["code"], json!(TOOL_REFUSED));
+        assert_eq!(refusal(&body), "card_not_found");
 
         let (_, body) = post(
             server.address,
             PATH,
             token,
-            &call("card_read", json!({"id": true})),
+            &call("board", json!({"op": "create", "title": "Jump"})),
         );
+        assert_eq!(refusal(&body), "invalid_params");
         assert!(
-            body["result"]["content"][0]["text"]
+            body["error"]["message"]
                 .as_str()
-                .expect("text")
-                .starts_with("invalid_params")
-        );
-
-        let (_, body) = post(
-            server.address,
-            PATH,
-            token,
-            &call("card_create", json!({"title": "Jump"})),
-        );
-        assert!(
-            body["result"]["content"][0]["text"]
-                .as_str()
-                .expect("text")
+                .expect("message")
                 .contains("`owner` is required")
         );
 
@@ -759,27 +618,71 @@ pub(crate) mod tests {
             PATH,
             token,
             &call(
-                "card_create",
-                json!({"title": "Jump", "owner": "claude", "status": "done"}),
+                "board",
+                json!({"op": "create", "title": "Jump", "owner": "claude", "status": "done"}),
             ),
         );
-        assert!(
-            body["result"]["content"][0]["text"]
-                .as_str()
-                .expect("text")
-                .starts_with("card_locked")
+        assert_eq!(refusal(&body), "card_locked");
+
+        let (_, body) = post(
+            server.address,
+            PATH,
+            token,
+            &call("card_post_to_gofer", json!({"id": "x"})),
+        );
+        assert_eq!(refusal(&body), "unknown_tool");
+
+        let (_, body) = post(server.address, PATH, token, &rpc("tools/list", json!({})));
+        assert_eq!(body["error"]["code"], json!(-32601));
+
+        let (_, body) = post(
+            server.address,
+            PATH,
+            token,
+            &rpc("call", json!({"params": {}})),
+        );
+        assert_eq!(body["error"]["code"], json!(-32602));
+
+        let (status, _) = post(server.address, PATH, token, "not json");
+        assert_eq!(status, 400);
+
+        stop(server);
+    }
+
+    /// The door has nobody to click for it: a gated operation and a question are refused by
+    /// code, at once, with nothing run — never waited on.
+    #[test]
+    fn what_would_wait_on_the_user_is_refused_by_code() {
+        let directory = TempDir::new().expect("temporary directory");
+        let app = app_with_storage(&directory);
+        let server = started(&app, "secret");
+        let token = Some("secret");
+
+        let (_, body) = post(
+            server.address,
+            PATH,
+            token,
+            &call(
+                "godot_resource",
+                json!({"ops": [{"op": "delete", "path": "res://old.tres"}]}),
+            ),
+        );
+        assert_eq!(refusal(&body), "approval_needed", "{body}");
+        assert_eq!(
+            body["error"]["data"]["details"]["gated"][0]["op"],
+            json!("delete")
         );
 
         let (_, body) = post(
             server.address,
             PATH,
             token,
-            &rpc("resources/list", json!({})),
+            &call(
+                crate::ask::ASK_USER_TOOL,
+                json!({"question": "Which one?", "options": ["a", "b"]}),
+            ),
         );
-        assert_eq!(body["error"]["code"], json!(-32601));
-
-        let (status, _) = post(server.address, PATH, token, "not json");
-        assert_eq!(status, 400);
+        assert_eq!(refusal(&body), "needs_user", "{body}");
 
         stop(server);
     }
@@ -860,31 +763,6 @@ pub(crate) mod tests {
         stop(server);
     }
 
-    /// Claim 23: the door reaches cards and nothing that moves the checkout.
-    #[test]
-    fn the_door_cannot_post_a_card_to_gofer() {
-        let directory = TempDir::new().expect("temporary directory");
-        let app = app_with_storage(&directory);
-        let server = started(&app, "secret");
-        let (_, body) = post(
-            server.address,
-            PATH,
-            Some("secret"),
-            &call(
-                "card_post_to_gofer",
-                json!({"id": "x", "bringChanges": false, "owner": "claude"}),
-            ),
-        );
-        assert_eq!(body["result"]["isError"], json!(true));
-        assert!(
-            body["result"]["content"][0]["text"]
-                .as_str()
-                .expect("text")
-                .starts_with("unknown_tool")
-        );
-        stop(server);
-    }
-
     /// Claim 23: while the model works a card's task, the door is told so.
     #[test]
     fn a_card_being_worked_on_is_refused_at_the_door() {
@@ -930,32 +808,25 @@ pub(crate) mod tests {
             PATH,
             Some("secret"),
             &call(
-                "card_comment",
-                json!({"id": card.id, "body": "hurry", "owner": "claude"}),
+                "board",
+                json!({"op": "comment", "id": card.id, "body": "hurry", "owner": "claude"}),
             ),
         );
         drop(turn);
-        assert_eq!(body["result"]["isError"], json!(true));
-        assert!(
-            body["result"]["content"][0]["text"]
-                .as_str()
-                .expect("text")
-                .starts_with("card_in_progress")
-        );
+        assert_eq!(refusal(&body), "card_in_progress");
 
         let (_, body) = post(
             server.address,
             PATH,
             Some("secret"),
             &call(
-                "card_comment",
-                json!({"id": card.id, "body": "later", "owner": "claude"}),
+                "board",
+                json!({"op": "comment", "id": card.id, "body": "later", "owner": "claude"}),
             ),
         );
-        assert_eq!(
-            body["result"]["isError"],
-            json!(false),
-            "between turns it is open"
+        assert!(
+            body.get("error").is_none(),
+            "between turns it is open: {body}"
         );
         stop(server);
     }

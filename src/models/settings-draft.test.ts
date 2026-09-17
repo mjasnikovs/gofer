@@ -13,7 +13,7 @@ import {
 import type {SettingsAction, SettingsDraft, SettingsTaskAction} from './settings-draft'
 import {
     DEFAULT_GODOT_SETTINGS,
-    DEFAULT_MCP_SETTINGS,
+    DEFAULT_DOOR_SETTINGS,
     DEFAULT_SUBAGENT_SETTINGS,
     DEFAULT_PLAN_SETTINGS,
     DEFAULT_WEB_SETTINGS,
@@ -60,7 +60,7 @@ const SETTINGS: GoferSettings = {
         plan: DEFAULT_PLAN_SETTINGS
     },
     godot: DEFAULT_GODOT_SETTINGS,
-    mcp: DEFAULT_MCP_SETTINGS
+    door: DEFAULT_DOOR_SETTINGS
 }
 
 function chosen(state: {settings?: GoferSettings | undefined}): ModelChoice | undefined {
@@ -806,34 +806,34 @@ describe('runSettingsTask', () => {
 
 describe('the other agents door', () => {
     it('edits the draft and adopts what the backend stored', () => {
-        const stored = {...SETTINGS, mcp: {port: 5005, token: 'minted'}}
+        const stored = {...SETTINGS, door: {port: 5005, token: 'minted'}}
         const edited = apply(
             {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
-            {type: 'mcp-changed', update: {port: 5005}}
+            {type: 'door-changed', update: {port: 5005}}
         )
-        expect(edited.settings?.mcp).toEqual({...SETTINGS.mcp, port: 5005})
-        expect(edited.savedSettings?.mcp).toEqual(SETTINGS.mcp)
+        expect(edited.settings?.door).toEqual({...SETTINGS.door, port: 5005})
+        expect(edited.savedSettings?.door).toEqual(SETTINGS.door)
 
         const saved = apply(
             {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
-            {type: 'mcp-changed', update: {port: 5005}},
-            {type: 'began', task: 'savingMcp'},
-            {type: 'mcp-saved', response: {settings: stored, storedSecrets: {}}}
+            {type: 'door-changed', update: {port: 5005}},
+            {type: 'began', task: 'savingDoor'},
+            {type: 'door-saved', response: {settings: stored, storedSecrets: {}}}
         )
-        expect(saved.settings?.mcp).toEqual({port: 5005, token: 'minted'})
-        expect(saved.savedSettings?.mcp).toEqual({port: 5005, token: 'minted'})
-        expect(saved.busy.savingMcp).toBe(false)
+        expect(saved.settings?.door).toEqual({port: 5005, token: 'minted'})
+        expect(saved.savedSettings?.door).toEqual({port: 5005, token: 'minted'})
+        expect(saved.busy.savingDoor).toBe(false)
         expect(saved.notices.agents?.title).toBe('Agent door saved')
     })
 
     it('fills the door in for a settings file written before it existed', () => {
-        const {mcp: _absent, ...sparse} = SETTINGS
+        const {door: _absent, ...sparse} = SETTINGS
         const state = apply({
             type: 'loaded',
             prompt: PROMPT,
             response: {settings: sparse as GoferSettings, storedSecrets: {}},
             cache: CACHE
         })
-        expect(state.settings?.mcp).toEqual({port: 47831, token: ''})
+        expect(state.settings?.door).toEqual({port: 47831, token: ''})
     })
 })
