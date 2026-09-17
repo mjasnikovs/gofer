@@ -1,6 +1,7 @@
 import {useEffect, useState} from 'react'
 import {Banner} from '@astryxdesign/core/Banner'
 import {Button} from '@astryxdesign/core/Button'
+import {CheckboxInput} from '@astryxdesign/core/CheckboxInput'
 import {CodeBlock} from '@astryxdesign/core/CodeBlock'
 import {FormLayout} from '@astryxdesign/core/FormLayout'
 import {Grid} from '@astryxdesign/core/Grid'
@@ -29,7 +30,7 @@ function parsePort(typed: string): number | undefined {
     return port >= 1 && port <= LAST_PORT ? port : undefined
 }
 
-const CLI_EXAMPLE = 'gofer tools\ngofer godot_scene list\ngofer board list'
+const CLI_EXAMPLE = 'gofer-cli tools\ngofer-cli godot_scene list\ngofer-cli board list'
 
 export function useAgentsTab(view: SettingsView): SettingsTabView {
     const {state, dispatch, run} = view
@@ -46,7 +47,9 @@ export function useAgentsTab(view: SettingsView): SettingsTabView {
         draft !== undefined
         && savedDoor !== undefined
         && isPortValid
-        && (draft.door.port !== savedDoor.port || draft.door.token !== savedDoor.token)
+        && (draft.door.enabled !== savedDoor.enabled
+            || draft.door.port !== savedDoor.port
+            || draft.door.token !== savedDoor.token)
 
     useEffect(() => {
         if (!savedDoor) return undefined
@@ -95,9 +98,9 @@ export function useAgentsTab(view: SettingsView): SettingsTabView {
                         </HStack>
                         <Text color='secondary'>
                             An agent in a terminal on this machine can call every tool the model
-                            has, editor and board alike, through this address and token. The gofer
-                            command in Gofer's repository reads both from the settings file. The
-                            door is open while Gofer is open.
+                            has, editor and board alike, through this address and token. The
+                            gofer-cli command in Gofer's repository reads both from the settings
+                            file. Shut unless you open it: a token that leaks buys file writes.
                         </Text>
                         {status?.error ?
                             <Banner
@@ -110,6 +113,14 @@ export function useAgentsTab(view: SettingsView): SettingsTabView {
 
                     {draft ?
                         <FormLayout>
+                            <CheckboxInput
+                                label='Open the door'
+                                value={draft.door.enabled}
+                                description='While Gofer is open, and only on this machine.'
+                                onChange={enabled => {
+                                    dispatch({type: 'door-changed', update: {enabled}})
+                                }}
+                            />
                             <TextInput
                                 label='Port'
                                 value={portText ?? String(draft.door.port)}
@@ -142,7 +153,7 @@ export function useAgentsTab(view: SettingsView): SettingsTabView {
                                     dispatch({type: 'door-changed', update: {token: mintToken()}})
                                 }}
                             />
-                            {url ?
+                            {url && savedDoor?.enabled ?
                                 <CodeBlock
                                     title={url}
                                     code={CLI_EXAMPLE}

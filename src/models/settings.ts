@@ -98,6 +98,7 @@ export type GodotSettings = Readonly<{
 }>
 
 export type DoorSettings = Readonly<{
+    enabled: boolean
     port: number
     token: string
 }>
@@ -108,7 +109,7 @@ export type DoorStatus = Readonly<{
     error: string | null
 }>
 
-export const DEFAULT_DOOR_SETTINGS: DoorSettings = {port: 47831, token: ''}
+export const DEFAULT_DOOR_SETTINGS: DoorSettings = {enabled: false, port: 47831, token: ''}
 
 export type GoferSettings = Readonly<{
     version: 2

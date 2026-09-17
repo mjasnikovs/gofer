@@ -721,15 +721,24 @@ describe('the other agents door', () => {
     const savedDoor = () =>
         (
             tauri.invoke.mock.calls.filter(call => call[0] === 'save_door_settings').at(-1)?.[1] as
-                {door: {port: number; token: string}} | undefined
+                {door: {enabled: boolean; port: number; token: string}} | undefined
         )?.door
 
-    it('shows where the door is and how a terminal reaches it', async () => {
+    it('is shut until opened, and then shows where it is and how a terminal reaches it', async () => {
+        const user = userEvent.setup()
         await open()
         await openTab('Other agents')
 
+        expect(screen.queryByText(/gofer-cli board list/)).not.toBeInTheDocument()
+        expect(screen.getByRole('button', {name: 'Save'})).toBeDisabled()
+        await user.click(screen.getByLabelText(/Open the door/))
+        await flush()
+        expect(screen.getByRole('button', {name: 'Save'})).toBeEnabled()
+        await user.click(screen.getByRole('button', {name: 'Save'}))
+        await flush()
+        expect(savedDoor()?.enabled).toBe(true)
         expect(await screen.findByText('http://127.0.0.1:47831/door')).toBeInTheDocument()
-        expect(screen.getByText(/gofer board list/)).toBeInTheDocument()
+        expect(screen.getByText(/gofer-cli board list/)).toBeInTheDocument()
         expect(screen.getByRole('button', {name: 'Save'})).toBeDisabled()
     })
 

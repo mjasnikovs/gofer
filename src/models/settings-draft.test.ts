@@ -806,7 +806,7 @@ describe('runSettingsTask', () => {
 
 describe('the other agents door', () => {
     it('edits the draft and adopts what the backend stored', () => {
-        const stored = {...SETTINGS, door: {port: 5005, token: 'minted'}}
+        const stored = {...SETTINGS, door: {enabled: false, port: 5005, token: 'minted'}}
         const edited = apply(
             {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
             {type: 'door-changed', update: {port: 5005}}
@@ -820,8 +820,8 @@ describe('the other agents door', () => {
             {type: 'began', task: 'savingDoor'},
             {type: 'door-saved', response: {settings: stored, storedSecrets: {}}}
         )
-        expect(saved.settings?.door).toEqual({port: 5005, token: 'minted'})
-        expect(saved.savedSettings?.door).toEqual({port: 5005, token: 'minted'})
+        expect(saved.settings?.door).toEqual({enabled: false, port: 5005, token: 'minted'})
+        expect(saved.savedSettings?.door).toEqual({enabled: false, port: 5005, token: 'minted'})
         expect(saved.busy.savingDoor).toBe(false)
         expect(saved.notices.agents?.title).toBe('Agent door saved')
     })
@@ -834,6 +834,6 @@ describe('the other agents door', () => {
             response: {settings: sparse as GoferSettings, storedSecrets: {}},
             cache: CACHE
         })
-        expect(state.settings?.door).toEqual({port: 47831, token: ''})
+        expect(state.settings?.door).toEqual({enabled: false, port: 47831, token: ''})
     })
 })

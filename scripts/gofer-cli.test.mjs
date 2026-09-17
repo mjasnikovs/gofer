@@ -28,7 +28,7 @@ test('a godot domain call is an ops list of one, spelled either way', () => {
     assert.deepEqual(dotted.params.params, {ops: [{op: 'scene.open', path: 'main.tscn'}]})
 })
 
-test('--ops sends the list as given and --params merges under the flags', () => {
+test('--ops sends the list as given, and a flag wins over the same key in --params', () => {
     const list = requestFor(
         parseArgs([
             'godot_node',
@@ -38,7 +38,7 @@ test('--ops sends the list as given and --params merges under the flags', () => 
     )
     assert.equal(list.params.params.ops.length, 2)
     const merged = requestFor(
-        parseArgs(['godot_node', 'inspect', '--path', 'A', '--params', '{"depth": 2}'])
+        parseArgs(['godot_node', 'inspect', '--path', 'A', '--params', '{"depth": 2, "path": "B"}'])
     )
     assert.deepEqual(merged.params.params.ops[0], {op: 'inspect', path: 'A', depth: 2})
 })
@@ -59,7 +59,7 @@ test('a board write is signed, a board read is not, and the name comes from the 
 })
 
 test('a tool with no operation is a usage error that names the fix', () => {
-    assert.throws(() => requestFor(parseArgs(['godot_node'])), /gofer tools godot_node/)
+    assert.throws(() => requestFor(parseArgs(['godot_node'])), /gofer-cli tools godot_node/)
     assert.deepEqual(requestFor(parseArgs([])), {usage: true})
     assert.deepEqual(requestFor(parseArgs(['tools', 'godot_node'])), {
         method: 'tools',
@@ -138,4 +138,31 @@ test('one tool is picked out of the listing by name', () => {
     assert.deepEqual(pickTool(answer, 'board'), {name: 'board'})
     assert.equal(pickTool(answer, undefined), answer)
     assert.throws(() => pickTool(answer, 'x'), /board, godot_node/)
+})
+
+test('--out and --owner are text even when they look like numbers', () => {
+    const {flags} = parseArgs(['board', 'create', '--title', 'x', '--owner', '123', '--out', '7'])
+    assert.equal(flags.owner, '123')
+    assert.equal(flags.out, '7')
+    assert.equal(
+        requestFor({positional: ['board', 'create'], flags}, {}).params.params.owner,
+        '123'
+    )
+})
+
+test('a refusal exits 1 with the reason on stderr, and no arguments prints the usage', async () => {
+    const {execFile} = await import('node:child_process')
+    const {promisify} = await import('node:util')
+    const run = promisify(execFile)
+    const env = {...process.env, GOFER_DOOR_URL: 'http://127.0.0.1:9/door', GOFER_DOOR_TOKEN: 't'}
+    await assert.rejects(
+        run(process.execPath, ['scripts/gofer.mjs', 'board', 'list'], {env}),
+        error => {
+            assert.equal(error.code, 1)
+            assert.match(error.stderr, /not answering/)
+            return true
+        }
+    )
+    const {stdout} = await run(process.execPath, ['scripts/gofer.mjs'], {env})
+    assert.match(stdout, /gofer-cli tools/)
 })

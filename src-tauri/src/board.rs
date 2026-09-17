@@ -175,10 +175,16 @@ pub(crate) fn board_tool_from_outside<R: Runtime>(
     app: &AppHandle<R>,
     params: &Value,
 ) -> Result<Value, ToolFailure> {
-    let reads = matches!(
-        params.get("op").and_then(Value::as_str),
-        Some("list" | "read")
-    );
+    let op = params.get("op").and_then(Value::as_str);
+    let reads = matches!(op, Some("list" | "read"));
+    // An omitted id means the active task's card to the worker, which is on that task. An outside
+    // agent is on no task, and would be writing on whatever card the worker happens to hold.
+    if !matches!(op, Some("list" | "create")) && params.get("id").is_none_or(Value::is_null) {
+        return Err(ToolFailure::new(
+            "invalid_params",
+            "`id` is required: the card's number",
+        ));
+    }
     let owner = params
         .get("owner")
         .and_then(Value::as_str)

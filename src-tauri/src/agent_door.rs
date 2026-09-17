@@ -75,6 +75,13 @@ pub(crate) fn apply<R: Runtime>(app: &AppHandle<R>, settings: &DoorSettings) {
         Ok(server) => server,
         Err(_) => return,
     };
+    if !settings.enabled {
+        if let Some(running) = server.take() {
+            stop(running);
+        }
+        record_error(None);
+        return;
+    }
     if let Some(running) = server.as_ref()
         && running.address.port() == settings.port
     {
@@ -243,10 +250,23 @@ fn admit(head: &HttpHead, token: &Mutex<String>) -> Result<(), String> {
         .as_deref()
         .and_then(|header| header.strip_prefix("Bearer "))
         .map(str::trim);
-    if expected.is_empty() || presented != Some(expected.as_str()) {
+    if expected.is_empty() || !presented.is_some_and(|presented| same_token(presented, &expected)) {
         return Err(http(401, "Unauthorized", ""));
     }
     Ok(())
+}
+
+/// Compares in time that does not depend on where the first wrong byte is. Over loopback against a
+/// 128-bit token the leak is not usable, but a plain `!=` is the one thing every reviewer flags.
+fn same_token(presented: &str, expected: &str) -> bool {
+    if presented.len() != expected.len() {
+        return false;
+    }
+    presented
+        .bytes()
+        .zip(expected.bytes())
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+        == 0
 }
 
 fn read_body(reader: &mut BufReader<&mut TcpStream>, length: usize) -> Result<Vec<u8>, String> {
@@ -296,8 +316,8 @@ fn respond<R: Runtime>(message: &Value, app: &AppHandle<R>) -> Option<Value> {
     }
     let result = match method {
         "ping" => Ok(json!({})),
-        "tools" => Ok(tools()),
-        "call" => call(&params, app),
+        "tools" => tools(&id),
+        "call" => call(&id, &params, app),
         _ => Err(rpc_error(
             id.clone(),
             -32601,
@@ -318,36 +338,53 @@ fn rpc_error(id: Value, code: i64, message: &str, data: Value) -> Value {
 /// A tool call that was refused, as JSON-RPC spells it. The router's failure rides in `data`.
 const TOOL_REFUSED: i64 = -32000;
 
+/// The board as the door offers it: every op the tool takes, with `id` required on each one that
+/// names a card, because an outside agent has no task whose card an omitted id could mean.
+pub(crate) const BOARD_LISTING: &str = r#"[
+    {"op": "list", "summary": "Every card without its body."},
+    {"op": "read", "summary": "One card with its comments.", "params": {"id": "number"}},
+    {"op": "create", "summary": "Adds a card to backlog unless a status is given.", "params": {"title": "text", "body": "text", "status": "column", "owner": "your name"}},
+    {"op": "move", "summary": "Moves a card to a column other than done.", "params": {"id": "number", "status": "column", "owner": "your name"}},
+    {"op": "comment", "summary": "Adds a comment under a card.", "params": {"id": "number", "body": "text", "owner": "your name"}},
+    {"op": "edit", "summary": "Changes a card's title or body.", "params": {"id": "number", "title": "text", "body": "text", "owner": "your name"}}
+]"#;
+
 /// Every tool the door answers: the Godot domains as the worker receives them, and the board and
 /// the memory beside them. The names are the `tool` of a `call`.
-fn tools() -> Value {
-    let mut listed: Vec<Value> = CATALOG
-        .iter()
-        .map(|domain| serde_json::to_value(domain).unwrap_or(Value::Null))
-        .collect();
+fn tools(id: &Value) -> Result<Value, Value> {
+    let mut listed = Vec::with_capacity(CATALOG.len() + 2);
+    for domain in CATALOG {
+        let domain = serde_json::to_value(domain).map_err(|error| {
+            rpc_error(
+                id.clone(),
+                -32603,
+                &format!("The catalogue could not be listed: {error}"),
+                Value::Null,
+            )
+        })?;
+        listed.push(domain);
+    }
     listed.push(json!({
         "name": crate::board::BOARD_TOOL,
-        "operations": [
-            {"op": "list", "summary": "Every card without its body."},
-            {"op": "read", "summary": "One card with its comments.", "params": {"id": "number"}},
-            {"op": "create", "summary": "Adds a card to backlog unless a status is given.", "params": {"title": "text", "body": "text", "status": "column", "owner": "your name"}},
-            {"op": "move", "summary": "Moves a card to a column other than done.", "params": {"id": "number", "status": "column", "owner": "your name"}},
-            {"op": "comment", "summary": "Adds a comment under a card.", "params": {"id": "number", "body": "text", "owner": "your name"}},
-            {"op": "edit", "summary": "Changes a card's title or body.", "params": {"id": "number", "title": "text", "body": "text", "owner": "your name"}}
-        ]
+        "operations": serde_json::from_str::<Value>(BOARD_LISTING).map_err(|error| {
+            rpc_error(id.clone(), -32603, &format!("The board listing is not JSON: {error}"), Value::Null)
+        })?,
     }));
     listed.push(json!({
         "name": crate::remember::REMEMBER_TOOL,
-        "operations": [{"op": "remember", "summary": "Keeps a fact about this project for the model's later turns."}]
+        "operations": [{
+            "summary": "Files a fact about this project as a memory candidate for the user to keep, against the task the model is on.",
+            "params": {"kind": crate::storage::MEMORY_KINDS, "content": "text"}
+        }]
     }));
-    json!({"tools": listed})
+    Ok(json!({"tools": listed}))
 }
 
 /// Routes one call and shapes what came back: the answer, or the failure with its code.
-fn call<R: Runtime>(params: &Value, app: &AppHandle<R>) -> Result<Value, Value> {
+fn call<R: Runtime>(id: &Value, params: &Value, app: &AppHandle<R>) -> Result<Value, Value> {
     let Some(tool) = params.get("tool").and_then(Value::as_str) else {
         return Err(rpc_error(
-            params.get("id").cloned().unwrap_or(Value::Null),
+            id.clone(),
             -32602,
             "`tool` names the tool to call, and `params` carries its parameters",
             Value::Null,
@@ -359,7 +396,7 @@ fn call<R: Runtime>(params: &Value, app: &AppHandle<R>) -> Result<Value, Value> 
     };
     dispatch_from_outside(app, request).map_err(|failure| {
         rpc_error(
-            Value::Null,
+            id.clone(),
             TOOL_REFUSED,
             &format!("{}: {}", failure.code, failure.message),
             serde_json::to_value(&failure).unwrap_or(Value::Null),
@@ -427,6 +464,7 @@ pub(crate) mod tests {
         start(
             app.handle().clone(),
             &DoorSettings {
+                enabled: true,
                 port: 0,
                 token: token.to_owned(),
             },
@@ -624,12 +662,7 @@ pub(crate) mod tests {
         );
         assert_eq!(refusal(&body), "card_locked");
 
-        let (_, body) = post(
-            server.address,
-            PATH,
-            token,
-            &call("card_post_to_gofer", json!({"id": "x"})),
-        );
+        let body = call_between_turns(server.address, "card_post_to_gofer", json!({"id": "x"}));
         assert_eq!(refusal(&body), "unknown_tool");
 
         let (_, body) = post(server.address, PATH, token, &rpc("tools/list", json!({})));
@@ -656,16 +689,11 @@ pub(crate) mod tests {
         let directory = TempDir::new().expect("temporary directory");
         let app = app_with_storage(&directory);
         let server = started(&app, "secret");
-        let token = Some("secret");
 
-        let (_, body) = post(
+        let body = call_between_turns(
             server.address,
-            PATH,
-            token,
-            &call(
-                "godot_resource",
-                json!({"ops": [{"op": "delete", "path": "res://old.tres"}]}),
-            ),
+            "godot_resource",
+            json!({"ops": [{"op": "delete", "path": "res://old.tres"}]}),
         );
         assert_eq!(refusal(&body), "approval_needed", "{body}");
         assert_eq!(
@@ -673,14 +701,10 @@ pub(crate) mod tests {
             json!("delete")
         );
 
-        let (_, body) = post(
+        let body = call_between_turns(
             server.address,
-            PATH,
-            token,
-            &call(
-                crate::ask::ASK_USER_TOOL,
-                json!({"question": "Which one?", "options": ["a", "b"]}),
-            ),
+            crate::ask::ASK_USER_TOOL,
+            json!({"question": "Which one?", "options": ["a", "b"]}),
         );
         assert_eq!(refusal(&body), "needs_user", "{body}");
 
@@ -796,13 +820,7 @@ pub(crate) mod tests {
             .expect("attach");
         let server = started(&app, "secret");
 
-        // The bit is process-wide and other tests take it; wait for a turn at holding it.
-        let turn = loop {
-            if let Ok(turn) = crate::ai_turn::begin_provider_operation() {
-                break turn;
-            }
-            std::thread::yield_now();
-        };
+        let turn = holding_the_provider_bit();
         let (_, body) = post(
             server.address,
             PATH,
@@ -815,19 +833,262 @@ pub(crate) mod tests {
         drop(turn);
         assert_eq!(refusal(&body), "card_in_progress");
 
-        let (_, body) = post(
-            server.address,
-            PATH,
-            Some("secret"),
-            &call(
-                "board",
-                json!({"op": "comment", "id": card.id, "body": "later", "owner": "claude"}),
-            ),
-        );
+        // Another test may hold the bit for a moment; between turns is the claim, so keep asking
+        // until a call lands between two.
+        let body = until(|| {
+            let (_, body) = post(
+                server.address,
+                PATH,
+                Some("secret"),
+                &call(
+                    "board",
+                    json!({"op": "comment", "id": card.id, "body": "later", "owner": "claude"}),
+                ),
+            );
+            (body.get("error").is_none()).then_some(body)
+        });
         assert!(
             body.get("error").is_none(),
             "between turns it is open: {body}"
         );
         stop(server);
+    }
+
+    /// Polls fast until the closure answers, and fails by name rather than hanging the suite when
+    /// it never does. The bound is a ceiling on a test gone wrong, not a wait anything is expected
+    /// to take.
+    fn until<T>(mut attempt: impl FnMut() -> Option<T>) -> T {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(answer) = attempt() {
+                return answer;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the condition never held within the ceiling"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    /// One call from outside, sent again while some other test holds the turn's bit.
+    fn call_between_turns(address: SocketAddr, tool: &str, params: Value) -> Value {
+        until(|| {
+            let (_, body) = post(address, PATH, Some("secret"), &call(tool, params.clone()));
+            (body.get("error").is_none() || refusal(&body) != "turn_running").then_some(body)
+        })
+    }
+
+    /// The bit is process-wide and other tests take it; wait for a turn at holding it.
+    fn holding_the_provider_bit() -> crate::ai_turn::AiProviderOperation {
+        until(|| crate::ai_turn::begin_provider_operation().ok())
+    }
+
+    /// Finding from review: the read ledger and the scene revision are one slot per worktree, so
+    /// a door call during a turn would guard each agent with the other's last read. The door
+    /// takes the turn's own bit, and says so when it cannot.
+    #[test]
+    fn a_godot_call_from_the_door_waits_for_no_turn_and_says_one_is_running() {
+        let directory = TempDir::new().expect("temporary directory");
+        let app = app_with_storage(&directory);
+        let server = started(&app, "secret");
+        let token = Some("secret");
+
+        let turn = holding_the_provider_bit();
+        let (_, body) = post(
+            server.address,
+            PATH,
+            token,
+            &call("godot_scene", json!({"ops": [{"op": "list"}]})),
+        );
+        assert_eq!(refusal(&body), "turn_running", "{body}");
+        assert_eq!(
+            body["error"]["data"]["retryable"],
+            json!(true),
+            "the same call is right once the turn ends"
+        );
+        let (_, body) = post(
+            server.address,
+            PATH,
+            token,
+            &call(
+                crate::remember::REMEMBER_TOOL,
+                json!({"kind": "decision", "content": "x"}),
+            ),
+        );
+        assert_eq!(refusal(&body), "turn_running", "memory is the turn's too");
+        let (_, body) = post(
+            server.address,
+            PATH,
+            token,
+            &call("board", json!({"op": "list"})),
+        );
+        assert!(
+            body.get("error").is_none(),
+            "the board has its own lock: {body}"
+        );
+        drop(turn);
+
+        let body = call_between_turns(
+            server.address,
+            "godot_scene",
+            json!({"ops": [{"op": "list"}]}),
+        );
+        assert_ne!(
+            refusal(&body),
+            "turn_running",
+            "after the turn the call reaches the router: {body}"
+        );
+        stop(server);
+    }
+
+    /// Finding from review: the listing said `remember` took an `op`; it takes `kind` and
+    /// `content`. The listing is now the shape the handler accepts, and this proves it.
+    #[test]
+    fn the_hand_written_listings_are_the_shapes_the_handlers_take() {
+        let directory = TempDir::new().expect("temporary directory");
+        let app = app_with_storage(&directory);
+        let server = started(&app, "secret");
+        let token = Some("secret");
+
+        let (_, listed) = post(server.address, PATH, token, &rpc("tools", json!({})));
+        let tools = listed["result"]["tools"].as_array().expect("tools");
+        let remember = tools
+            .iter()
+            .find(|tool| tool["name"] == crate::remember::REMEMBER_TOOL)
+            .expect("remember is listed");
+        let params = &remember["operations"][0]["params"];
+        let kinds: Vec<&str> = params["kind"]
+            .as_array()
+            .expect("kinds")
+            .iter()
+            .map(|kind| kind.as_str().expect("kind"))
+            .collect();
+        assert_eq!(kinds, crate::storage::MEMORY_KINDS);
+        assert_eq!(params["content"], json!("text"));
+        // Not called live: the handler runs the embedder, seconds under the turn's bit, and the
+        // turn tests would be refused for it. The shape is pinned against the handler's own list.
+
+        let board = tools
+            .iter()
+            .find(|tool| tool["name"] == crate::board::BOARD_TOOL)
+            .expect("board is listed");
+        for operation in board["operations"].as_array().expect("operations") {
+            let op = operation["op"].as_str().expect("op");
+            let mut params =
+                json!({"op": op, "owner": "claude", "title": "t", "body": "b", "status": "ready"});
+            if operation["params"].get("id").is_some() {
+                params["id"] = json!("#1");
+            }
+            let (_, body) = post(server.address, PATH, token, &call("board", params));
+            let message = body["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                !message.contains("board needs an `op`"),
+                "{op} is an op the board takes: {body}"
+            );
+        }
+        stop(server);
+    }
+
+    /// Finding from review: an omitted id meant the worker's own card, which an outside agent
+    /// has no business writing on by accident.
+    #[test]
+    fn a_door_write_with_no_id_is_refused_rather_than_aimed_at_the_workers_card() {
+        let directory = TempDir::new().expect("temporary directory");
+        let app = app_with_storage(&directory);
+        let server = started(&app, "secret");
+        let token = Some("secret");
+        for op in ["read", "move", "comment", "edit"] {
+            let (_, body) = post(
+                server.address,
+                PATH,
+                token,
+                &call(
+                    "board",
+                    json!({"op": op, "owner": "claude", "body": "x", "status": "ready"}),
+                ),
+            );
+            assert_eq!(refusal(&body), "invalid_params", "{op}: {body}");
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .expect("message")
+                    .contains("`id` is required"),
+                "{op}: {body}"
+            );
+        }
+        stop(server);
+    }
+
+    /// Finding from review: a refusal that crosses domains named only the first one's gated
+    /// operations, while saying the whole call was described.
+    #[test]
+    fn a_gated_refusal_names_every_gated_operation_across_domains() {
+        let directory = TempDir::new().expect("temporary directory");
+        let app = app_with_storage(&directory);
+        let server = started(&app, "secret");
+        let body = call_between_turns(
+            server.address,
+            "godot",
+            json!({"ops": [
+                {"op": "resource.delete", "path": "res://a.tres"},
+                {"op": "project.set_plugin_enabled", "plugin": "x", "enabled": true}
+            ]}),
+        );
+        assert_eq!(refusal(&body), "approval_needed", "{body}");
+        let gated = body["error"]["data"]["details"]["gated"]
+            .as_array()
+            .expect("gated");
+        let named: Vec<(&str, &str)> = gated
+            .iter()
+            .map(|call| {
+                (
+                    call["tool"].as_str().expect("tool"),
+                    call["op"].as_str().expect("op"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("godot_resource", "delete"),
+                ("godot_project", "set_plugin_enabled")
+            ]
+        );
+        let (_, body) = post(
+            server.address,
+            PATH,
+            Some("secret"),
+            &rpc("call", json!({"params": {}})),
+        );
+        assert_eq!(body["id"], json!(1), "an error keeps the request's id");
+        stop(server);
+    }
+
+    #[test]
+    fn a_disabled_door_is_shut_by_apply() {
+        let directory = TempDir::new().expect("temporary directory");
+        let app = app_with_storage(&directory);
+        let shut = DoorSettings {
+            enabled: false,
+            port: 0,
+            token: "secret".to_owned(),
+        };
+        let running = started(&app, "secret");
+        let address = running.address;
+        *SERVER.lock().expect("server slot") = Some(running);
+        apply(app.handle(), &shut);
+        assert!(
+            SERVER.lock().expect("server slot").is_none(),
+            "apply shuts it"
+        );
+        assert!(TcpStream::connect(address).is_err(), "and nothing listens");
+        assert_eq!(
+            status(),
+            DoorStatus {
+                url: None,
+                error: None
+            }
+        );
     }
 }

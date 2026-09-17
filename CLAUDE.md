@@ -172,8 +172,9 @@ count: the router is the door the model knocks on.
 ## Driving Gofer from a terminal
 
 Every tool the model has is behind the agent door, a loopback JSON-RPC server in
-`src-tauri/src/agent_door.rs`, and `scripts/gofer.mjs` is its client. It reads the port and token
-from the settings file, so it needs no configuration of its own. Gofer must be open on the project.
+`src-tauri/src/agent_door.rs`, and `scripts/gofer.mjs` is its client (`gofer-cli` on PATH after
+`npm link`). It reads the port and token from the settings file, so it needs no configuration of its
+own. Gofer must be open on the project, and the door is shut until Settings, Other agents opens it.
 
 ```
 node scripts/gofer.mjs tools                           every tool and its operations
@@ -182,8 +183,10 @@ node scripts/gofer.mjs board comment --id 4 --body "…" a board write is signed
 ```
 
 A call goes through the same router as the model's, so it carries the same revision check, undo
-stack and worktree. What the door cannot do is wait on the user: a gated operation answers
-`approval_needed`, and `ask_user` answers `needs_user`. Either one has to happen in Gofer's window.
+stack and worktree. It also takes the turn's own lock: while the model is in a turn every tool but
+the board answers `turn_running`, and while a door call runs the model cannot start one. What the
+door cannot do is wait on the user: a gated operation answers `approval_needed`, and `ask_user`
+answers `needs_user`. Either one has to happen in Gofer's window.
 
 ## Waiting
 

@@ -271,10 +271,32 @@ pub fn dispatch<R: Runtime>(
 }
 
 /// The same door, for an agent outside the turn.
+///
+/// Everything but the board is run under the provider-operation bit, the one thing a turn holds
+/// for its whole length: the read ledger and the remembered revision are one slot per worktree, so
+/// two agents editing at once would each be guarded by the other's last read, and a session stop
+/// or a scene open from outside would land under the worker's feet. Taken rather than waited for,
+/// because a turn is minutes and the caller can say so; and held for the call, so a turn cannot
+/// start under a door call either. The board has a lock of its own and needs no turn.
 pub fn dispatch_from_outside<R: Runtime>(
     app: &AppHandle<R>,
     request: ToolRequest,
 ) -> Result<Value, ToolFailure> {
+    let _alone = if request.tool == crate::board::BOARD_TOOL {
+        None
+    } else {
+        Some(
+            crate::ai_turn::begin_provider_operation().map_err(|_| ToolFailure {
+                retryable: true,
+                ..ToolFailure::new(
+                    "turn_running",
+                    "Gofer's model is in a turn, and this tool shares its editor, its read ledger \
+                     and its scene revision. Nothing ran. Wait for the turn to end, or stop it in \
+                     Gofer, and send the call again.",
+                )
+            })?,
+        )
+    };
     dispatch_as(app, request, Caller::Outside)
 }
 
@@ -415,10 +437,11 @@ fn route<R: Runtime>(
     }
     refuse_a_list_that_holds_a_lone_operation(&entries)?;
 
-    for (domain, gated) in gated_per_domain(app, &entries)? {
-        if caller == Caller::Outside {
-            return Err(refused_without_a_user_to_ask(domain, &gated));
-        }
+    let gated = gated_per_domain(app, &entries)?;
+    if caller == Caller::Outside && !gated.is_empty() {
+        return Err(refused_without_a_user_to_ask(&gated));
+    }
+    for (domain, gated) in gated {
         approvals::require(app, domain.name, &gated)?;
     }
 
@@ -440,14 +463,26 @@ fn route<R: Runtime>(
 }
 
 /// The refusal an outside caller gets where the worker would get a dialog. It names every gated
-/// operation and why, so the caller can ask the user itself — in whatever window it has.
+/// operation of the call and why, across every domain the call crossed, so the caller can ask the
+/// user itself — in whatever window it has.
 fn refused_without_a_user_to_ask(
-    domain: &ToolDomain,
-    gated: &[approvals::GatedCall],
+    gated: &[(&'static ToolDomain, Vec<approvals::GatedCall>)],
 ) -> ToolFailure {
     let named: Vec<String> = gated
         .iter()
-        .map(|call| format!("{}.{} ({})", domain.name, call.op, call.reason))
+        .flat_map(|(domain, calls)| {
+            calls
+                .iter()
+                .map(move |call| format!("{}.{} ({})", domain.name, call.op, call.reason))
+        })
+        .collect();
+    let listed: Vec<Value> = gated
+        .iter()
+        .flat_map(|(domain, calls)| {
+            calls.iter().map(move |call| {
+                json!({"tool": domain.name, "op": call.op, "reason": call.reason, "params": call.params})
+            })
+        })
         .collect();
     ToolFailure {
         code: "approval_needed".to_owned(),
@@ -458,7 +493,7 @@ fn refused_without_a_user_to_ask(
             named.join(", ")
         ),
         retryable: false,
-        details: json!({"tool": domain.name, "gated": gated}),
+        details: json!({"gated": listed}),
     }
 }
 

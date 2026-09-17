@@ -14,15 +14,15 @@ const DOOR_PATH = '/door'
 /// Tools whose call is an `ops` list: the Godot domains, and `godot` with dotted names.
 const GODOT_PREFIX = 'godot'
 
-export const USAGE = `gofer — drive the open Gofer from a terminal
+export const USAGE = `gofer-cli — drive the open Gofer from a terminal
 
-  gofer tools [name]                       every tool and its operations, or one tool's
-  gofer <tool> <op> [--key value ...]      one operation
-  gofer <tool> --ops '[{"op": …}, …]'      several operations in one call
-  gofer godot <domain.op> [--key value]    the same, spelled the way the model spells it
+  gofer-cli tools [name]                       every tool and its operations, or one tool's
+  gofer-cli <tool> <op> [--key value ...]      one operation
+  gofer-cli <tool> --ops '[{"op": …}, …]'      several operations in one call
+  gofer-cli godot <domain.op> [--key value]    the same, spelled the way the model spells it
 
 Options
-  --params '{…}'     parameters as one JSON object, merged under the flags
+  --params '{…}'     parameters as one JSON object; a flag with the same name wins
   --out <file>       write the answer there instead of stdout
   --owner <name>     the name a board write is signed with (default: GOFER_OWNER, then "terminal")
   --raw              print the answer unformatted
@@ -71,6 +71,9 @@ function jsonOrText(text) {
     }
 }
 
+// Flags that are paths or names, never data: `--out 7` is a file called 7.
+const TEXT_FLAGS = new Set(['out', 'owner'])
+
 /** Splits argv into the positionals and the flags, reading each flag's value as JSON or text. */
 export function parseArgs(argv) {
     const positional = []
@@ -87,7 +90,7 @@ export function parseArgs(argv) {
             flags[name] = true
             continue
         }
-        flags[name] = jsonOrText(next)
+        flags[name] = TEXT_FLAGS.has(name) ? next : jsonOrText(next)
         index += 1
     }
     return {positional, flags}
@@ -102,8 +105,8 @@ export function requestFor({positional, flags}, env = process.env) {
     if (tool === 'tools') return {method: 'tools', params: {}, only: op}
     const given = Object.fromEntries(Object.entries(flags).filter(([name]) => !OWN_FLAGS.has(name)))
     const params = {
-        ...given,
-        ...(typeof flags.params === 'object' && flags.params ? flags.params : {})
+        ...(typeof flags.params === 'object' && flags.params ? flags.params : {}),
+        ...given
     }
     const isGodot = tool === GODOT_PREFIX || tool.startsWith(`${GODOT_PREFIX}_`)
     let body
@@ -113,15 +116,15 @@ export function requestFor({positional, flags}, env = process.env) {
     } else if (isGodot) {
         if (!op)
             throw new Error(
-                `${tool} needs an operation: gofer ${tool} <op>, or gofer tools ${tool} to see them`
+                `${tool} needs an operation: gofer-cli ${tool} <op>, or gofer-cli tools ${tool} to see them`
             )
         body = {ops: [{op, ...params}]}
     } else {
-        if (!op) throw new Error(`${tool} needs an operation: gofer ${tool} <op>`)
+        if (!op) throw new Error(`${tool} needs an operation: gofer-cli ${tool} <op>`)
         body = {op, ...params}
     }
     if (tool === 'board' && !body.owner && op !== 'list' && op !== 'read')
-        body.owner = typeof flags.owner === 'string' ? flags.owner : (env.GOFER_OWNER ?? 'terminal')
+        body.owner = flags.owner ?? env.GOFER_OWNER ?? 'terminal'
     return {method: 'call', params: {tool, params: body}}
 }
 

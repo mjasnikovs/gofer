@@ -6,8 +6,9 @@ An AI agent workspace for Godot.
 Usage: gofer
 
 Opens the window on the project in the current directory, or in GOFER_WORKSPACE_DIR.
-There are no subcommands. Other agents reach the project board over MCP.
-Its address and the `claude mcp add` line are in Settings, Other agents.
+There are no subcommands. An agent in a terminal drives the open Gofer through the
+agent door with the gofer-cli command from Gofer's repository; the door is opened in
+Settings, Other agents.
 
 Options:
   -h, --help     Print this and exit

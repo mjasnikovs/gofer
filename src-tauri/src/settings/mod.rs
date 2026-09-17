@@ -108,6 +108,11 @@ pub(crate) struct GoferSettings {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DoorSettings {
+    /// Off until the user opens it. The door reaches every tool the model has, so a token that
+    /// leaks buys file writes and expression evaluation, and nobody who never asked for the door
+    /// should be carrying that.
+    #[serde(default)]
+    pub(crate) enabled: bool,
     #[serde(default = "default_door_port")]
     pub(crate) port: u16,
     #[serde(default)]
@@ -117,6 +122,7 @@ pub(crate) struct DoorSettings {
 impl Default for DoorSettings {
     fn default() -> Self {
         Self {
+            enabled: false,
             port: default_door_port(),
             token: String::new(),
         }
@@ -3510,6 +3516,32 @@ mod tests {
         assert_eq!(
             again.door, loaded.door,
             "a save with a token keeps that token"
+        );
+    }
+
+    /// The door was `mcp` in every settings file written before it stopped speaking MCP. Its
+    /// token has to survive the rename, or every client on the machine is shown the door.
+    #[test]
+    fn a_settings_file_that_still_says_mcp_keeps_its_token_and_port() {
+        let directory = TempDir::new().expect("temporary directory");
+        let path = directory.path().join("settings.json");
+        let stored =
+            validate_settings(settings("http://localhost:9999/v1", "stored-model")).expect("valid");
+        let mut old = serde_json::to_value(&stored).expect("json");
+        let object = old.as_object_mut().expect("object");
+        object.remove("door");
+        object.insert(
+            "mcp".to_owned(),
+            serde_json::json!({"port": 5005, "token": "minted-before"}),
+        );
+        fs::write(&path, old.to_string()).expect("write settings");
+
+        let read = read_settings_from_path(&path).expect("read");
+        assert_eq!(read.door.port, 5005);
+        assert_eq!(read.door.token, "minted-before");
+        assert!(
+            !read.door.enabled,
+            "an old file never asked for every tool to be reachable"
         );
     }
 

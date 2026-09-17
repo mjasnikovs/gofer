@@ -13,7 +13,7 @@ async function main(argv) {
     let answer = await send(door, request.method, request.params)
     if (request.method === 'tools') answer = pickTool(answer, request.only)
     const text = parsed.flags.raw ? JSON.stringify(answer) : JSON.stringify(answer, null, 2)
-    if (typeof parsed.flags.out === 'string') {
+    if (parsed.flags.out !== undefined) {
         writeFileSync(parsed.flags.out, `${text}\n`)
         process.stdout.write(`${parsed.flags.out}\n`)
     } else {

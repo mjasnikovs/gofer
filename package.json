@@ -2,7 +2,7 @@
     "name": "gofer",
     "private": true,
     "bin": {
-        "gofer": "scripts/gofer.mjs"
+        "gofer-cli": "scripts/gofer.mjs"
     },
     "version": "0.1.0",
     "type": "module",
