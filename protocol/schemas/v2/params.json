@@ -3406,7 +3406,7 @@
         {
             "tool": "godot_script",
             "op": "save",
-            "summary": "Writes a whole file, creating it when it is new, and answers with the file's diagnostics the same way `edit` does. A script or a shader (.gdshader, .gdshaderinc); a shader gets no diagnostics, because the language server does not read it.",
+            "summary": "Writes a whole file, creating it when it is new, and answers with the file's diagnostics the same way `edit` does. A script or a shader (.gdshader, .gdshaderinc); a shader gets no diagnostics, because the language server does not read it. Over a file that exists, the save needs the hash `script.open` or `edit` answered for it; a plain read does not arm one.",
             "params": [
                 {
                     "name": "path",
@@ -5013,7 +5013,7 @@
         {
             "tool": "godot_runtime",
             "op": "run",
-            "summary": "Runs the project and captures the first frame, unless `playArgs` start it with `--headless`, which draws none. While it runs the scene can be read and opened but not changed: a mutation answers session_playing until stop.",
+            "summary": "Runs the project and captures the first frame, unless `playArgs` start it with `--headless`, which draws none. `saveTo` writes that frame into the project instead of answering with its bytes. While it runs the scene can be read and opened but not changed: a mutation answers session_playing until stop.",
             "alone": {
                 "scope": "repeat",
                 "why": "There is one running game, so a second one in the same call is the first one again."
@@ -5031,6 +5031,12 @@
                         "kind": "text"
                     },
                     "required": false
+                },
+                {
+                    "name": "saveTo",
+                    "kind": "text",
+                    "required": false,
+                    "note": "A path inside the project. The first frame is written there and the answer carries the path instead of the bytes. A directory this creates gets a .gdignore, so captures are not imported as assets."
                 }
             ],
             "result": {
@@ -5081,7 +5087,14 @@
                 "scope": "repeat",
                 "why": "There is one running game, so a second one in the same call is the first one again."
             },
-            "params": [],
+            "params": [
+                {
+                    "name": "saveTo",
+                    "kind": "text",
+                    "required": false,
+                    "note": "A path inside the project. The first frame is written there and the answer carries the path instead of the bytes. A directory this creates gets a .gdignore, so captures are not imported as assets."
+                }
+            ],
             "result": {
                 "kind": "object",
                 "entry": [

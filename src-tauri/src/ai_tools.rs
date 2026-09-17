@@ -1190,14 +1190,17 @@ fn route_one<R: Runtime>(
             if domain.name == "godot_runtime" {
                 godot_session::a_game_the_debugger_has_halted(op)?;
             }
-            let save_to = (command == "runtime.capture")
-                .then(|| {
-                    params
-                        .get("saveTo")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                })
-                .flatten();
+            let save_to = matches!(
+                command,
+                "runtime.capture" | "runtime.run" | "runtime.restart"
+            )
+            .then(|| {
+                params
+                    .get("saveTo")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .flatten();
             let answered: Result<Value, ToolFailure> = match save_to {
                 Some(save_to) => rpc(app, command, params)
                     .map_err(Into::into)

@@ -1847,8 +1847,20 @@ fn every_runtime_operation_no_turn_has_ever_used_still_answers() {
             .unwrap_or_else(|| panic!("the counter has to cross the wire as a number: {read}"))
     };
 
-    let ran = call("godot_runtime", json!({"ops": [{"op": "run"}]})).expect("run the game");
+    let ran = call(
+        "godot_runtime",
+        json!({"ops": [{"op": "run", "saveTo": "captures/launch.png"}]}),
+    )
+    .expect("run the game");
     assert_eq!(result(&ran)["running"], true, "{ran}");
+    // Card 5's run: a launch answered with a hundred kilobytes of base64 that nothing in a
+    // terminal could decline. `saveTo` on run is the same door capture has.
+    assert_eq!(
+        result(&ran)["frame"]["path"],
+        "captures/launch.png",
+        "{ran}"
+    );
+    assert!(result(&ran)["frame"].get("data").is_none(), "{ran}");
 
     // Review finding: an unasked listing carried the inspector's category headers as Nil
     // properties, `"Node": null` between the real ones.

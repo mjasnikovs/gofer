@@ -21,7 +21,7 @@ const Protocol := preload("res://addons/gofer/protocol.gd")
 ## `expectedRevision` and `timeoutMs` are absent on purpose. Both are lifted onto the envelope by
 ## the caller, so a handler that looked for them among its parameters would refuse every call that
 ## was actually well formed.
-# GENERATED-BEGIN command-params sha256:4af137ee0c87117a
+# GENERATED-BEGIN command-params sha256:7261917f00d24c27
 const COMMAND_PARAMS: Dictionary = {
     "session.get_state": {"required": [], "optional": []},
     "session.cancel": {"required": [], "optional": ["requestId"]},
@@ -79,9 +79,9 @@ const COMMAND_PARAMS: Dictionary = {
     "resource.create_shape": {"required": ["path", "shapeType"], "optional": ["size", "radius", "height", "points"]},
     "resource.describe_tileset": {"required": ["path"], "optional": []},
     "session.heartbeat": {"required": [], "optional": []},
-    "runtime.run": {"required": [], "optional": ["scene", "playArgs"]},
+    "runtime.run": {"required": [], "optional": ["scene", "playArgs", "saveTo"]},
     "runtime.stop": {"required": [], "optional": []},
-    "runtime.restart": {"required": [], "optional": []},
+    "runtime.restart": {"required": [], "optional": ["saveTo"]},
     "runtime.get_state": {"required": [], "optional": []},
     "runtime.get_tree": {"required": [], "optional": ["root", "depth", "limit"]},
     "runtime.inspect_node": {"required": ["path"], "optional": ["properties"]},

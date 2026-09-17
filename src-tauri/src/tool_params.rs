@@ -841,7 +841,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:323894a529c79182
+// GENERATED-BEGIN operations sha256:4a59e09f9867f800
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -1533,7 +1533,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
         op(
             "godot_script",
             "save",
-            "Writes a whole file, creating it when it is new, and answers with the file's diagnostics the same way `edit` does. A script or a shader (.gdshader, .gdshaderinc); a shader gets no diagnostics, because the language server does not read it.",
+            "Writes a whole file, creating it when it is new, and answers with the file's diagnostics the same way `edit` does. A script or a shader (.gdshader, .gdshaderinc); a shader gets no diagnostics, because the language server does not read it. Over a file that exists, the save needs the hash `script.open` or `edit` answered for it; a plain read does not arm one.",
             Answers::Rust,
             &[
                 need("path", Text),
@@ -1917,9 +1917,13 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
         op(
             "godot_runtime",
             "run",
-            "Runs the project and captures the first frame, unless `playArgs` start it with `--headless`, which draws none. While it runs the scene can be read and opened but not changed: a mutation answers session_playing until stop.",
+            "Runs the project and captures the first frame, unless `playArgs` start it with `--headless`, which draws none. `saveTo` writes that frame into the project instead of answering with its bytes. While it runs the scene can be read and opened but not changed: a mutation answers session_playing until stop.",
             Answers::Addon("runtime.run"),
-            &[opt("scene", Text), opt("playArgs", Kind::ListOf(&Text))],
+            &[
+                opt("scene", Text),
+                opt("playArgs", Kind::ListOf(&Text)),
+                opt("saveTo", Text),
+            ],
         ),
         Sharing::Repeat,
         "There is one running game, so a second one in the same call is the first one again.",
@@ -1941,7 +1945,7 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
             "restart",
             "Restarts the running game.",
             Answers::Addon("runtime.restart"),
-            &[],
+            &[opt("saveTo", Text)],
         ),
         Sharing::Repeat,
         "There is one running game, so a second one in the same call is the first one again.",
