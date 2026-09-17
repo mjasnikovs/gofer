@@ -109,7 +109,8 @@
                 {
                     "name": "encoding",
                     "kind": "text",
-                    "required": true
+                    "required": false,
+                    "note": "Absent when the call named saveTo; the frame is on disk at path then."
                 },
                 {
                     "name": "width",
@@ -124,7 +125,8 @@
                 {
                     "name": "data",
                     "kind": "text",
-                    "required": true
+                    "required": false,
+                    "note": "Absent when the call named saveTo; the frame is on disk at path then."
                 },
                 {
                     "name": "path",
@@ -5380,7 +5382,8 @@
                 {
                     "name": "saveTo",
                     "kind": "text",
-                    "required": false
+                    "required": false,
+                    "note": "A path inside the project. A directory this creates gets a .gdignore, so captures are not imported as assets."
                 }
             ],
             "result": {

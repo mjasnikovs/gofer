@@ -8,7 +8,7 @@
 //!
 //! Every field is read by serde and by nothing else, which is what the allow above is for.
 
-// GENERATED-BEGIN results sha256:57b9ef3bb08587a0
+// GENERATED-BEGIN results sha256:0c9e67f5c8083a63
 /// One node of a scene tree, and the nodes under it.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -24,10 +24,12 @@ pub struct GodotNode {
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GodotFrame {
-    pub encoding: String,
+    #[serde(default)]
+    pub encoding: Option<String>,
     pub width: i64,
     pub height: i64,
-    pub data: String,
+    #[serde(default)]
+    pub data: Option<String>,
     #[serde(default)]
     pub path: Option<String>,
 }

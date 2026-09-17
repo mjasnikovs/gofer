@@ -777,8 +777,13 @@ pub(crate) mod tests {
 
         let address = first.address;
         stop(first);
-        let refused = TcpStream::connect(address);
-        assert!(refused.is_err(), "the stopped server no longer accepts");
+        // Another test's server may take the freed port at once, so a connection that succeeds
+        // proves nothing; a ping the old token opens would.
+        let (status, _) = match TcpStream::connect(address) {
+            Err(_) => (401, Value::Null),
+            Ok(_) => post(address, PATH, Some("two"), &rpc("ping", json!({}))),
+        };
+        assert_ne!(status, 200, "the stopped server no longer answers");
     }
 
     /// Speaks whatever bytes it is given and reads the status line back.
@@ -1169,7 +1174,13 @@ pub(crate) mod tests {
             SERVER.lock().expect("server slot").is_none(),
             "apply shuts it"
         );
-        assert!(TcpStream::connect(address).is_err(), "and nothing listens");
+        // The freed port may be another test's by now; the old token opening it is what would
+        // prove the door is still there.
+        let (answered, _) = match TcpStream::connect(address) {
+            Err(_) => (401, Value::Null),
+            Ok(_) => post(address, PATH, Some("secret"), &rpc("ping", json!({}))),
+        };
+        assert_ne!(answered, 200, "and nothing answers");
         assert_eq!(
             status(),
             DoorStatus {

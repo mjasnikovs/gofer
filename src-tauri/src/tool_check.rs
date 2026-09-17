@@ -504,7 +504,15 @@ fn check_inside(
 /// name taken out of it, which is how one fault reads across two positions.
 fn every_entry_with_the_same_fault(mut refused: Vec<(String, ToolFailure)>) -> ToolFailure {
     let (first_at, mut first) = refused.remove(0);
-    let reason = |at: &str, message: &str| message.replace(at, "");
+    // What the entry carried is its own; the fault is the clause before it.
+    let reason = |at: &str, message: &str| {
+        let own = message.replace(at, "");
+        [", and this one was", ". Send ", " Did you mean"]
+            .iter()
+            .filter_map(|cut| own.find(cut))
+            .min()
+            .map_or(own.clone(), |end| own[..end].to_owned())
+    };
     let same = reason(&first_at, &first.message);
     let also: Vec<String> = refused
         .iter()
@@ -1225,7 +1233,7 @@ mod tests {
     /// twenty-four entries named `properties[14]` alone. Every entry with that fault is named.
     #[test]
     fn every_entry_refused_for_the_same_reason_is_named_at_once() {
-        let wrong = |node: &str| json!({"node": node, "property": "material", "value": {"type": "Resource", "value": "res://a.tres"}});
+        let wrong = |node: &str| json!({"node": node, "property": "material", "value": {"type": "Resource", "value": format!("res://{node}.tres")}});
         let right = json!({"node": "/Game/B", "property": "position", "value": {"type": "Vector2", "value": [1, 2]}});
         let refused = message(
             "godot_node",

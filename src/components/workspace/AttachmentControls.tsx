@@ -89,7 +89,7 @@ export function GameCapturePicker({
                 'runtime.capture',
                 source === 'editor' ? {source} : {}
             )
-            if (!frame) {
+            if (!frame.data) {
                 onError(`The ${subject} answered the screenshot request with no picture.`)
                 return
             }

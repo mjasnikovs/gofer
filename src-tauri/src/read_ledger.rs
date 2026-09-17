@@ -74,6 +74,16 @@ pub fn forget(root: &Path, path: &str) {
     }
 }
 
+/// Drops the remembered revision alone. A fresh editor counts from zero, so a revision remembered
+/// from the editor before it is a claim about a scene that no longer exists: the first mutation
+/// after a restart was refused as `revision_conflict`, "13 expected, at 0", for a number the caller
+/// never sent. The file hashes stay; the files did not change because the editor did.
+pub fn forget_revision(root: &Path) {
+    if let Ok(mut held) = revisions().lock() {
+        held.remove(root);
+    }
+}
+
 /// Drops a whole worktree, so a task that ends does not answer for the one that reuses its paths.
 pub fn forget_worktree(root: &Path) {
     if let Ok(mut held) = ledger().lock() {
@@ -213,6 +223,17 @@ pub fn recall_revision(root: &Path) -> Option<SceneRevision> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_session_start_forgets_the_revision_and_keeps_the_hashes() {
+        let root = std::env::temp_dir().join("ledger-forget-revision");
+        super::remember(&root, "a.gd", "hash-a");
+        super::remember_revision(&root, Some("res://main.tscn"), 13);
+        super::forget_revision(&root);
+        assert_eq!(super::recall_revision(&root), None);
+        assert_eq!(super::recall(&root, "a.gd").as_deref(), Some("hash-a"));
+        super::forget_worktree(&root);
+    }
+
     use super::*;
 
     fn root(name: &str) -> PathBuf {

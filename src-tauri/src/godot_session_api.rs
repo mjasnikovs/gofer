@@ -460,6 +460,7 @@ pub fn start_session<R: Runtime>(
         Launch::Running(running) => return Ok(to_response(&running)),
         Launch::Started(info) => info,
     };
+    crate::read_ledger::forget_revision(&worktree);
     remember_session_task(storage.tasks().active());
     start_run_logging(&storage, &info, &worktree);
     start_session_watch(app);

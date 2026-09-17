@@ -7,7 +7,7 @@ export type GodotCommandSpec<Params extends GodotParams, Result extends GodotRes
     result: Result
 }>
 
-// GENERATED-BEGIN command-names sha256:e0a83d8826aef35b
+// GENERATED-BEGIN command-names sha256:3a136ddc59788935
 export type GodotCommandName =
     | 'session.get_state'
     | 'session.cancel'
@@ -93,10 +93,10 @@ export type GodotNode = Readonly<{
 
 /** A captured image, PNG bytes in base64 — or, when the call named saveTo, the path it was written to and no bytes. */
 export type GodotFrame = Readonly<{
-    encoding: string
+    encoding?: string | undefined
     width: number
     height: number
-    data: string
+    data?: string | undefined
     path?: string | undefined
 }>
 

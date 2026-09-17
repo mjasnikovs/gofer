@@ -532,11 +532,17 @@ fn the_frame_written_to<R: Runtime>(
             format!("{relative} could not be written: {error}"),
         )
     };
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = path.parent()
+        && !parent.exists()
+    {
         std::fs::create_dir_all(parent).map_err(unwritable)?;
+        // A directory made for captures is not an asset folder: without this every frame gains
+        // a .import beside it on the editor's next scan.
+        std::fs::write(parent.join(".gdignore"), "").map_err(unwritable)?;
     }
     crate::files::write_atomically(&path, &bytes).map_err(unwritable)?;
-    frame.insert("data".to_owned(), json!(""));
+    frame.remove("data");
+    frame.remove("encoding");
     frame.insert("path".to_owned(), json!(relative));
     Ok(answer)
 }

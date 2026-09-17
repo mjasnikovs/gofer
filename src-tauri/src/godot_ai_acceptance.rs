@@ -1755,10 +1755,18 @@ fn every_scene_and_node_operation_no_turn_has_ever_used_still_answers() {
     );
     let half_wrong = call(
         "godot_node",
-        json!({"ops": [{"op": "delete", "nodes": ["/level/Fixture", "/level/Nowhere"]}]}),
+        json!({"ops": [{
+            "op": "delete",
+            "nodes": ["/level/Fixture", "/level/Nowhere", "/level/Elsewhere"],
+        }]}),
     )
     .expect_err("a batch with a path that is wrong is refused whole");
     assert_eq!(half_wrong.code, "node_not_found", "{}", half_wrong.message);
+    assert!(
+        half_wrong.message.contains("Nowhere") && half_wrong.message.contains("Elsewhere"),
+        "every missing path is named at once: {}",
+        half_wrong.message
+    );
     assert!(
         tree().to_string().contains("Fixture"),
         "nothing in a refused batch is deleted"
@@ -1916,12 +1924,16 @@ fn every_runtime_operation_no_turn_has_ever_used_still_answers() {
     .expect("a capture is written where the call asked");
     let frame = &result(&saved)["frame"];
     assert_eq!(frame["path"], "captures/first.png", "{saved}");
-    assert_eq!(
-        frame["data"], "",
-        "the bytes stay out of the answer: {saved}"
+    assert!(
+        frame.get("data").is_none() && frame.get("encoding").is_none(),
+        "the bytes and their encoding stay out of the answer: {saved}"
     );
     let png = std::fs::read(session.worktree.join("captures/first.png")).expect("the PNG exists");
     assert!(png.starts_with(b"\x89PNG"), "what was written is a PNG");
+    assert!(
+        session.worktree.join("captures/.gdignore").exists(),
+        "a directory made for captures is kept out of the import scan"
+    );
     let climbing = call(
         "godot_runtime",
         json!({"ops": [{"op": "capture", "saveTo": "../outside.png"}]}),

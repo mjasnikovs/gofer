@@ -3514,10 +3514,14 @@ func _node_delete(params: Dictionary) -> Dictionary:
     # rather than leaving half a batch gone.
     var root := _edited_root()
     var found: Array[Node] = []
+    var missing: Array = []
+    for node_path_str in named:
+        if _find_node(node_path_str) == null:
+            missing.append(node_path_str)
+    if not missing.is_empty():
+        return _nodes_not_found_error(missing)
     for node_path_str in named:
         var node := _find_node(node_path_str)
-        if node == null:
-            return _node_not_found_error(node_path_str)
         if node == root:
             return Params.error(
                 "cannot_delete_root",
@@ -3661,6 +3665,14 @@ func _node_set_properties(params: Dictionary) -> Dictionary:
 
     var plan: Array = []
     var expected: Dictionary = {}
+    var missing: Array = []
+    for entry in entries:
+        if typeof(entry) == TYPE_DICTIONARY:
+            var named_node := String(entry.get("node", ""))
+            if not named_node.is_empty() and _find_node(named_node) == null and not missing.has(named_node):
+                missing.append(named_node)
+    if not missing.is_empty():
+        return _nodes_not_found_error(missing)
     for entry in entries:
         if typeof(entry) != TYPE_DICTIONARY:
             return Params.error(
@@ -4414,6 +4426,17 @@ func _as_far_as_the_path_goes(raw: String) -> String:
 ## node inside it was meant. Repeating either back says only that it is absent, which is the one
 ## thing the caller already knew. Both are answered with the name the root actually has, because
 ## that is the fact that repairs them — every node path in the edited scene begins with it.
+## One refusal for every path a batch named that is not in the scene, so a caller who cannot
+## cheaply rebuild the batch learns all of them at once.
+func _nodes_not_found_error(paths: Array) -> Dictionary:
+    if paths.size() == 1:
+        return _node_not_found_error(str(paths[0]))
+    return Params.error(
+        "node_not_found",
+        "Nodes %s were not found in the edited scene" % ", ".join(paths),
+        {"nodes": paths}
+    )
+
 func _node_not_found_error(raw: String) -> Dictionary:
     var path := raw.strip_edges()
     var message := "Node %s was not found in the edited scene" % path
