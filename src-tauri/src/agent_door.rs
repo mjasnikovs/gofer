@@ -353,10 +353,11 @@ pub(crate) const BOARD_LISTING: &str = r#"[
         {"name": "status", "kind": "choice", "of": ["backlog", "ready", "doing", "review"], "required": false},
         {"name": "owner", "kind": "text", "required": true, "note": "The name the write is signed with, shown as the card's owner on create and as the author on comment. On move and edit it signs and changes nothing else."}
     ]},
-    {"op": "move", "summary": "Moves a card to a column other than done. The card keeps its owner.", "params": [
+    {"op": "move", "summary": "Moves a card to a column other than done. The card keeps its owner. A move to doing opens the card's task, or moves onto the one it has; every call after it is written into that task's chat.", "params": [
         {"name": "id", "kind": "int", "required": true},
         {"name": "status", "kind": "choice", "of": ["backlog", "ready", "doing", "review"], "required": true},
-        {"name": "owner", "kind": "text", "required": true, "note": "Signs the write; the card's owner does not change."}
+        {"name": "owner", "kind": "text", "required": true, "note": "Signs the write; the card's owner does not change."},
+        {"name": "bringChanges", "kind": "flag", "required": false, "note": "On a move to doing that opens a task: take the loose files in the checkout into it, instead of banking them on the branch they are on."}
     ]},
     {"op": "comment", "summary": "Adds a comment under a card, by the name in owner.", "params": [
         {"name": "id", "kind": "int", "required": true},
@@ -517,6 +518,11 @@ fn noted_in_the_task_chat<R: Runtime>(
     answered: &Result<Value, crate::ai_tools::ToolFailure>,
     started: u64,
 ) {
+    // A call the turn's lock turned away never entered the router; a caller retrying every few
+    // seconds would fill the chat with cards about nothing.
+    if matches!(answered, Err(failure) if failure.code == "turn_running") {
+        return;
+    }
     let Ok(storage) = crate::workspace::project_storage(app) else {
         return;
     };
@@ -633,6 +639,32 @@ pub(crate) mod tests {
             serde_json::from_str(body).expect("json")
         };
         (status, body)
+    }
+
+    /// A post to a port that may have been closed, or taken by another test's server, an instant
+    /// ago: any failure to speak is a refusal, and only a 200 would say the old door is still there.
+    fn status_or_refused(address: SocketAddr, token: &str) -> u16 {
+        let Ok(mut stream) = TcpStream::connect(address) else {
+            return 401;
+        };
+        let body = rpc("ping", json!({}));
+        let sent = write!(
+            stream,
+            "POST {PATH} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        if sent.is_err() {
+            return 401;
+        }
+        let mut answer = String::new();
+        if stream.read_to_string(&mut answer).is_err() {
+            return 401;
+        }
+        answer
+            .split_whitespace()
+            .nth(1)
+            .and_then(|status| status.parse().ok())
+            .unwrap_or(401)
     }
 
     fn rpc(method: &str, params: Value) -> String {
@@ -915,11 +947,11 @@ pub(crate) mod tests {
         stop(first);
         // Another test's server may take the freed port at once, so a connection that succeeds
         // proves nothing; a ping the old token opens would.
-        let (status, _) = match TcpStream::connect(address) {
-            Err(_) => (401, Value::Null),
-            Ok(_) => post(address, PATH, Some("two"), &rpc("ping", json!({}))),
-        };
-        assert_ne!(status, 200, "the stopped server no longer answers");
+        assert_ne!(
+            status_or_refused(address, "two"),
+            200,
+            "the stopped server no longer answers"
+        );
     }
 
     /// Speaks whatever bytes it is given and reads the status line back.
@@ -1320,6 +1352,93 @@ pub(crate) mod tests {
         stop(server);
     }
 
+    /// Regression for the user's finding: five cards were worked through the door and none of
+    /// them was in the task list. A tool call with no card in doing writes nowhere at all — the
+    /// shader save is the one write that needs no editor, so it is the one that would have landed.
+    #[test]
+    fn a_tool_call_with_no_card_in_doing_writes_nowhere() {
+        let directory = TempDir::new().expect("temporary directory");
+        let app = app_with_storage(&directory);
+        let server = started(&app, "secret");
+        let save = json!({"ops": [{
+            "op": "save",
+            "path": "shaders/stray.gdshader",
+            "text": "shader_type canvas_item;\n",
+        }]});
+        let refused = call_between_turns(server.address, "godot_script", save.clone());
+        assert_eq!(refusal(&refused), "no_card_in_doing", "{refused}");
+        assert!(
+            !directory
+                .path()
+                .join("workspace/shaders/stray.gdshader")
+                .exists(),
+            "nothing reached the checkout"
+        );
+        let (_, made) = post(
+            server.address,
+            PATH,
+            Some("secret"),
+            &call(
+                "board",
+                json!({"op": "create", "title": "Work", "owner": "claude", "status": "ready"}),
+            ),
+        );
+        assert!(
+            !directory
+                .path()
+                .join("workspace/shaders/stray.gdshader")
+                .exists(),
+            "a card that is not in doing opens nothing either"
+        );
+        let id = made["result"]["id"].as_u64().expect("a card number");
+        let still = call_between_turns(server.address, "godot_script", save.clone());
+        assert_eq!(refusal(&still), "no_card_in_doing", "{still}");
+        let moved = call_between_turns(
+            server.address,
+            "board",
+            json!({"op": "move", "id": id, "status": "doing", "owner": "claude"}),
+        );
+        assert!(moved.get("error").is_none(), "{moved}");
+        let written = call_between_turns(server.address, "godot_script", save);
+        assert!(written.get("error").is_none(), "{written}");
+        assert!(
+            directory
+                .path()
+                .join("workspace/shaders/stray.gdshader")
+                .exists(),
+            "with a card in doing the write lands in its task's checkout"
+        );
+        let storage = crate::workspace::project_storage(app.handle()).expect("storage");
+        let task_id = storage
+            .tasks()
+            .active()
+            .expect("active")
+            .expect("the card's task");
+        let chat = storage
+            .chats()
+            .load(Some(&task_id))
+            .expect("the task's chat");
+        let registered: Vec<(String, String)> = chat
+            .messages
+            .iter()
+            .filter_map(|message| message.extra.get("tools"))
+            .filter_map(|tools| tools.as_array())
+            .flatten()
+            .map(|tool| {
+                (
+                    tool["name"].as_str().unwrap_or_default().to_owned(),
+                    tool["status"].as_str().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            registered,
+            [("godot_script".to_owned(), "complete".to_owned())],
+            "the one call that ran is the one in the chat: {chat:?}"
+        );
+        stop(server);
+    }
+
     /// The user's finding: five cards were worked through the door and none of them was in the
     /// task list, so there was no diff to review and nothing to revert.
     #[test]
@@ -1420,11 +1539,11 @@ pub(crate) mod tests {
         );
         // The freed port may be another test's by now; the old token opening it is what would
         // prove the door is still there.
-        let (answered, _) = match TcpStream::connect(address) {
-            Err(_) => (401, Value::Null),
-            Ok(_) => post(address, PATH, Some("secret"), &rpc("ping", json!({}))),
-        };
-        assert_ne!(answered, 200, "and nothing answers");
+        assert_ne!(
+            status_or_refused(address, "secret"),
+            200,
+            "and nothing answers"
+        );
         assert_eq!(
             status(),
             DoorStatus {

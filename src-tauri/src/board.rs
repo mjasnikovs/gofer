@@ -218,7 +218,11 @@ pub(crate) fn board_tool_from_outside<R: Runtime>(
         let reference = given_reference(params.get("id"))?
             .ok_or_else(|| ToolFailure::new("invalid_params", "`id` is required"))?;
         let card = storage.board().resolve(&reference)?;
-        on_the_cards_task(app, &storage, &card)?;
+        let bring_changes = params
+            .get("bringChanges")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        on_the_cards_task(app, &storage, &card, bring_changes)?;
     }
     board_tool_as(app, params, writer)
 }
@@ -440,10 +444,11 @@ fn on_the_cards_task<R: Runtime>(
     app: &AppHandle<R>,
     storage: &crate::storage::ProjectStorage,
     card: &CardRecord,
+    bring_changes: bool,
 ) -> Result<(), ToolFailure> {
     match &card.task_id {
         None => {
-            open_task_for_card(app, storage, &card.id, false)?;
+            open_task_for_card(app, storage, &card.id, bring_changes)?;
         }
         Some(task_id) => {
             if storage.tasks().active()?.as_deref() != Some(task_id.as_str()) {
