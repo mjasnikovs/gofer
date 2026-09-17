@@ -21,7 +21,7 @@ const Protocol := preload("res://addons/gofer/protocol.gd")
 ## `expectedRevision` and `timeoutMs` are absent on purpose. Both are lifted onto the envelope by
 ## the caller, so a handler that looked for them among its parameters would refuse every call that
 ## was actually well formed.
-# GENERATED-BEGIN command-params sha256:b7c3f21ea434bdd1
+# GENERATED-BEGIN command-params sha256:4af137ee0c87117a
 const COMMAND_PARAMS: Dictionary = {
     "session.get_state": {"required": [], "optional": []},
     "session.cancel": {"required": [], "optional": ["requestId"]},
@@ -63,7 +63,7 @@ const COMMAND_PARAMS: Dictionary = {
     "node.rename": {"required": ["node", "name"], "optional": ["scene"]},
     "node.reparent": {"required": ["node", "newParent"], "optional": ["index", "scene"]},
     "node.change_type": {"required": ["node", "type"], "optional": ["scene"]},
-    "node.delete": {"required": ["node"], "optional": ["scene"]},
+    "node.delete": {"required": [], "optional": ["node", "nodes", "scene"]},
     "node.set_property": {"required": ["node", "property", "value"], "optional": ["scene"]},
     "node.set_properties": {"required": ["properties"], "optional": ["scene"]},
     "node.add_to_group": {"required": ["node", "group"], "optional": []},
@@ -85,8 +85,9 @@ const COMMAND_PARAMS: Dictionary = {
     "runtime.get_state": {"required": [], "optional": []},
     "runtime.get_tree": {"required": [], "optional": ["root", "depth", "limit"]},
     "runtime.inspect_node": {"required": ["path"], "optional": ["properties"]},
+    "runtime.set_property": {"required": ["path", "property", "value"], "optional": []},
     "runtime.input": {"required": ["events"], "optional": []},
-    "runtime.capture": {"required": [], "optional": ["source"]},
+    "runtime.capture": {"required": [], "optional": ["source", "saveTo"]},
     "runtime.get_monitors": {"required": [], "optional": ["monitors"]},
     "runtime.wait": {"required": [], "optional": ["frames", "ms"]},
     "runtime.pause": {"required": [], "optional": []},

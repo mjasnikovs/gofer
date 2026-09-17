@@ -338,16 +338,43 @@ fn rpc_error(id: Value, code: i64, message: &str, data: Value) -> Value {
 /// A tool call that was refused, as JSON-RPC spells it. The router's failure rides in `data`.
 const TOOL_REFUSED: i64 = -32000;
 
-/// The board as the door offers it: every op the tool takes, with `id` required on each one that
-/// names a card, because an outside agent has no task whose card an omitted id could mean.
+/// The board as the door offers it, in the row shape the Godot domains are listed in: `params` is
+/// a list of `{name, kind, required}`, so one parser reads the whole listing. `id` is required on
+/// every op that names a card, because an outside agent has no task whose card an omitted id could
+/// mean; `owner` signs the write and never changes whose card it is.
 pub(crate) const BOARD_LISTING: &str = r#"[
-    {"op": "list", "summary": "Every card without its body."},
-    {"op": "read", "summary": "One card with its comments.", "params": {"id": "number"}},
-    {"op": "create", "summary": "Adds a card to backlog unless a status is given.", "params": {"title": "text", "body": "text", "status": "column", "owner": "your name"}},
-    {"op": "move", "summary": "Moves a card to a column other than done.", "params": {"id": "number", "status": "column", "owner": "your name"}},
-    {"op": "comment", "summary": "Adds a comment under a card.", "params": {"id": "number", "body": "text", "owner": "your name"}},
-    {"op": "edit", "summary": "Changes a card's title or body.", "params": {"id": "number", "title": "text", "body": "text", "owner": "your name"}}
+    {"op": "list", "summary": "Every card without its body.", "params": []},
+    {"op": "read", "summary": "One card with its comments.", "params": [
+        {"name": "id", "kind": "int", "required": true}
+    ]},
+    {"op": "create", "summary": "Adds a card, to backlog unless a status is given; never to done.", "params": [
+        {"name": "title", "kind": "text", "required": true},
+        {"name": "body", "kind": "text", "required": false},
+        {"name": "status", "kind": "choice", "of": ["backlog", "ready", "doing", "review"], "required": false},
+        {"name": "owner", "kind": "text", "required": true, "note": "The name the write is signed with, shown as the card's owner on create and as the author on comment. On move and edit it signs and changes nothing else."}
+    ]},
+    {"op": "move", "summary": "Moves a card to a column other than done. The card keeps its owner.", "params": [
+        {"name": "id", "kind": "int", "required": true},
+        {"name": "status", "kind": "choice", "of": ["backlog", "ready", "doing", "review"], "required": true},
+        {"name": "owner", "kind": "text", "required": true, "note": "Signs the write; the card's owner does not change."}
+    ]},
+    {"op": "comment", "summary": "Adds a comment under a card, by the name in owner.", "params": [
+        {"name": "id", "kind": "int", "required": true},
+        {"name": "body", "kind": "text", "required": true},
+        {"name": "owner", "kind": "text", "required": true, "note": "The comment's author."}
+    ]},
+    {"op": "edit", "summary": "Changes a card's title or body; a field left out is left alone. The card keeps its owner.", "params": [
+        {"name": "id", "kind": "int", "required": true},
+        {"name": "title", "kind": "text", "required": false},
+        {"name": "body", "kind": "text", "required": false},
+        {"name": "owner", "kind": "text", "required": true, "note": "Signs the write; the card's owner does not change."}
+    ]}
 ]"#;
+
+/// Every shape a `tagged` value takes, one branch per Godot type, as the request half of
+/// `value.schema.json` states them. A terminal caller has no repository to read the schema from,
+/// and a Vector2 spelled `{"x": 0, "y": 14}` is refused rather than read.
+const TAGGED_VALUES: &str = include_str!("../../protocol/schemas/v2/value.schema.json");
 
 /// Every tool the door answers: the Godot domains as the worker receives them, and the board and
 /// the memory beside them. The names are the `tool` of a `call`.
@@ -373,11 +400,32 @@ fn tools(id: &Value) -> Result<Value, Value> {
     listed.push(json!({
         "name": crate::remember::REMEMBER_TOOL,
         "operations": [{
-            "summary": "Files a fact about this project as a memory candidate for the user to keep, against the task the model is on.",
-            "params": {"kind": crate::storage::MEMORY_KINDS, "content": "text"}
+            "op": "remember",
+            "summary": "Files a fact about this project as a memory candidate for the user to keep, against the task the model is on. The call takes no op: send kind and content alone.",
+            "params": [
+                {"name": "kind", "kind": "choice", "of": crate::storage::MEMORY_KINDS, "required": true},
+                {"name": "content", "kind": "text", "required": true}
+            ]
         }]
     }));
-    Ok(json!({"tools": listed}))
+    let tagged = serde_json::from_str::<Value>(TAGGED_VALUES)
+        .ok()
+        .and_then(|schema| schema.get("oneOf").cloned())
+        .ok_or_else(|| {
+            rpc_error(
+                id.clone(),
+                -32603,
+                "The tagged value shapes could not be listed",
+                Value::Null,
+            )
+        })?;
+    Ok(json!({
+        "tools": listed,
+        "values": {
+            "note": "A parameter of kind `tagged` is {\"type\": <Godot type>, \"value\": <payload>}; these are the payload each type takes.",
+            "oneOf": tagged
+        }
+    }))
 }
 
 /// Routes one call and shapes what came back: the answer, or the failure with its code.
@@ -957,15 +1005,49 @@ pub(crate) mod tests {
             .iter()
             .find(|tool| tool["name"] == crate::remember::REMEMBER_TOOL)
             .expect("remember is listed");
-        let params = &remember["operations"][0]["params"];
-        let kinds: Vec<&str> = params["kind"]
+        let params = remember["operations"][0]["params"]
+            .as_array()
+            .expect("params are a list, as every Godot row lists them");
+        let kind = params
+            .iter()
+            .find(|param| param["name"] == "kind")
+            .expect("kind");
+        let kinds: Vec<&str> = kind["of"]
             .as_array()
             .expect("kinds")
             .iter()
             .map(|kind| kind.as_str().expect("kind"))
             .collect();
         assert_eq!(kinds, crate::storage::MEMORY_KINDS);
-        assert_eq!(params["content"], json!("text"));
+        assert!(
+            params
+                .iter()
+                .any(|param| param["name"] == "content" && param["kind"] == "text")
+        );
+        for tool in tools {
+            for operation in tool["operations"].as_array().expect("operations") {
+                for param in operation["params"]
+                    .as_array()
+                    .expect("every row lists params")
+                {
+                    assert!(
+                        param["name"].is_string()
+                            && param["kind"].is_string()
+                            && param["required"].is_boolean(),
+                        "{} lists a param in the shared shape: {param}",
+                        tool["name"]
+                    );
+                }
+            }
+        }
+        assert!(
+            listed["result"]["values"]["oneOf"]
+                .as_array()
+                .expect("tagged value branches")
+                .iter()
+                .any(|branch| branch["properties"]["type"]["const"] == "Vector2"),
+            "the tagged value shapes travel with the listing"
+        );
         // Not called live: the handler runs the embedder, seconds under the turn's bit, and the
         // turn tests would be refused for it. The shape is pinned against the handler's own list.
 
@@ -977,7 +1059,12 @@ pub(crate) mod tests {
             let op = operation["op"].as_str().expect("op");
             let mut params =
                 json!({"op": op, "owner": "claude", "title": "t", "body": "b", "status": "ready"});
-            if operation["params"].get("id").is_some() {
+            if operation["params"]
+                .as_array()
+                .expect("params")
+                .iter()
+                .any(|param| param["name"] == "id")
+            {
                 params["id"] = json!("#1");
             }
             let (_, body) = post(server.address, PATH, token, &call("board", params));

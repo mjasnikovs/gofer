@@ -188,6 +188,13 @@ the board answers `turn_running`, and while a door call runs the model cannot st
 door cannot do is wait on the user: a gated operation answers `approval_needed`, and `ask_user`
 answers `needs_user`. Either one has to happen in Gofer's window.
 
+The first Godot call starts the editor session itself; `godot_session status` answers `null` until
+then, and the start costs the editor's import scan, tens of seconds on a first open.
+
+A live session stages the addon into the project: `project.godot` gains the plugin and the runtime
+autoload until `godot_session stop`, which puts it back. Do not commit from a terminal while a
+session is open.
+
 ## Waiting
 
 Never sleep. Never use a fixed timeout to wait for something when an event, a condition, or a

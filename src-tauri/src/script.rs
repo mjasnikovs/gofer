@@ -479,6 +479,89 @@ fn write_and_synchronize(request: SaveScriptRequest) -> Result<SynchronizedSave,
     })
 }
 
+/// The files this domain writes that the language server never reads. A shader is edited in the
+/// script editor and has no other tool; it goes through the same hash guard and the same rescan,
+/// and answers with no diagnostics rather than with a server's silence dressed up as a verdict.
+pub const SHADER_EXTENSIONS: [&str; 2] = [".gdshader", ".gdshaderinc"];
+
+/// Whether a path names a file `save` and `edit` write without the language server.
+pub fn is_outside_the_language_server(path: &str) -> bool {
+    SHADER_EXTENSIONS
+        .iter()
+        .any(|extension| path.ends_with(extension))
+}
+
+/// Writes a whole shader: the guard and the rescan of a script save, and no server to ask.
+pub fn save_outside_the_language_server(
+    workspace: &Workspace,
+    request: SaveScriptRequest,
+) -> Result<SavedScript, LspError> {
+    let stamp = workspace
+        .write(
+            &request.path,
+            &request.text,
+            request.expected_hash.as_deref(),
+        )
+        .map_err(file_error)?;
+    request_rescan(&request.path);
+    Ok(SavedScript {
+        path: request.path,
+        hash: stamp.hash,
+        bytes: stamp.bytes,
+        version: 0,
+        diagnostics: Vec::new(),
+        published: false,
+    })
+}
+
+/// Edits shaders by anchor, the way `edit_documents` edits scripts, with no server to ask.
+pub fn edit_outside_the_language_server(
+    workspace: &Workspace,
+    request: EditScriptRequest,
+) -> Result<Vec<EditedScript>, LspError> {
+    let mut planned = Vec::with_capacity(request.files.len());
+    let mut refusals = Vec::new();
+    for (file_index, file) in request.files.iter().enumerate() {
+        let contents = match workspace.read(&file.path) {
+            Ok(contents) => contents,
+            Err(error) => {
+                refusals.push(file_error(error));
+                continue;
+            }
+        };
+        match apply_edits(file_index, &file.path, &contents.text, &file.edits) {
+            Ok(updated_text) => planned.push(PlannedFile {
+                path: file.path.clone(),
+                original_hash: contents.hash,
+                original_text: contents.text,
+                updated_text,
+            }),
+            Err(refused) => refusals.extend(refused),
+        }
+    }
+    if !refusals.is_empty() {
+        return Err(refused_together(refusals));
+    }
+    let stamps = godot_lsp::commit_planned_edit(workspace, &planned)?;
+    Ok(request
+        .files
+        .iter()
+        .zip(stamps)
+        .map(|(file, stamp)| {
+            request_rescan(&stamp.path);
+            EditedScript {
+                path: stamp.path,
+                hash: stamp.hash,
+                bytes: stamp.bytes,
+                version: 0,
+                replaced: file.edits.len(),
+                diagnostics: Vec::new(),
+                published: false,
+            }
+        })
+        .collect())
+}
+
 /// One saved file, answered with the verdict the server published for the text just written.
 ///
 /// The same shape an anchor edit answers with, minus the count of anchors a whole-file write has

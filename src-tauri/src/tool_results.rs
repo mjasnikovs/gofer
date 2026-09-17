@@ -8,7 +8,7 @@
 //!
 //! Every field is read by serde and by nothing else, which is what the allow above is for.
 
-// GENERATED-BEGIN results sha256:2eb5ed97ae456490
+// GENERATED-BEGIN results sha256:57b9ef3bb08587a0
 /// One node of a scene tree, and the nodes under it.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -20,7 +20,7 @@ pub struct GodotNode {
     pub children: Vec<GodotNode>,
 }
 
-/// A captured image, PNG bytes in base64.
+/// A captured image, PNG bytes in base64 — or, when the call named saveTo, the path it was written to and no bytes.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GodotFrame {
@@ -28,6 +28,8 @@ pub struct GodotFrame {
     pub width: i64,
     pub height: i64,
     pub data: String,
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 /// The question the editor is waiting on, and the buttons it offers.
@@ -578,6 +580,7 @@ pub struct NodeChangeTypeResult {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NodeDeleteResult {
     pub deleted: bool,
+    pub nodes: Vec<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -756,6 +759,14 @@ pub struct RuntimeInspectNodeResult {
     pub r#type: String,
     pub properties: std::collections::HashMap<String, serde_json::Value>,
     pub groups: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeSetPropertyResult {
+    pub path: String,
+    pub property: String,
+    pub value: serde_json::Value,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1401,6 +1412,7 @@ pub(crate) fn declared_shape_of(name: &str, answer: &serde_json::Value) -> Resul
         "runtime.get_state" => shaped::<RuntimeGetStateResult>(answer),
         "runtime.get_tree" => shaped::<RuntimeGetTreeResult>(answer),
         "runtime.inspect_node" => shaped::<RuntimeInspectNodeResult>(answer),
+        "runtime.set_property" => shaped::<RuntimeSetPropertyResult>(answer),
         "runtime.input" => shaped::<RuntimeInputResult>(answer),
         "runtime.capture" => shaped::<RuntimeCaptureResult>(answer),
         "runtime.get_monitors" => shaped::<RuntimeGetMonitorsResult>(answer),

@@ -469,21 +469,66 @@ fn check_inside(
         }
         None => entries.push((here.to_owned(), value)),
     }
+    let mut refused: Vec<(String, ToolFailure)> = Vec::new();
     for (at, item) in entries {
         let Some(object) = item.as_object() else {
-            return Err(failure(
-                "invalid_param",
-                format!(
-                    "{call} `{at}` takes an object of {}, and this one was {}.",
-                    signature(param.entry),
-                    describe(item)
+            refused.push((
+                at.clone(),
+                failure(
+                    "invalid_param",
+                    format!(
+                        "{call} `{at}` takes an object of {}, and this one was {}.",
+                        signature(param.entry),
+                        describe(item)
+                    ),
+                    json!({"param": at, "received": item}),
                 ),
-                json!({"param": at, "received": item}),
             ));
+            continue;
         };
-        check_set(call, op, &at, param.entry, object)?;
+        if let Err(one) = check_set(call, op, &at, param.entry, object) {
+            refused.push((at, one));
+        }
     }
-    Ok(())
+    match refused.len() {
+        0 => Ok(()),
+        _ => Err(every_entry_with_the_same_fault(refused)),
+    }
+}
+
+/// The first refused entry, and every later one refused for the same reason, in one answer.
+///
+/// A list is refused as a whole, so a caller who cannot cheaply rebuild it needs every bad entry
+/// now: a live batch of thirty-eight property writes carried the same wrong shape in twenty-four
+/// of them and was told about `properties[14]` alone. The reason is compared with the entry's own
+/// name taken out of it, which is how one fault reads across two positions.
+fn every_entry_with_the_same_fault(mut refused: Vec<(String, ToolFailure)>) -> ToolFailure {
+    let (first_at, mut first) = refused.remove(0);
+    let reason = |at: &str, message: &str| message.replace(at, "");
+    let same = reason(&first_at, &first.message);
+    let also: Vec<String> = refused
+        .iter()
+        .filter(|(at, other)| reason(at, &other.message) == same)
+        .map(|(at, _)| format!("`{at}`"))
+        .collect();
+    if also.is_empty() {
+        return first;
+    }
+    first.message = format!(
+        "{} {} more {} the same fault: {}.",
+        first.message.trim_end(),
+        also.len(),
+        if also.len() == 1 {
+            "entry has"
+        } else {
+            "entries have"
+        },
+        also.join(", ")
+    );
+    if let Some(details) = first.details.as_object_mut() {
+        details.insert("alsoRefused".to_owned(), json!(also));
+    }
+    first
 }
 
 /// Whether every element of a packed array's payload is an element of the type the tag names.
@@ -1174,6 +1219,34 @@ mod tests {
             })),
         );
         assert!(neither.contains("name like skyblue"), "{neither}");
+    }
+
+    /// Review finding: a batch of thirty-eight writes with the same wrong Resource shape in
+    /// twenty-four entries named `properties[14]` alone. Every entry with that fault is named.
+    #[test]
+    fn every_entry_refused_for_the_same_reason_is_named_at_once() {
+        let wrong = |node: &str| json!({"node": node, "property": "material", "value": {"type": "Resource", "value": "res://a.tres"}});
+        let right = json!({"node": "/Game/B", "property": "position", "value": {"type": "Vector2", "value": [1, 2]}});
+        let refused = message(
+            "godot_node",
+            "set_properties",
+            json!({"properties": [right, wrong("/Game/A"), wrong("/Game/C"), wrong("/Game/D")]}),
+        );
+        assert!(refused.contains("`properties[1].value`"), "{refused}");
+        assert!(
+            refused
+                .contains("2 more entries have the same fault: `properties[2]`, `properties[3]`"),
+            "{refused}"
+        );
+        let alone = message(
+            "godot_node",
+            "set_properties",
+            json!({"properties": [wrong("/Game/A")]}),
+        );
+        assert!(
+            !alone.contains("more"),
+            "one fault is one sentence: {alone}"
+        );
     }
 
     /// A resource wrapper that is right with a path that is empty says so, rather than contradicting

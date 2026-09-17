@@ -190,7 +190,7 @@ static func _configured_request_timeout_ms() -> int:
 ## game to go, and a stopped editor is the thing it wants.
 
 ## The commands `_handle_request` routes to the runtime bridge instead of answering synchronously.
-# GENERATED-BEGIN runtime-commands sha256:b96ac9e0ddcf0feb
+# GENERATED-BEGIN runtime-commands sha256:16a049fd54ab80c9
 const RUNTIME_COMMANDS: Array[String] = [
     "runtime.run",
     "runtime.stop",
@@ -198,6 +198,7 @@ const RUNTIME_COMMANDS: Array[String] = [
     "runtime.get_state",
     "runtime.get_tree",
     "runtime.inspect_node",
+    "runtime.set_property",
     "runtime.input",
     "runtime.capture",
     "runtime.get_monitors",
@@ -936,6 +937,8 @@ func _handle_runtime_request(id: String, command: String, params: Dictionary) ->
             _runtime_forward(id, "tree", params)
         "runtime.inspect_node":
             _runtime_forward(id, "inspect", params)
+        "runtime.set_property":
+            _runtime_forward(id, "set", params)
         "runtime.input":
             _runtime_forward(id, "input", params)
         "runtime.get_monitors":
@@ -3486,55 +3489,69 @@ func _node_change_type(params: Dictionary) -> Dictionary:
 
 func _node_delete(params: Dictionary) -> Dictionary:
     var scene: String = params.get("scene", "")
-    var node_path_str: String = params.get("node", "")
+    var named: Array = []
+    var single := str(params.get("node", ""))
+    if not single.is_empty():
+        named.append(single)
+    for extra in params.get("nodes", []):
+        named.append(str(extra))
 
     var scene_check := _require_current_scene(scene)
     if not scene_check.is_empty():
         return scene_check
-    if node_path_str.is_empty():
+    if named.is_empty():
         return {
             "_gofer_error": {
                 "code": "invalid_params",
-                "message": "node.delete requires node",
+                "message": "node.delete requires node, or nodes",
                 "retryable": false,
                 "readiness": "ready",
                 "details": {}
             }
         }
 
-    var node := _find_node(node_path_str)
-    if node == null:
-        return _node_not_found_error(node_path_str)
-    var parent := node.get_parent()
-    var index := node.get_index()
+    # Every node is found before any is detached, so a path that is wrong refuses the whole call
+    # rather than leaving half a batch gone.
     var root := _edited_root()
+    var found: Array[Node] = []
+    for node_path_str in named:
+        var node := _find_node(node_path_str)
+        if node == null:
+            return _node_not_found_error(node_path_str)
+        if node == root:
+            return Params.error(
+                "cannot_delete_root",
+                (
+                    "%s is the root of the edited scene, and a scene always has one. "
+                    % node_path_str
+                    + "To start a different scene use scene.create; to change this one's name use "
+                    + "node.rename."
+                ),
+                {"node": node_path_str}
+            )
+        if found.has(node):
+            continue
+        found.append(node)
 
-    if node == root:
-        return Params.error(
-            "cannot_delete_root",
-            (
-                "%s is the root of the edited scene, and a scene always has one. "
-                % node_path_str
-                + "To start a different scene use scene.create; to change this one's name use "
-                + "node.rename."
-            ),
-            {"node": node_path_str}
-        )
-
-    var undo := _begin_action("Delete %s" % node.name)
-    undo.add_do_method(self, "_do_detach", parent, node)
-    undo.add_undo_method(self, "_do_attach", parent, node, root, index)
-    undo.add_undo_reference(node)
+    var label := "Delete %s" % found[0].name if found.size() == 1 else "Delete %d nodes" % found.size()
+    var undo := _begin_action(label)
+    for node in found:
+        var parent := node.get_parent()
+        var index := node.get_index()
+        undo.add_do_method(self, "_do_detach", parent, node)
+        undo.add_undo_method(self, "_do_attach", parent, node, root, index)
+        undo.add_undo_reference(node)
     undo.commit_action()
 
-    var lingering := _find_node(node_path_str)
-    if lingering != null:
-        return Params.readback_error(
-            "node.delete", "nothing at %s" % node_path_str, lingering.name, {"node": node_path_str}
-        )
+    for node_path_str in named:
+        var lingering := _find_node(node_path_str)
+        if lingering != null:
+            return Params.readback_error(
+                "node.delete", "nothing at %s" % node_path_str, lingering.name, {"node": node_path_str}
+            )
 
     _bump_revision()
-    return {"deleted": true}
+    return {"deleted": true, "nodes": named}
 
 func _node_set_property(params: Dictionary) -> Dictionary:
     var scene: String = params.get("scene", "")

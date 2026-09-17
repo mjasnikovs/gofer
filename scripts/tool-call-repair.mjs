@@ -330,13 +330,17 @@ export function refuseSiblingParameter(operations, entry) {
                 && Array.isArray(other.params)
                 && other.params.some(param => param.name === key)
         )
-        if (owners.length !== 1) continue
-        const shaped = owners[0].params.find(param => param.name === key)
-        if (!Array.isArray(shaped?.entry) || shaped.entry.length === 0) continue
+        // Only a key some sibling takes as a structured list is worth a sentence of its own: a
+        // bare word is the ordinary unknown-parameter refusal's to name.
+        const shaped = owners.some(owner => {
+            const held = owner.params.find(param => param.name === key)
+            return Array.isArray(held?.entry) && held.entry.length > 0
+        })
+        if (owners.length === 0 || !shaped) continue
         const takes = ` It takes ${namesOf(operation.params)}.`
         throw new Error(
             `${entry.op} has no \`${key}\` parameter.${takes}`
-                + ` \`${key}\` is a parameter of ${owners[0].op}.`
+                + ` \`${key}\` is a parameter of ${asSentenceList(owners.map(owner => owner.op))}.`
         )
     }
 }

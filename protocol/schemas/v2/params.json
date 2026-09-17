@@ -104,7 +104,7 @@
             ]
         },
         "godotFrame": {
-            "note": "A captured image, PNG bytes in base64.",
+            "note": "A captured image, PNG bytes in base64 — or, when the call named saveTo, the path it was written to and no bytes.",
             "entry": [
                 {
                     "name": "encoding",
@@ -125,6 +125,12 @@
                     "name": "data",
                     "kind": "text",
                     "required": true
+                },
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": false,
+                    "note": "Where the PNG was written, when the call asked for it; `data` is empty then."
                 }
             ]
         },
@@ -592,7 +598,8 @@
                 {
                     "name": "source",
                     "kind": "text",
-                    "required": true
+                    "required": true,
+                    "note": "editor for the editor's stdout, editorError for its stderr; the game prints through the editor, so its lines are editor too."
                 },
                 {
                     "name": "severity",
@@ -1597,12 +1604,21 @@
         {
             "tool": "godot_node",
             "op": "delete",
-            "summary": "Deletes a node.",
+            "summary": "Deletes a node, or several in `nodes` as one revision and one undo step.",
             "params": [
                 {
                     "name": "node",
                     "kind": "text",
-                    "required": true
+                    "required": false
+                },
+                {
+                    "name": "nodes",
+                    "kind": "listOf",
+                    "of": {
+                        "kind": "text"
+                    },
+                    "required": false,
+                    "minItems": 1
                 },
                 {
                     "name": "expectedRevision",
@@ -1618,6 +1634,15 @@
                         "name": "deleted",
                         "kind": "flag",
                         "required": true
+                    },
+                    {
+                        "name": "nodes",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "text"
+                        },
+                        "required": true,
+                        "note": "Every path that was deleted, in the order the call named them."
                     }
                 ]
             },
@@ -3269,7 +3294,7 @@
         {
             "tool": "godot_script",
             "op": "update",
-            "summary": "Reports an in-memory buffer change.",
+            "summary": "Reports an in-memory buffer change to the language server. Writes nothing to disk; `save` does.",
             "params": [
                 {
                     "name": "path",
@@ -3297,7 +3322,7 @@
         {
             "tool": "godot_script",
             "op": "edit",
-            "summary": "Changes existing scripts by replacing exact text, and answers with each file's diagnostics.",
+            "summary": "Changes existing scripts, or shaders, by replacing exact text, and answers with each file's diagnostics; a shader gets none.",
             "params": [
                 {
                     "name": "files",
@@ -3379,7 +3404,7 @@
         {
             "tool": "godot_script",
             "op": "save",
-            "summary": "Writes a whole file and answers with the file's diagnostics, the same way `edit` does.",
+            "summary": "Writes a whole file, creating it when it is new, and answers with the file's diagnostics the same way `edit` does. A script or a shader (.gdshader, .gdshaderinc); a shader gets no diagnostics, because the language server does not read it.",
             "params": [
                 {
                     "name": "path",
@@ -4986,7 +5011,7 @@
         {
             "tool": "godot_runtime",
             "op": "run",
-            "summary": "Runs the project and captures the first frame, unless `playArgs` start it with `--headless`, which draws none.",
+            "summary": "Runs the project and captures the first frame, unless `playArgs` start it with `--headless`, which draws none. While it runs the scene can be read and opened but not changed: a mutation answers session_playing until stop.",
             "alone": {
                 "scope": "repeat",
                 "why": "There is one running game, so a second one in the same call is the first one again."
@@ -5205,6 +5230,51 @@
         },
         {
             "tool": "godot_runtime",
+            "op": "set_property",
+            "summary": "Sets one property on a running node, for the life of this run. The scene on disk does not change, so it is how a value is tried before node.set_properties writes it.",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "property",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "value",
+                    "kind": "tagged",
+                    "required": true,
+                    "vocabulary": "godotValueTag"
+                }
+            ],
+            "result": {
+                "kind": "object",
+                "entry": [
+                    {
+                        "name": "path",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "property",
+                        "kind": "text",
+                        "required": true
+                    },
+                    {
+                        "name": "value",
+                        "kind": "tagged",
+                        "required": true,
+                        "note": "The value the node holds after the write, read back."
+                    }
+                ]
+            },
+            "command": "runtime.set_property"
+        },
+        {
+            "tool": "godot_runtime",
             "op": "input",
             "summary": "Injects input and captures the result. Each event names its kind and the parameters that kind uses, as {\"kind\": \"key\", \"key\": \"A\", \"pressed\": true} — send the release as a second event, or the key stays down. An event that leaves `pressed` out alternates on its own: the first is the press and the second the release, so a click is the same event written twice. A Button answers the release, not the press. A mouse_button event names its `button`, a joypad_button event its `joypadButton`, and a joypad_motion event its `axis`. A position is [x, y]. This drives the Input Map, so it is how you check that a level you built can actually be played. Its answer carries a frame, unless a later entry of the same call carries one too: a picture another picture replaces is not worth sending, and a moment in the middle of a key sequence is what capture is for.",
             "params": [
@@ -5299,12 +5369,17 @@
         {
             "tool": "godot_runtime",
             "op": "capture",
-            "summary": "Captures a PNG frame.",
+            "summary": "Captures a PNG frame. With `saveTo`, a path inside the project, the PNG is written there and the answer carries the path instead of the bytes.",
             "params": [
                 {
                     "name": "source",
                     "kind": "choice",
                     "of": ["game", "editor"],
+                    "required": false
+                },
+                {
+                    "name": "saveTo",
+                    "kind": "text",
                     "required": false
                 }
             ],
@@ -5442,7 +5517,7 @@
         {
             "tool": "godot_logs",
             "op": "read",
-            "summary": "Reads a page of the editor and game log, newest last.",
+            "summary": "Reads a page of the editor and game log, newest last. The game's own output arrives through the editor process, so its lines are `source: editor` as well.",
             "params": [
                 {
                     "name": "after",
@@ -5498,12 +5573,14 @@
                     {
                         "name": "dropped",
                         "kind": "int",
-                        "required": true
+                        "required": true,
+                        "note": "Lines the buffer lost before this page, oldest first; 0 means it kept everything."
                     },
                     {
                         "name": "terminalLinesOmitted",
                         "kind": "int",
-                        "required": true
+                        "required": true,
+                        "note": "Lines this page left out on purpose: empty ones, the editor's own progress bars, and Gofer's addon talking to itself. Nothing the game printed is among them."
                     }
                 ]
             },

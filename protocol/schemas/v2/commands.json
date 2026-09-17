@@ -10,6 +10,7 @@
         "runtime.get_state",
         "runtime.get_tree",
         "runtime.inspect_node",
+        "runtime.set_property",
         "runtime.input",
         "runtime.capture",
         "runtime.get_monitors",
@@ -25,7 +26,10 @@
         {
             "command": "session.cancel",
             "handler": "_session_cancel",
-            "params": {"required": [], "optional": ["requestId"]},
+            "params": {
+                "required": [],
+                "optional": ["requestId"]
+            },
             "result": {
                 "kind": "object",
                 "entry": [
@@ -77,7 +81,9 @@
                     {
                         "name": "scenes",
                         "kind": "listOf",
-                        "of": {"kind": "text"},
+                        "of": {
+                            "kind": "text"
+                        },
                         "required": true
                     }
                 ]
@@ -92,7 +98,9 @@
                     {
                         "name": "saved",
                         "kind": "listOf",
-                        "of": {"kind": "text"},
+                        "of": {
+                            "kind": "text"
+                        },
                         "required": true
                     }
                 ]
@@ -180,7 +188,10 @@
         {
             "command": "editor.get_class_icons",
             "handler": "_editor_class_icons",
-            "params": {"required": [], "optional": ["classes"]},
+            "params": {
+                "required": [],
+                "optional": ["classes"]
+            },
             "result": {
                 "kind": "object",
                 "entry": [
@@ -192,7 +203,9 @@
                     {
                         "name": "icons",
                         "kind": "object",
-                        "of": {"kind": "text"},
+                        "of": {
+                            "kind": "text"
+                        },
                         "required": true,
                         "note": "Keyed by class name; a class with no icon in the theme is left out."
                     }
@@ -230,7 +243,10 @@
         {
             "command": "node.create",
             "handler": "_node_create",
-            "params": {"required": ["parent", "type", "name"], "optional": ["index", "scene"]},
+            "params": {
+                "required": ["parent", "type", "name"],
+                "optional": ["index", "scene"]
+            },
             "result": {
                 "kind": "object",
                 "entry": [
@@ -273,7 +289,10 @@
         {
             "command": "node.set_property",
             "handler": "_node_set_property",
-            "params": {"required": ["node", "property", "value"], "optional": ["scene"]},
+            "params": {
+                "required": ["node", "property", "value"],
+                "optional": ["scene"]
+            },
             "result": {
                 "kind": "object",
                 "entry": [

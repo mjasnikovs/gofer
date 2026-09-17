@@ -255,7 +255,7 @@ test('a parameter belonging to a sibling operation is refused by name', async ()
             }),
         error => {
             assert.match(error.message, /rename has no `nodes` parameter/u)
-            assert.match(error.message, /is a parameter of create_nodes/u)
+            assert.match(error.message, /is a parameter of create_nodes and delete/u)
             return true
         }
     )

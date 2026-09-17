@@ -841,7 +841,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:541361e9c87948ba
+// GENERATED-BEGIN operations sha256:323894a529c79182
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -1099,10 +1099,11 @@ pub const GODOT_NODE_OPERATIONS: &[Operation] = &[
     op(
         "godot_node",
         "delete",
-        "Deletes a node.",
+        "Deletes a node, or several in `nodes` as one revision and one undo step.",
         Answers::Addon("node.delete"),
         &[
-            need("node", Text),
+            opt("node", Text),
+            opt("nodes", Kind::ListOf(&Text)),
             hidden("expectedRevision", Int),
             hidden("scene", Text),
         ],
@@ -1505,7 +1506,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
     op(
         "godot_script",
         "update",
-        "Reports an in-memory buffer change.",
+        "Reports an in-memory buffer change to the language server. Writes nothing to disk; `save` does.",
         Answers::Rust,
         &[need("path", Text), need("text", Text)],
     ),
@@ -1513,7 +1514,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
         op(
             "godot_script",
             "edit",
-            "Changes existing scripts by replacing exact text, and answers with each file's diagnostics.",
+            "Changes existing scripts, or shaders, by replacing exact text, and answers with each file's diagnostics; a shader gets none.",
             Answers::Rust,
             &[shaped(
                 need("files", List),
@@ -1532,7 +1533,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
         op(
             "godot_script",
             "save",
-            "Writes a whole file and answers with the file's diagnostics, the same way `edit` does.",
+            "Writes a whole file, creating it when it is new, and answers with the file's diagnostics the same way `edit` does. A script or a shader (.gdshader, .gdshaderinc); a shader gets no diagnostics, because the language server does not read it.",
             Answers::Rust,
             &[
                 need("path", Text),
@@ -1916,7 +1917,7 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
         op(
             "godot_runtime",
             "run",
-            "Runs the project and captures the first frame, unless `playArgs` start it with `--headless`, which draws none.",
+            "Runs the project and captures the first frame, unless `playArgs` start it with `--headless`, which draws none. While it runs the scene can be read and opened but not changed: a mutation answers session_playing until stop.",
             Answers::Addon("runtime.run"),
             &[opt("scene", Text), opt("playArgs", Kind::ListOf(&Text))],
         ),
@@ -1972,6 +1973,17 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
     ),
     op(
         "godot_runtime",
+        "set_property",
+        "Sets one property on a running node, for the life of this run. The scene on disk does not change, so it is how a value is tried before node.set_properties writes it.",
+        Answers::Addon("runtime.set_property"),
+        &[
+            need("path", Text),
+            need("property", Text),
+            speaking(need("value", Tagged), GODOT_VALUE_TAG),
+        ],
+    ),
+    op(
+        "godot_runtime",
         "input",
         "Injects input and captures the result. Each event names its kind and the parameters that kind uses, as {\"kind\": \"key\", \"key\": \"A\", \"pressed\": true} — send the release as a second event, or the key stays down. An event that leaves `pressed` out alternates on its own: the first is the press and the second the release, so a click is the same event written twice. A Button answers the release, not the press. A mouse_button event names its `button`, a joypad_button event its `joypadButton`, and a joypad_motion event its `axis`. A position is [x, y]. This drives the Input Map, so it is how you check that a level you built can actually be played. Its answer carries a frame, unless a later entry of the same call carries one too: a picture another picture replaces is not worth sending, and a moment in the middle of a key sequence is what capture is for.",
         Answers::Addon("runtime.input"),
@@ -2009,9 +2021,12 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
     op(
         "godot_runtime",
         "capture",
-        "Captures a PNG frame.",
+        "Captures a PNG frame. With `saveTo`, a path inside the project, the PNG is written there and the answer carries the path instead of the bytes.",
         Answers::Addon("runtime.capture"),
-        &[opt("source", Kind::Choice(&["game", "editor"]))],
+        &[
+            opt("source", Kind::Choice(&["game", "editor"])),
+            opt("saveTo", Text),
+        ],
     ),
     op(
         "godot_runtime",
@@ -2057,7 +2072,7 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
 pub const GODOT_LOGS_OPERATIONS: &[Operation] = &[op(
     "godot_logs",
     "read",
-    "Reads a page of the editor and game log, newest last.",
+    "Reads a page of the editor and game log, newest last. The game's own output arrives through the editor process, so its lines are `source: editor` as well.",
     Answers::Rust,
     &[
         opt("after", Int),

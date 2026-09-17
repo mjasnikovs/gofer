@@ -7,7 +7,7 @@ export type GodotCommandSpec<Params extends GodotParams, Result extends GodotRes
     result: Result
 }>
 
-// GENERATED-BEGIN command-names sha256:16ea29b9d6c446d0
+// GENERATED-BEGIN command-names sha256:e0a83d8826aef35b
 export type GodotCommandName =
     | 'session.get_state'
     | 'session.cancel'
@@ -71,6 +71,7 @@ export type GodotCommandName =
     | 'runtime.get_state'
     | 'runtime.get_tree'
     | 'runtime.inspect_node'
+    | 'runtime.set_property'
     | 'runtime.input'
     | 'runtime.capture'
     | 'runtime.get_monitors'
@@ -90,8 +91,14 @@ export type GodotNode = Readonly<{
     children: readonly GodotNode[]
 }>
 
-/** A captured image, PNG bytes in base64. */
-export type GodotFrame = Readonly<{encoding: string; width: number; height: number; data: string}>
+/** A captured image, PNG bytes in base64 — or, when the call named saveTo, the path it was written to and no bytes. */
+export type GodotFrame = Readonly<{
+    encoding: string
+    width: number
+    height: number
+    data: string
+    path?: string | undefined
+}>
 
 /** The question the editor is waiting on, and the buttons it offers. */
 export type GodotEditorDialog = Readonly<{title: string; text: string; buttons: readonly string[]}>
@@ -462,8 +469,12 @@ export interface GodotCommandMap {
         Readonly<{node: string; type: string}>
     >
     readonly 'node.delete': GodotCommandSpec<
-        Readonly<{node: string; scene?: string | undefined}>,
-        Readonly<{deleted: boolean}>
+        Readonly<{
+            node?: string | undefined
+            nodes?: readonly string[] | undefined
+            scene?: string | undefined
+        }>,
+        Readonly<{deleted: boolean; nodes: readonly string[]}>
     >
     readonly 'node.set_property': GodotCommandSpec<
         Readonly<{node: unknown; property: unknown; value: unknown; scene?: unknown}>,
@@ -663,6 +674,10 @@ export interface GodotCommandMap {
             groups: readonly string[]
         }>
     >
+    readonly 'runtime.set_property': GodotCommandSpec<
+        Readonly<{path: string; property: string; value: GodotValue}>,
+        Readonly<{path: string; property: string; value: GodotValue}>
+    >
     readonly 'runtime.input': GodotCommandSpec<
         Readonly<{
             events: readonly Readonly<{
@@ -681,7 +696,7 @@ export interface GodotCommandMap {
         Readonly<{applied: number; frame?: GodotFrame | undefined}>
     >
     readonly 'runtime.capture': GodotCommandSpec<
-        Readonly<{source?: 'game' | 'editor' | undefined}>,
+        Readonly<{source?: 'game' | 'editor' | undefined; saveTo?: string | undefined}>,
         Readonly<{frame: GodotFrame}>
     >
     readonly 'runtime.get_monitors': GodotCommandSpec<

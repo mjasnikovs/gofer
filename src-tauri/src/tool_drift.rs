@@ -246,9 +246,10 @@ fn editor_functions() -> HashMap<&'static str, String> {
 /// one and be refused with `wrong_scene`.
 const NOT_THE_MODEL_S_TO_PASS: [&str; 1] = ["scene"];
 
-/// The two parameters a summary names that no handler reads. `rpc` lifts both out of the body
-/// and onto the envelope, so the addon sees them beside the command rather than inside it.
-const LIFTED_ONTO_THE_ENVELOPE: [&str; 2] = ["expectedRevision", "timeoutMs"];
+/// The parameters a summary names that no addon handler reads. `rpc` lifts the first two out of
+/// the body and onto the envelope, so the addon sees them beside the command rather than inside
+/// it; `saveTo` is the router's own, spent after the addon has answered, on writing the frame.
+const LIFTED_ONTO_THE_ENVELOPE: [&str; 3] = ["expectedRevision", "timeoutMs", "saveTo"];
 
 /// Splits GDScript into its function bodies, keyed by name.
 fn gd_functions(source: &str) -> HashMap<&str, String> {

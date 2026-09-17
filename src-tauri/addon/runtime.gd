@@ -92,6 +92,8 @@ func _serve(request: Dictionary) -> void:
             result = _op_tree(params)
         "inspect":
             result = _op_inspect(params)
+        "set":
+            result = _op_set(params)
         "input":
             result = await _op_input(params)
         "capture":
@@ -303,13 +305,11 @@ func _op_inspect(params: Dictionary) -> Dictionary:
     var node := _running_node(path)
     if node == null:
         return _node_not_found("path", path)
-    var known: Array[String] = []
-    for entry in node.get_property_list():
-        known.append(str(entry["name"]))
+    var known: Array[String] = _readable_properties(node, false)
     var properties := {}
     var requested: Array = params.get("properties", [])
     if requested.is_empty():
-        requested = known
+        requested = _readable_properties(node, true)
     for name in requested:
         var property := str(name)
         if not known.has(property):
@@ -329,6 +329,51 @@ func _op_inspect(params: Dictionary) -> Dictionary:
         "type": node.get_class(),
         "properties": properties,
         "groups": Params.authored_groups(node),
+    })
+
+## The names a node's property list holds that are properties: the inspector's category, group
+## and subgroup headers are in that list too, and answered as `"CanvasItem": null` until they were
+## left out. `stored_only` narrows an unasked listing the way `node.inspect` narrows its own, to
+## what the editor stores or shows; a name asked for by name is answered whatever its usage.
+func _readable_properties(node: Node, stored_only: bool) -> Array[String]:
+    var names: Array[String] = []
+    for entry in node.get_property_list():
+        var usage := int(entry.get("usage", 0))
+        if usage & (PROPERTY_USAGE_CATEGORY | PROPERTY_USAGE_GROUP | PROPERTY_USAGE_SUBGROUP):
+            continue
+        var property_name := str(entry.get("name", ""))
+        if property_name.is_empty():
+            continue
+        if stored_only and not (usage & (PROPERTY_USAGE_STORAGE | PROPERTY_USAGE_EDITOR)):
+            continue
+        names.append(property_name)
+    return names
+
+## Writes one property on one live node, and reads it back. Nothing on disk moves: the run owns
+## the value, and `node.set_properties` is what makes it the scene's.
+func _op_set(params: Dictionary) -> Dictionary:
+    var path := str(params.get("path", "")).strip_edges()
+    if path.is_empty():
+        return _failure("invalid_params", "runtime.set_property requires a path")
+    var property := str(params.get("property", "")).strip_edges()
+    if property.is_empty():
+        return _failure("invalid_params", "runtime.set_property requires a property")
+    var node := _running_node(path)
+    if node == null:
+        return _node_not_found("path", path)
+    if not _readable_properties(node, false).has(property):
+        return _failure(
+            "property_not_found",
+            "Node '%s' has no property '%s'%s" % [path, property, _nearest_of(node, property)]
+        )
+    var decoded := Protocol.decode(params.get("value", null))
+    if not decoded["ok"]:
+        return _failure("unsupported_value", decoded["message"])
+    node.set(property, decoded["value"])
+    return _succeed({
+        "path": str(node.get_path()),
+        "property": property,
+        "value": Protocol.encode(node.get(property)),
     })
 
 ## The clause a refused property carries, naming the one the caller probably meant.

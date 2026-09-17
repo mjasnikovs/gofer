@@ -251,6 +251,12 @@
             "task": "Run the game, let it run for about 120 frames, then read the Player's travelled value and position, and the engine's FPS and object count monitors. Stop the game and report the numbers."
         },
         {
+            "id": "poke-running-property",
+            "fixture": "live-project",
+            "ops": ["runtime.run", "runtime.set_property", "runtime.inspect_node", "runtime.stop"],
+            "task": "Run the game. While it runs, set the Player's modulate to pure red with runtime.set_property, read the Player's modulate back to confirm it took, then stop the game. Do not change the scene on disk."
+        },
+        {
             "id": "pause-resume-restart",
             "fixture": "live-project",
             "ops": [

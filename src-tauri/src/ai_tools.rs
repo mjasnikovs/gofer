@@ -497,6 +497,50 @@ fn refused_without_a_user_to_ask(
     }
 }
 
+/// Writes a captured frame into the project and answers with where, in place of the bytes.
+///
+/// The bytes are for a model that can look at a picture. A terminal caller wants a file, and a
+/// local model that cannot take an image wants nothing at all — eighty kilobytes of base64 in a
+/// tool answer is context spent on what nothing will read.
+fn the_frame_written_to<R: Runtime>(
+    app: &AppHandle<R>,
+    mut answer: Value,
+    save_to: &str,
+) -> Result<Value, ToolFailure> {
+    use base64::Engine as _;
+    let Some(frame) = answer.get_mut("frame").and_then(Value::as_object_mut) else {
+        return Ok(answer);
+    };
+    let data = frame
+        .get("data")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|error| {
+            ToolFailure::new(
+                "frame_unreadable",
+                format!("The captured frame was not base64: {error}"),
+            )
+        })?;
+    let relative = save_to.strip_prefix("res://").unwrap_or(save_to);
+    let workspace = crate::active_workspace(app)?;
+    let path = workspace.resolve(relative)?;
+    let unwritable = |error: std::io::Error| {
+        ToolFailure::new(
+            "frame_unwritable",
+            format!("{relative} could not be written: {error}"),
+        )
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(unwritable)?;
+    }
+    crate::files::write_atomically(&path, &bytes).map_err(unwritable)?;
+    frame.insert("data".to_owned(), json!(""));
+    frame.insert("path".to_owned(), json!(relative));
+    Ok(answer)
+}
+
 /// A start refused because another is in flight is a start to wait on, not a failure.
 fn joining_a_start_in_flight<T>(
     started: Result<T, godot_session::SessionError>,
@@ -536,6 +580,32 @@ fn gated_per_domain<R: Runtime>(
         }
     }
     Ok(grouped)
+}
+
+/// One `edit` call may name scripts and shaders together; each goes the way its kind goes, and
+/// the answer keeps the order the call wrote.
+fn edited_scripts_and_shaders<R: Runtime>(
+    app: &AppHandle<R>,
+    request: script::EditScriptRequest,
+) -> Result<Vec<script::EditedScript>, ToolFailure> {
+    let (shaders, scripts): (Vec<_>, Vec<_>) = request
+        .files
+        .into_iter()
+        .partition(|file| script::is_outside_the_language_server(&file.path));
+    let mut answered = Vec::with_capacity(shaders.len() + scripts.len());
+    if !shaders.is_empty() {
+        let workspace = crate::active_workspace(app)?;
+        answered.extend(script::edit_outside_the_language_server(
+            &workspace,
+            script::EditScriptRequest { files: shaders },
+        )?);
+    }
+    if !scripts.is_empty() {
+        answered.extend(script::edit_documents(script::EditScriptRequest {
+            files: scripts,
+        })?);
+    }
+    Ok(answered)
 }
 
 /// Tells the editor's filesystem about GDScript this call just wrote.
@@ -1114,7 +1184,20 @@ fn route_one<R: Runtime>(
             if domain.name == "godot_runtime" {
                 godot_session::a_game_the_debugger_has_halted(op)?;
             }
-            let answered = rpc(app, command, params);
+            let save_to = (command == "runtime.capture")
+                .then(|| {
+                    params
+                        .get("saveTo")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .flatten();
+            let answered: Result<Value, ToolFailure> = match save_to {
+                Some(save_to) => rpc(app, command, params)
+                    .map_err(Into::into)
+                    .and_then(|frame| the_frame_written_to(app, frame, &save_to)),
+                None => rpc(app, command, params).map_err(Into::into),
+            };
             // A script that preloads a scene this call just wrote keeps its "does not exist"
             // diagnostic until the server parses it again: a live turn read that error twice
             // over a file the game was already running.
@@ -1139,9 +1222,7 @@ fn route_one<R: Runtime>(
                 if answered.is_ok() && op == "stop" {
                     crate::debug::note_the_game_is_gone();
                 }
-                return answered.map_err(|error| {
-                    godot_session::carrying_the_error_that_ended_the_game(error.into())
-                });
+                return answered.map_err(godot_session::carrying_the_error_that_ended_the_game);
             }
             Ok(answered?)
         }
@@ -1687,8 +1768,8 @@ fn a_path_that_climbs_out(params: &Value) -> Result<(), ToolFailure> {
 /// gate inventing a rule nobody has. A string that carries the scheme is a path wherever it sits,
 /// and everything else has to be named here. `path` covers the nested one a resource value holds:
 /// `{"type": "Resource", "value": {"path": "res://…"}}` arrives under that key like any other.
-const A_KEY_THAT_NAMES_A_FILE: [&str; 8] = [
-    "path", "paths", "texture", "scene", "file", "files", "from", "to",
+const A_KEY_THAT_NAMES_A_FILE: [&str; 9] = [
+    "path", "paths", "texture", "scene", "file", "files", "from", "to", "saveTo",
 ];
 
 /// A directory a listing narrows to, which is a path spelled the way a file is.
@@ -1719,28 +1800,34 @@ fn climbs(under: &str, text: &str) -> bool {
     path.split('/').any(|segment| segment == "..") || (!schemed && path == "..")
 }
 
-/// Keeps this domain to the files it is for.
+/// Keeps this domain to the files it is for: GDScript, and the shaders no other tool writes.
 ///
 /// `save` writes whatever path it is given, and the language server behind it only knows GDScript.
 /// A live agent used it to write a `.tscn` by hand rather than build the scene with the node tools:
 /// the text landed under an editor that had its own copy of that scene open, outside the undo stack
 /// and outside the revision guard, in a layout Godot's own writer would never produce. A scene is
-/// the editor's to write, so anything that is not a script is refused with the tool that owns it.
+/// the editor's to write, so it is refused with the tool that owns it; anything else is refused
+/// with the reason, because the old sentence sent a shader edit to the node tools.
 fn require_script_path(params: &Value) -> Result<(), ToolFailure> {
     let path = params
         .get("path")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if path.is_empty() || path.ends_with(".gd") {
+    if path.is_empty() || path.ends_with(".gd") || script::is_outside_the_language_server(path) {
         return Ok(());
     }
+    let why = if path.ends_with(".tscn") || path.ends_with(".scn") {
+        "Build and save a scene with the scene.* and node.* operations — a scene written as text \
+         is not the scene the editor has open."
+    } else if path.ends_with(".tres") || path.ends_with(".res") {
+        "A resource is the editor's to write: resource.* creates the kinds it knows, and a node's \
+         property takes one by path through node.set_properties."
+    } else {
+        "This domain writes GDScript and shaders (.gdshader, .gdshaderinc) and nothing else."
+    };
     Err(ToolFailure::new(
         "unsupported_file",
-        format!(
-            "The script.* operations work on GDScript, and {path} is not a .gd file. Build and \
-             save a scene with the scene.* and node.* operations — a scene written as text is not \
-             the scene the editor has open."
-        ),
+        format!("The script.* operations do not write {path}. {why}"),
     ))
 }
 
@@ -1928,7 +2015,15 @@ fn script_domain<R: Runtime>(
                 .get("path")
                 .and_then(Value::as_str)
                 .map(str::to_owned);
-            let saved = to_value(script::save_and_publish(from_params(params)?)?);
+            let request: script::SaveScriptRequest = from_params(params)?;
+            let saved = if script::is_outside_the_language_server(&request.path) {
+                let workspace = crate::active_workspace(app)?;
+                to_value(script::save_outside_the_language_server(
+                    &workspace, request,
+                )?)
+            } else {
+                to_value(script::save_and_publish(request)?)
+            };
             told_the_editor_about(app, path.into_iter().collect());
             Ok(saved)
         }
@@ -1956,7 +2051,7 @@ fn script_domain<R: Runtime>(
                 require_script_path(&json!({"path": file.path}))?;
             }
             let written: Vec<String> = request.files.iter().map(|file| file.path.clone()).collect();
-            let edited = json!({"files": to_value(script::edit_documents(request)?)});
+            let edited = json!({"files": to_value(edited_scripts_and_shaders(app, request)?)});
             told_the_editor_about(app, written);
             Ok(edited)
         }
@@ -2790,6 +2885,25 @@ mod tests {
             "the refusal must name the tool that owns a scene: {}",
             failure.message
         );
+    }
+
+    /// A shader has no other tool, so `save` and `edit` write it; a resource is refused with the
+    /// tool that owns it rather than with the scene sentence a live agent was sent to.
+    #[test]
+    fn a_shader_is_a_file_this_domain_writes_and_a_resource_is_named_its_own_tool() {
+        assert!(require_script_path(&json!({"path": "shaders/night.gdshader"})).is_ok());
+        assert!(require_script_path(&json!({"path": "shaders/common.gdshaderinc"})).is_ok());
+        let resource = require_script_path(&json!({"path": "materials/lamp.tres"}))
+            .expect_err("a resource is not this domain's to write");
+        assert_eq!(resource.code, "unsupported_file");
+        assert!(
+            resource.message.contains("resource.*") && !resource.message.contains("scene.*"),
+            "{}",
+            resource.message
+        );
+        let other = require_script_path(&json!({"path": "notes/todo.md"}))
+            .expect_err("anything else is refused with the reason");
+        assert!(other.message.contains(".gdshader"), "{}", other.message);
     }
 
     /// A rename plan is a list of whole files, and it may only name scripts.

@@ -1719,15 +1719,49 @@ fn every_scene_and_node_operation_no_turn_has_ever_used_still_answers() {
     assert_eq!(result(&placed)["node"], "/level/Fixture", "{placed}");
     assert_eq!(result(&placed)["path"], SCENE_PATH, "{placed}");
 
+    // Review finding: eighteen deletes in one call were eighteen revisions and eighteen undo
+    // steps. `nodes` deletes them as one.
+    let doomed = call(
+        "godot_node",
+        json!({"ops": [{
+            "op": "create_nodes",
+            "nodes": [{"parent": "/level", "name": "Doomed", "type": "Marker2D"}],
+        }]}),
+    )
+    .expect("a second node to delete alongside");
+    let before = doomed["ops"][0]["result"]["revision"]
+        .as_i64()
+        .expect("a mutation answers with the revision it produced");
     let deleted = call(
         "godot_node",
-        json!({"ops": [{"op": "delete", "node": "/level/Holder/PropCopy"}]}),
+        json!({"ops": [{"op": "delete", "nodes": ["/level/Holder/PropCopy", "/level/Doomed"]}]}),
     )
-    .expect("delete a node");
+    .expect("delete two nodes as one step");
     assert_eq!(result(&deleted)["deleted"], true, "{deleted}");
+    assert_eq!(
+        result(&deleted)["nodes"],
+        json!(["/level/Holder/PropCopy", "/level/Doomed"]),
+        "{deleted}"
+    );
+    assert_eq!(
+        result(&deleted)["revision"].as_i64(),
+        Some(before + 1),
+        "two deletions in one op are one revision: {deleted}"
+    );
+    let shown = tree().to_string();
     assert!(
-        !tree().to_string().contains("PropCopy"),
-        "a node reported deleted has to be out of the tree"
+        !shown.contains("PropCopy") && !shown.contains("Doomed"),
+        "nodes reported deleted have to be out of the tree"
+    );
+    let half_wrong = call(
+        "godot_node",
+        json!({"ops": [{"op": "delete", "nodes": ["/level/Fixture", "/level/Nowhere"]}]}),
+    )
+    .expect_err("a batch with a path that is wrong is refused whole");
+    assert_eq!(half_wrong.code, "node_not_found", "{}", half_wrong.message);
+    assert!(
+        tree().to_string().contains("Fixture"),
+        "nothing in a refused batch is deleted"
     );
 
     let elsewhere = call(
@@ -1807,6 +1841,93 @@ fn every_runtime_operation_no_turn_has_ever_used_still_answers() {
 
     let ran = call("godot_runtime", json!({"ops": [{"op": "run"}]})).expect("run the game");
     assert_eq!(result(&ran)["running"], true, "{ran}");
+
+    // Review finding: an unasked listing carried the inspector's category headers as Nil
+    // properties, `"Node": null` between the real ones.
+    let unasked = call(
+        "godot_runtime",
+        json!({"ops": [{"op": "inspect_node", "path": "/root/AiFixture"}]}),
+    )
+    .expect("an inspect with no names lists the node's properties");
+    let listed = result(&unasked)["properties"]
+        .as_object()
+        .expect("properties")
+        .clone();
+    for header in [
+        "Node",
+        "Node2D",
+        "CanvasItem",
+        "Transform",
+        "Ordering",
+        "Visibility",
+    ] {
+        assert!(
+            !listed.contains_key(header),
+            "{header} is an inspector header, not a property: {}",
+            listed.keys().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
+    assert!(listed.contains_key("position"), "{listed:?}");
+
+    // Review finding: nothing wrote to the running game, so trying a value cost four calls.
+    let set = call(
+        "godot_runtime",
+        json!({"ops": [{
+            "op": "set_property",
+            "path": "/root/AiFixture",
+            "property": "position",
+            "value": {"type": "Vector2", "value": [12, 34]},
+        }]}),
+    )
+    .expect("a property is set on the running node");
+    assert_eq!(
+        result(&set)["value"],
+        json!({"type": "Vector2", "value": [12.0, 34.0]}),
+        "{set}"
+    );
+    let read_back = call(
+        "godot_runtime",
+        json!({"ops": [{"op": "inspect_node", "path": "/root/AiFixture", "properties": ["position"]}]}),
+    )
+    .expect("read it back");
+    assert_eq!(
+        result(&read_back)["properties"]["position"]["value"],
+        json!([12.0, 34.0]),
+        "{read_back}"
+    );
+    let missing = call(
+        "godot_runtime",
+        json!({"ops": [{
+            "op": "set_property",
+            "path": "/root/AiFixture",
+            "property": "positon",
+            "value": {"type": "Vector2", "value": [1, 1]},
+        }]}),
+    )
+    .expect_err("a property the node does not have is named");
+    assert_eq!(missing.code, "property_not_found", "{}", missing.message);
+
+    // Review finding: a capture was eighty kilobytes of base64 that nothing in a terminal could
+    // look at; asked to, the router writes the PNG into the project and answers with the path.
+    let saved = call(
+        "godot_runtime",
+        json!({"ops": [{"op": "capture", "saveTo": "captures/first.png"}]}),
+    )
+    .expect("a capture is written where the call asked");
+    let frame = &result(&saved)["frame"];
+    assert_eq!(frame["path"], "captures/first.png", "{saved}");
+    assert_eq!(
+        frame["data"], "",
+        "the bytes stay out of the answer: {saved}"
+    );
+    let png = std::fs::read(session.worktree.join("captures/first.png")).expect("the PNG exists");
+    assert!(png.starts_with(b"\x89PNG"), "what was written is a PNG");
+    let climbing = call(
+        "godot_runtime",
+        json!({"ops": [{"op": "capture", "saveTo": "../outside.png"}]}),
+    )
+    .expect_err("a path outside the project is refused");
+    assert_ne!(climbing.code, "frame_unwritable", "{}", climbing.message);
 
     let state = call("godot_runtime", json!({"ops": [{"op": "get_state"}]}))
         .expect("the editor reports what the game is doing");
