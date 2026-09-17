@@ -222,7 +222,13 @@ pub(crate) fn board_tool_from_outside<R: Runtime>(
             .get("bringChanges")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        on_the_cards_task(app, &storage, &card, bring_changes)?;
+        let task = on_the_cards_task(app, &storage, &card, bring_changes)?;
+        let mut moved = board_tool_as(app, params, writer)?;
+        // The answer says which task the door is in now, so a caller need not ask git.
+        if let Some(object) = moved.as_object_mut() {
+            object.insert("task".to_owned(), task);
+        }
+        return Ok(moved);
     }
     board_tool_as(app, params, writer)
 }
@@ -445,10 +451,11 @@ fn on_the_cards_task<R: Runtime>(
     storage: &crate::storage::ProjectStorage,
     card: &CardRecord,
     bring_changes: bool,
-) -> Result<(), ToolFailure> {
-    match &card.task_id {
+) -> Result<Value, ToolFailure> {
+    let (task_id, opened) = match &card.task_id {
         None => {
-            open_task_for_card(app, storage, &card.id, bring_changes)?;
+            let chat = open_task_for_card(app, storage, &card.id, bring_changes)?;
+            (chat.task_id.unwrap_or_default(), true)
         }
         Some(task_id) => {
             if storage.tasks().active()?.as_deref() != Some(task_id.as_str()) {
@@ -456,10 +463,15 @@ fn on_the_cards_task<R: Runtime>(
                 let switch = storage.switch(&release)?;
                 storage.tasks().activate(task_id, &switch)?;
             }
+            (task_id.clone(), false)
         }
-    }
+    };
     announce_tasks_change(app);
-    Ok(())
+    Ok(json!({
+        "id": task_id,
+        "opened": opened,
+        "broughtChanges": opened && bring_changes,
+    }))
 }
 
 #[cfg(test)]

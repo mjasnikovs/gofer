@@ -1342,6 +1342,15 @@ pub(crate) mod tests {
                 ("godot_project", "set_plugin_enabled")
             ]
         );
+        let message = body["error"]["message"].as_str().expect("message");
+        assert!(
+            message.contains("a.tres") && message.contains("for 1 entry"),
+            "the sentence names what each gated call is about: {message}"
+        );
+        assert!(
+            !message.contains("send all"),
+            "approval is not a parameter to correct: {message}"
+        );
         let (_, body) = post(
             server.address,
             PATH,
@@ -1485,6 +1494,13 @@ pub(crate) mod tests {
         assert_eq!(moved["result"]["status"], json!("doing"), "{moved}");
         let task_id = task_of(card_id).expect("the card has a task now");
         assert_eq!(
+            moved["result"]["task"]["id"],
+            json!(task_id),
+            "the answer names it: {moved}"
+        );
+        // Opened or moved onto: a retry after another test's turn finds the task already there.
+        assert!(moved["result"]["task"]["opened"].is_boolean(), "{moved}");
+        assert_eq!(
             storage.tasks().active().expect("active").as_deref(),
             Some(task_id.as_str()),
             "and the checkout is on it"
@@ -1517,6 +1533,7 @@ pub(crate) mod tests {
             "a card with a task keeps it: {again}"
         );
         assert_eq!(task_of(card_id).as_deref(), Some(task_id.as_str()));
+        assert_eq!(again["result"]["task"]["opened"], json!(false), "{again}");
         stop(server);
     }
 

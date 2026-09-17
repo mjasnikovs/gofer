@@ -346,7 +346,13 @@ fn dispatch_under<R: Runtime>(
 /// for the same reason it is excluded from the repetition guard: the caller wrote nothing wrong and
 /// has no turn left to send anything again.
 fn said_that_none_of_it_ran(listed: usize, failure: ToolFailure) -> ToolFailure {
-    if listed < 2 || failure.code == "cancelled" || failure.code == "unknown_tool" {
+    // A refusal for approval is not one a corrected entry gets past, so it keeps its own advice.
+    if listed < 2
+        || matches!(
+            failure.code.as_str(),
+            "cancelled" | "unknown_tool" | "approval_needed"
+        )
+    {
         return failure;
     }
     let mut failure = failure;
@@ -468,14 +474,38 @@ fn route<R: Runtime>(
 fn refused_without_a_user_to_ask(
     gated: &[(&'static ToolDomain, Vec<approvals::GatedCall>)],
 ) -> ToolFailure {
-    let named: Vec<String> = gated
-        .iter()
-        .flat_map(|(domain, calls)| {
-            calls
+    // One clause per operation, however many entries asked for it, each entry named by what it
+    // names: a batch of twenty-three deletes was answered with the same sentence twenty-three
+    // times and not one path.
+    let mut named: Vec<String> = Vec::new();
+    for (domain, calls) in gated {
+        let mut ops: Vec<&str> = Vec::new();
+        for call in calls {
+            if !ops.contains(&call.op.as_str()) {
+                ops.push(&call.op);
+            }
+        }
+        for op in ops {
+            let same: Vec<&approvals::GatedCall> =
+                calls.iter().filter(|call| call.op == op).collect();
+            let reason = same.first().map_or("", |call| call.reason);
+            let subjects: Vec<String> = same
                 .iter()
-                .map(move |call| format!("{}.{} ({})", domain.name, call.op, call.reason))
-        })
-        .collect();
+                .filter_map(|call| what_the_call_names(&call.params))
+                .collect();
+            let count = same.len();
+            named.push(if subjects.is_empty() {
+                format!("{}.{op} ({reason})", domain.name)
+            } else {
+                format!(
+                    "{}.{op} for {count} {}: {} ({reason})",
+                    domain.name,
+                    if count == 1 { "entry" } else { "entries" },
+                    subjects.join(", ")
+                )
+            });
+        }
+    }
     let listed: Vec<Value> = gated
         .iter()
         .flat_map(|(domain, calls)| {
@@ -490,11 +520,20 @@ fn refused_without_a_user_to_ask(
             "{} needs the user's approval, and the door has no dialog to ask in. Nothing ran. \
              Have the user do it in Gofer, or ask them yourself and send an operation that \
              is not gated.",
-            named.join(", ")
+            named.join("; ")
         ),
         retryable: false,
         details: json!({"gated": listed}),
     }
+}
+
+/// The one value a gated call is about, for the sentence: the path it deletes or moves, the
+/// setting or plugin it changes, the button it presses.
+fn what_the_call_names(params: &Value) -> Option<String> {
+    ["path", "from", "name", "plugin", "button"]
+        .iter()
+        .find_map(|key| params.get(key).and_then(Value::as_str))
+        .map(str::to_owned)
 }
 
 /// Writes a captured frame into the project and answers with where, in place of the bytes.

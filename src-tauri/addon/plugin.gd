@@ -971,7 +971,7 @@ func _runtime_launch(id: String, restart: bool, scene: String, args: PackedStrin
     # A game halted at an error is worth nothing to keep: four of four live turns that met
     # runtime_broke ran again without stopping first and were refused for it.
     if playing and not restart and _runtime_ready and not _runtime_broke:
-        _respond_error(id, "already_running", "The project is already running; stop it or use runtime.restart", true)
+        _respond_error(id, "already_running", "The project is already running. Stop it with runtime.stop and run again, or use runtime.restart to run the same scene from the start", true)
         return
     if not scene.is_empty() and not FileAccess.file_exists(scene):
         _respond_error(
