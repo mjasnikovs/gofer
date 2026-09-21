@@ -119,6 +119,15 @@ parses is the only thing a move breaks that no other suite would notice. It is n
 the acceptance suite; it is what stops a rename reaching it. It holds the string-named callbacks to
 the same standard, because that is the one break it could not otherwise see.
 
+**Scripted addon** — an addon that answers from inside the test process, bound as the editor.
+`Editor` had two implementations and neither answered a command, so the 61 operations the addon
+answers could be proven only by booting Godot under xvfb. The transport is the seam: `RpcSession`
+speaks line-delimited JSON to whatever connects and presents its token, and a thread can do that as
+well as an editor can. It is `src-tauri/src/scripted_addon.rs`, and it proves what Gofer does with
+an answer — never what the editor would have said, which stays with the GDScript acceptance suites.
+A scripted answer is held to the command's declared result shape by the same debug-build check a
+real one is, so a script cannot drift from `params.json` either.
+
 **Command map** — a command name is a key, not a string, and its reply is a type. There are two:
 `DesktopCommandMap` for the backend's commands and `GodotCommandMap` for the addon's. The Godot one
 is a mapped type over a union emitted from the catalogue, so its keys are the catalogue's keys and

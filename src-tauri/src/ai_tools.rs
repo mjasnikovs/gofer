@@ -2394,6 +2394,119 @@ mod tests {
         assert_eq!(failure.code, "unknown_tool");
     }
 
+    /// The 61 operations the addon answers, driven through the router with no editor.
+    ///
+    /// Every one of them used to be reachable only from `godot_ai_acceptance`, which boots Godot
+    /// under xvfb at about four and a half seconds a test, because [`ScriptedAddon`] did not exist
+    /// and `Editor` had no implementation that answered a command. What is under test here is
+    /// Gofer — that the router reaches the transport, spells the command the way the catalogue
+    /// says, and hands back what came off the wire. What the editor would have answered is not,
+    /// and stays with the GDScript suites that can prove it.
+    #[test]
+    fn an_operation_the_addon_answers_is_driven_through_the_router_without_an_editor() {
+        let directory = TempDir::new().expect("temporary application data");
+        let workspace_path = directory.path().join("workspace");
+        std::fs::create_dir(&workspace_path).expect("create workspace");
+        let storage =
+            crate::storage::ProjectStorage::open(&directory.path().join("data"), &workspace_path)
+                .expect("open project storage");
+        let app = unattended_app();
+        app.manage(crate::storage::StorageSlot::new(Ok(storage)));
+        // Bound at the app's own worktree: an editor sitting somewhere else is a worktree that
+        // moved, and the router announces that with a `resource.rescan` the test never asked for.
+        let worktree = crate::active_workspace(app.handle())
+            .expect("the task worktree")
+            .root()
+            .to_owned();
+        let addon = crate::scripted_addon::ScriptedAddon::answering(
+            &worktree,
+            &[
+                (
+                    "scene.open",
+                    json!({"scene": "res://levels/level.tscn", "revision": 1, "dirty": false}),
+                ),
+                ("scene.list", json!({"scenes": ["res://levels/level.tscn"]})),
+            ],
+        );
+
+        let answer = dispatch(
+            app.handle(),
+            calls(
+                GODOT_TOOL,
+                &[
+                    ("scene.open", json!({"path": "res://levels/level.tscn"})),
+                    ("scene.list", json!({})),
+                ],
+            ),
+        )
+        .expect("the scripted addon answers both");
+
+        let ops = answer["ops"].as_array().expect("the entries");
+        assert_eq!(ops.len(), 2, "{answer}");
+        assert_eq!(ops[0]["result"]["scene"], "res://levels/level.tscn");
+        assert_eq!(ops[1]["result"]["scenes"][0], "res://levels/level.tscn");
+
+        // The binding is the process's, so what the addon was asked holds whatever else was
+        // dispatched while this test held it. The assertion is about this test's own commands.
+        let asked = addon.asked_about("scene.");
+        let commands: Vec<&str> = asked.iter().map(|one| one.command.as_str()).collect();
+        assert_eq!(commands, ["scene.open", "scene.list"], "{asked:?}");
+        assert_eq!(
+            asked[0].params["path"], "res://levels/level.tscn",
+            "an addon operation is forwarded verbatim, scheme and all"
+        );
+    }
+
+    /// A failure the addon answers with is the failure the model reads.
+    #[test]
+    fn what_the_addon_refuses_is_carried_out_under_the_addons_own_code() {
+        let worktree = TempDir::new().expect("a worktree");
+        let _addon = crate::scripted_addon::ScriptedAddon::answering(worktree.path(), &[]);
+        let app = unattended_app();
+
+        let failure = dispatch(
+            app.handle(),
+            call(
+                "godot_scene",
+                "open",
+                json!({"path": "res://levels/level.tscn"}),
+            ),
+        )
+        .expect_err("nothing in this addon's script answers scene.open");
+        assert_eq!(failure.code, "unknown_command", "{failure:?}");
+    }
+
+    /// The confinement gate is in front of the transport, not behind it.
+    ///
+    /// It was written for the writers that live in the addon — `resource.create_texture` and its
+    /// two neighbours — which are forwarded verbatim and had no gate on the way at all. Proving
+    /// that needed a real editor until there was an addon that could be asked whether it was told.
+    #[test]
+    fn a_path_that_climbs_out_never_reaches_the_addon() {
+        let worktree = TempDir::new().expect("a worktree");
+        let addon = crate::scripted_addon::ScriptedAddon::answering(
+            worktree.path(),
+            &[("scene.open", json!({}))],
+        );
+        let app = unattended_app();
+
+        let failure = dispatch(
+            app.handle(),
+            call(
+                "godot_scene",
+                "open",
+                json!({"path": "res://../escaped.tscn"}),
+            ),
+        )
+        .expect_err("a path that climbs out is refused");
+        assert_eq!(failure.code, "outside_workspace");
+        assert!(
+            addon.asked_about("scene.open").is_empty(),
+            "{:?}",
+            addon.asked_about("scene.open")
+        );
+    }
+
     /// The one tool the model is given: each entry names its domain in a dotted `op`, one list may
     /// cross domains, and the answer echoes back what the call wrote.
     #[test]

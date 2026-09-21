@@ -68,6 +68,8 @@ mod read_ledger;
 mod remember;
 mod script;
 mod script_answers;
+#[cfg(test)]
+mod scripted_addon;
 mod session_diagnosis;
 mod session_output;
 mod settings;
