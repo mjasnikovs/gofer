@@ -36,6 +36,16 @@ use serde_json::Value;
 #[serde(rename_all = "camelCase", tag = "kind", content = "of")]
 pub enum Kind {
     Text,
+    /// A file the task worktree holds, named the way either convention spells it.
+    ///
+    /// A string on the wire, and a string in the schema the model is constrained by — nothing here
+    /// is about what the sampler may write. It is what lets the router tell a file from prose: the
+    /// confinement gate, the `res://` rewrite and the `..` refusal all used to decide that from a
+    /// list of nine key names kept in `ai_tools.rs`, which meant an operation whose path parameter
+    /// was named anything else went unconfined, and `godot_runtime`'s node paths — `/root/Main`,
+    /// where `..` means the parent node — were refused for climbing out of a project they never
+    /// named.
+    Path,
     Int,
     Number,
     Flag,
@@ -829,7 +839,7 @@ pub const GODOT_TAG_PAYLOAD: &[(&str, Payload)] = &[
 ];
 // GENERATED-END tag-payloads
 
-use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
+use Kind::{Flag, Hash, Int, List, Number, Object, Path, Tagged, Text};
 
 /// Every operation of every domain tool, one [`Operation`] per row of the source.
 ///
@@ -841,7 +851,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:1c160452de9f8446
+// GENERATED-BEGIN operations sha256:250bf76557ca36a1
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -943,7 +953,7 @@ pub const GODOT_SCENE_OPERATIONS: &[Operation] = &[
             "open",
             "Opens a scene.",
             Answers::Addon("scene.open"),
-            &[need("path", Text)],
+            &[need("path", Path)],
         ),
         Sharing::Repeat,
         "One scene is open at a time, so a second one would act on whatever the first left open.",
@@ -954,7 +964,7 @@ pub const GODOT_SCENE_OPERATIONS: &[Operation] = &[
         "Creates a scene and opens it.",
         Answers::Addon("scene.create"),
         &[
-            need("path", Text),
+            need("path", Path),
             need("rootType", Text),
             opt("rootName", Text),
             hidden("expectedRevision", Int),
@@ -984,7 +994,7 @@ pub const GODOT_SCENE_OPERATIONS: &[Operation] = &[
             "save_as",
             "Saves the edited scene to a new path.",
             Answers::Addon("scene.save_as"),
-            &[need("path", Text), hidden("expectedRevision", Int)],
+            &[need("path", Path), hidden("expectedRevision", Int)],
         ),
         Sharing::Repeat,
         "One scene is open at a time, so a second one would act on whatever the first left open.",
@@ -1011,7 +1021,7 @@ pub const GODOT_NODE_OPERATIONS: &[Operation] = &[
         &[
             need("node", Text),
             opt("properties", Kind::ListOf(&Text)),
-            hidden("scene", Text),
+            hidden("scene", Path),
         ],
     ),
     op(
@@ -1030,7 +1040,7 @@ pub const GODOT_NODE_OPERATIONS: &[Operation] = &[
                 ],
             ),
             hidden("expectedRevision", Int),
-            hidden("scene", Text),
+            hidden("scene", Path),
         ],
     ),
     op(
@@ -1040,11 +1050,11 @@ pub const GODOT_NODE_OPERATIONS: &[Operation] = &[
         Answers::Addon("node.instantiate"),
         &[
             need("parent", Text),
-            need("path", Text),
+            need("path", Path),
             opt("name", Text),
             opt("index", Int),
             hidden("expectedRevision", Int),
-            hidden("scene", Text),
+            hidden("scene", Path),
         ],
     ),
     op(
@@ -1056,7 +1066,7 @@ pub const GODOT_NODE_OPERATIONS: &[Operation] = &[
             need("node", Text),
             opt("name", Text),
             hidden("expectedRevision", Int),
-            hidden("scene", Text),
+            hidden("scene", Path),
         ],
     ),
     op(
@@ -1068,7 +1078,7 @@ pub const GODOT_NODE_OPERATIONS: &[Operation] = &[
             need("node", Text),
             need("name", Text),
             hidden("expectedRevision", Int),
-            hidden("scene", Text),
+            hidden("scene", Path),
         ],
     ),
     op(
@@ -1081,7 +1091,7 @@ pub const GODOT_NODE_OPERATIONS: &[Operation] = &[
             need("newParent", Text),
             opt("index", Int),
             hidden("expectedRevision", Int),
-            hidden("scene", Text),
+            hidden("scene", Path),
         ],
     ),
     op(
@@ -1093,7 +1103,7 @@ pub const GODOT_NODE_OPERATIONS: &[Operation] = &[
             need("node", Text),
             need("type", Text),
             hidden("expectedRevision", Int),
-            hidden("scene", Text),
+            hidden("scene", Path),
         ],
     ),
     op(
@@ -1105,7 +1115,7 @@ pub const GODOT_NODE_OPERATIONS: &[Operation] = &[
             opt("node", Text),
             opt("nodes", Kind::ListOf(&Text)),
             hidden("expectedRevision", Int),
-            hidden("scene", Text),
+            hidden("scene", Path),
         ],
     ),
     op(
@@ -1123,7 +1133,7 @@ pub const GODOT_NODE_OPERATIONS: &[Operation] = &[
                 ],
             ),
             hidden("expectedRevision", Int),
-            hidden("scene", Text),
+            hidden("scene", Path),
         ],
     ),
     op(
@@ -1273,7 +1283,7 @@ pub const GODOT_PROJECT_OPERATIONS: &[Operation] = &[
         "set_autoload",
         "Adds or updates an autoload.",
         Answers::Addon("project.set_autoload"),
-        &[need("name", Text), need("path", Text), opt("enabled", Flag)],
+        &[need("name", Text), need("path", Path), opt("enabled", Flag)],
     ),
     op(
         "godot_project",
@@ -1390,14 +1400,14 @@ pub const GODOT_RESOURCE_OPERATIONS: &[Operation] = &[
         "list",
         "Lists the files in the task worktree with their sizes.",
         Answers::Rust,
-        &[opt("under", Text), opt("hashes", Flag)],
+        &[opt("under", Path), opt("hashes", Flag)],
     ),
     op(
         "godot_resource",
         "rescan",
         "Tells the editor filesystem about files that changed.",
         Answers::Addon("resource.rescan"),
-        &[opt("paths", Kind::ListOf(&Text))],
+        &[opt("paths", Kind::ListOf(&Path))],
     ),
     op(
         "godot_resource",
@@ -1405,8 +1415,8 @@ pub const GODOT_RESOURCE_OPERATIONS: &[Operation] = &[
         "Cuts a texture into a TileSet and saves it.",
         Answers::Addon("resource.create_tileset"),
         &[
-            need("path", Text),
-            need("texture", Text),
+            need("path", Path),
+            need("texture", Path),
             defaulting(opt("tileWidth", Int), Fallback::Int(16)),
             defaulting(opt("tileHeight", Int), Fallback::Int(16)),
             opt("tiles", List),
@@ -1420,7 +1430,7 @@ pub const GODOT_RESOURCE_OPERATIONS: &[Operation] = &[
         "Draws a PNG and imports it, which is how a project with no art gets some.",
         Answers::Addon("resource.create_texture"),
         &[
-            need("path", Text),
+            need("path", Path),
             need("width", Int),
             need("height", Int),
             opt("background", Text),
@@ -1442,7 +1452,7 @@ pub const GODOT_RESOURCE_OPERATIONS: &[Operation] = &[
         "Saves a 2D collision shape as a resource.",
         Answers::Addon("resource.create_shape"),
         &[
-            need("path", Text),
+            need("path", Path),
             need(
                 "shapeType",
                 Kind::Choice(&[
@@ -1464,7 +1474,7 @@ pub const GODOT_RESOURCE_OPERATIONS: &[Operation] = &[
         "describe_tileset",
         "Reports what a saved TileSet holds.",
         Answers::Addon("resource.describe_tileset"),
-        &[need("path", Text)],
+        &[need("path", Path)],
     ),
     gated(
         op(
@@ -1472,7 +1482,7 @@ pub const GODOT_RESOURCE_OPERATIONS: &[Operation] = &[
             "move",
             "Moves a file or directory inside the worktree.",
             Answers::Rust,
-            &[need("from", Text), need("to", Text)],
+            &[need("from", Path), need("to", Path)],
         ),
         "Moving a path removes the file from where it is now, and can overwrite the destination.",
     ),
@@ -1482,7 +1492,7 @@ pub const GODOT_RESOURCE_OPERATIONS: &[Operation] = &[
             "delete",
             "Deletes a file or directory, and Godot's own record of it — its `.uid`, an asset's `.import` — with it.",
             Answers::Rust,
-            &[need("path", Text), hidden("expectedHash", Hash)],
+            &[need("path", Path), hidden("expectedHash", Hash)],
         ),
         "Deleting a file removes it from the task worktree; only a Git checkout brings it back.",
     ),
@@ -1494,21 +1504,21 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
         "list",
         "Lists the GDScript files in the worktree with their size.",
         Answers::Rust,
-        &[opt("under", Text)],
+        &[opt("under", Path)],
     ),
     op(
         "godot_script",
         "open",
         "Opens a script as a language-server document, its text coming back with each line prefixed by its 1-indexed number and a tab.",
         Answers::Rust,
-        &[need("paths", Kind::ListOf(&Text))],
+        &[need("paths", Kind::ListOf(&Path))],
     ),
     op(
         "godot_script",
         "update",
         "Reports an in-memory buffer change to the language server. Writes nothing to disk; `save` does.",
         Answers::Rust,
-        &[need("path", Text), need("text", Text)],
+        &[need("path", Path), need("text", Text)],
     ),
     writes(
         op(
@@ -1519,7 +1529,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
             &[shaped(
                 need("files", List),
                 &[
-                    need("path", Text),
+                    need("path", Path),
                     shaped(
                         need("edits", List),
                         &[need("oldText", Text), need("newText", Text)],
@@ -1536,7 +1546,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
             "Writes a whole file, creating it when it is new, and answers with the file's diagnostics the same way `edit` does. A script or a shader (.gdshader, .gdshaderinc); a shader gets no diagnostics, because the language server does not read it. Over a file that exists, open it with `script.open` first, or change it with `edit`: a file read any other way cannot be saved over, and the router carries the guard, so no hash is ever sent.",
             Answers::Rust,
             &[
-                need("path", Text),
+                need("path", Path),
                 need("text", Text),
                 hidden("expectedHash", Hash),
             ],
@@ -1548,7 +1558,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
         "close",
         "Closes the documents.",
         Answers::Rust,
-        &[need("paths", Kind::ListOf(&Text))],
+        &[need("paths", Kind::ListOf(&Path))],
     ),
     op(
         "godot_script",
@@ -1563,7 +1573,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
         "Hover documentation at a position. `position.line` is 0-based, one less than the number script.open shows.",
         Answers::Rust,
         &[
-            need("path", Text),
+            need("path", Path),
             shaped(
                 need("position", Object),
                 &[need("line", Int), need("character", Int)],
@@ -1576,7 +1586,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
         "Completion items at a position. `position.line` is 0-based, one less than the number script.open shows.",
         Answers::Rust,
         &[
-            need("path", Text),
+            need("path", Path),
             shaped(
                 need("position", Object),
                 &[need("line", Int), need("character", Int)],
@@ -1589,7 +1599,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
         "Signature help at a position. `position.line` is 0-based, one less than the number script.open shows.",
         Answers::Rust,
         &[
-            need("path", Text),
+            need("path", Path),
             shaped(
                 need("position", Object),
                 &[need("line", Int), need("character", Int)],
@@ -1602,7 +1612,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
         "Go to definition from a position. `position.line` is 0-based, one less than the number script.open shows.",
         Answers::Rust,
         &[
-            need("path", Text),
+            need("path", Path),
             shaped(
                 need("position", Object),
                 &[need("line", Int), need("character", Int)],
@@ -1615,7 +1625,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
         "Go to declaration from a position. `position.line` is 0-based, one less than the number script.open shows.",
         Answers::Rust,
         &[
-            need("path", Text),
+            need("path", Path),
             shaped(
                 need("position", Object),
                 &[need("line", Int), need("character", Int)],
@@ -1628,7 +1638,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
         "Find references of the symbol at a position. `position.line` is 0-based, one less than the number script.open shows.",
         Answers::Rust,
         &[
-            need("path", Text),
+            need("path", Path),
             shaped(
                 need("position", Object),
                 &[need("line", Int), need("character", Int)],
@@ -1642,7 +1652,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
         "Document highlights of the symbol at a position. `position.line` is 0-based, one less than the number script.open shows.",
         Answers::Rust,
         &[
-            need("path", Text),
+            need("path", Path),
             shaped(
                 need("position", Object),
                 &[need("line", Int), need("character", Int)],
@@ -1654,14 +1664,14 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
         "diagnostics",
         "Diagnostics the server published.",
         Answers::Rust,
-        &[need("paths", Kind::ListOf(&Text)), opt("timeoutMs", Int)],
+        &[need("paths", Kind::ListOf(&Path)), opt("timeoutMs", Int)],
     ),
     op(
         "godot_script",
         "document_symbols",
         "Symbols of one document.",
         Answers::Rust,
-        &[need("path", Text)],
+        &[need("path", Path)],
     ),
     op(
         "godot_script",
@@ -1676,7 +1686,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
         "Checks whether the symbol at a position can be renamed. `position.line` is 0-based, one less than the number script.open shows.",
         Answers::Rust,
         &[
-            need("path", Text),
+            need("path", Path),
             shaped(
                 need("position", Object),
                 &[need("line", Int), need("character", Int)],
@@ -1689,7 +1699,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
         "Plans a rename of the symbol at a position without writing, and refuses when the server plans nothing — every real rename touches at least the declaration, so an empty plan is the server declining rather than a rename that reached no files.",
         Answers::Rust,
         &[
-            need("path", Text),
+            need("path", Path),
             shaped(
                 need("position", Object),
                 &[need("line", Int), need("character", Int)],
@@ -1706,7 +1716,7 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
             &[shaped(
                 need("files", List),
                 &[
-                    need("path", Text),
+                    need("path", Path),
                     need("originalText", Text),
                     need("originalHash", Text),
                     need("updatedText", Text),
@@ -1734,14 +1744,14 @@ pub const GODOT_DEBUG_OPERATIONS: &[Operation] = &[
         "set_breakpoints",
         "Replaces the breakpoints of one script.",
         Answers::Rust,
-        &[need("path", Text), opt("lines", List)],
+        &[need("path", Path), opt("lines", List)],
     ),
     op(
         "godot_debug",
         "breakpoint_locations",
         "Validates candidate lines.",
         Answers::Rust,
-        &[need("path", Text), need("line", Int)],
+        &[need("path", Path), need("line", Int)],
     ),
     alone(
         op(
@@ -1750,11 +1760,11 @@ pub const GODOT_DEBUG_OPERATIONS: &[Operation] = &[
             "Runs the project under the debugger, the main scene unless `scene` names another.",
             Answers::Rust,
             &[
-                defaulting(opt("scene", Text), Fallback::Text("main")),
+                defaulting(opt("scene", Path), Fallback::Text("main")),
                 opt("playArgs", List),
                 shaped(
                     opt("breakpoints", List),
-                    &[need("path", Text), need("lines", List)],
+                    &[need("path", Path), need("lines", List)],
                 ),
             ],
         ),
@@ -1920,9 +1930,9 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
             "Runs the project and captures the first frame, unless `playArgs` start it with `--headless`, which draws none. `saveTo` writes that frame into the project instead of answering with its bytes. While it runs the scene can be read and opened but not changed: a mutation answers session_playing until stop.",
             Answers::Addon("runtime.run"),
             &[
-                opt("scene", Text),
+                opt("scene", Path),
                 opt("playArgs", Kind::ListOf(&Text)),
-                opt("saveTo", Text),
+                opt("saveTo", Path),
             ],
         ),
         Sharing::Repeat,
@@ -1945,7 +1955,7 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
             "restart",
             "Restarts the running game.",
             Answers::Addon("runtime.restart"),
-            &[opt("saveTo", Text)],
+            &[opt("saveTo", Path)],
         ),
         Sharing::Repeat,
         "There is one running game, so a second one in the same call is the first one again.",
@@ -2029,7 +2039,7 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
         Answers::Addon("runtime.capture"),
         &[
             opt("source", Kind::Choice(&["game", "editor"])),
-            opt("saveTo", Text),
+            opt("saveTo", Path),
         ],
     ),
     op(
@@ -2159,6 +2169,7 @@ pub fn signature(params: &[Param]) -> String {
                     ),
                 },
                 Kind::Text => format!("{}{mark}: text", param.name),
+                Kind::Path => format!("{}{mark}: path", param.name),
                 Kind::Int => format!("{}{mark}: int", param.name),
                 Kind::Number => format!("{}{mark}: number", param.name),
                 Kind::Flag => format!("{}{mark}: flag", param.name),
@@ -2177,6 +2188,7 @@ pub fn signature(params: &[Param]) -> String {
 fn short(kind: Kind) -> &'static str {
     match kind {
         Kind::Text => "text",
+        Kind::Path => "path",
         Kind::Int => "int",
         Kind::Number => "number",
         Kind::Flag => "flag",

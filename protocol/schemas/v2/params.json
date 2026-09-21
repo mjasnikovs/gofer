@@ -2,7 +2,7 @@
     "$comment": "The parameters of every tool operation. Hand-written: this is the specification, and it covers the catalogue exhaustively — `every_catalog_operation_declares_its_parameters` fails if an operation is added without an entry here. `scripts/generate-command-surface.mjs` emits the Rust table that refuses a call, the tool the model is given, and the addon-side guard for the operations the addon answers.",
     "$commandComment": "`command` is the addon command that answers the operation, and its absence — with `answeredBy: \"rust\"` in its place — means the operation never reaches the addon. Those are checked in Rust and deserialize into a typed request behind it; `every_rust_answered_operation_matches_its_request` holds this file to those structs.",
     "$summaryComment": "`summary` is what the model reads about the operation, one sentence, and it is the half of the tool description a person writes. One sentence because the arm that cut every summary to its first one tied on success against the shipped surface and saved a quarter of the prompt; `godot_runtime.input` is the exception, its second sentence being the one rule a live run showed the model does not already obey. It lives here rather than in Rust because everything else about the same operation already did — the parameters it takes, what answers it, where it may sit in an `ops` list, whether the user is asked first — and the worker is sent one object per operation carrying all of it. Written apart, the view the model receives was assembled at serialization time out of two files nothing held together, and a test had to read English out of Rust source to check the seam.",
-    "$acceptsComment": "`accepts` names a parameter the addon reads and the model is never told about. `scene` is the only one: every node command takes it and defaults it to the scene the editor already has open, so the desktop client passes it and the model has no reason to.",
+    "$acceptsComment": "`accepts` names a parameter the addon reads and the model is never told about, as `{name, kind}` — the kind because a hidden parameter is confined like any other, and `scene` is a path. `scene` is the only one: every node command takes it and defaults it to the scene the editor already has open, so the desktop client passes it and the model has no reason to.",
     "$gatedComment": "`gated` is the sentence the user is shown before the agent may run this operation. Its absence means auto-allowed, so a new operation is allowed by default and has to be gated deliberately. It lives beside the parameters and the route because all three are facts about the same operation, and keeping the safety model in a table of its own meant a fifth place to look and a fifth thing to hold to the catalogue afterwards.",
     "$writesComment": "`writes` names what an operation writes where one of the user's enforced Godot rules may refuse it: `projectSetting` and `editorSetting` are the two settings surfaces, `scriptText` is a call carrying GDScript source. `godot_policy::enforcement_refusal` reads the tag rather than matching on the tool and the operation, so an operation renamed here cannot quietly stop being enforced. Absence means no rule keys on this operation — which is every operation but five.",
     "$resultComment": "`result` is the shape of the answer an operation succeeds with, in the same vocabulary as `params` and never shown to the model. The generator emits a Rust struct per addon command from it, and `godot_rpc` deserializes every answer into that struct in a debug build — so a declaration that disagrees with the handler is a failed acceptance run rather than a stale sentence. A kind of `shape` names a row of `shapes` below; an `object` with no `entry` is one this codebase does not shape at all — a settings map, a language server payload — and says so by being open.",
@@ -1010,7 +1010,7 @@
             "params": [
                 {
                     "name": "path",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 }
             ],
@@ -1043,7 +1043,7 @@
             "params": [
                 {
                     "name": "path",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 },
                 {
@@ -1189,7 +1189,7 @@
             "params": [
                 {
                     "name": "path",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 },
                 {
@@ -1341,7 +1341,12 @@
                 ]
             },
             "command": "node.inspect",
-            "accepts": ["scene"]
+            "accepts": [
+                {
+                    "name": "scene",
+                    "kind": "path"
+                }
+            ]
         },
         {
             "tool": "godot_node",
@@ -1401,7 +1406,12 @@
                 ]
             },
             "command": "node.create_nodes",
-            "accepts": ["scene"]
+            "accepts": [
+                {
+                    "name": "scene",
+                    "kind": "path"
+                }
+            ]
         },
         {
             "tool": "godot_node",
@@ -1415,7 +1425,7 @@
                 },
                 {
                     "name": "path",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 },
                 {
@@ -1451,7 +1461,12 @@
                 ]
             },
             "command": "node.instantiate",
-            "accepts": ["scene"]
+            "accepts": [
+                {
+                    "name": "scene",
+                    "kind": "path"
+                }
+            ]
         },
         {
             "tool": "godot_node",
@@ -1486,7 +1501,12 @@
                 ]
             },
             "command": "node.duplicate",
-            "accepts": ["scene"]
+            "accepts": [
+                {
+                    "name": "scene",
+                    "kind": "path"
+                }
+            ]
         },
         {
             "tool": "godot_node",
@@ -1521,7 +1541,12 @@
                 ]
             },
             "command": "node.rename",
-            "accepts": ["scene"]
+            "accepts": [
+                {
+                    "name": "scene",
+                    "kind": "path"
+                }
+            ]
         },
         {
             "tool": "godot_node",
@@ -1561,7 +1586,12 @@
                 ]
             },
             "command": "node.reparent",
-            "accepts": ["scene"]
+            "accepts": [
+                {
+                    "name": "scene",
+                    "kind": "path"
+                }
+            ]
         },
         {
             "tool": "godot_node",
@@ -1601,7 +1631,12 @@
                 ]
             },
             "command": "node.change_type",
-            "accepts": ["scene"]
+            "accepts": [
+                {
+                    "name": "scene",
+                    "kind": "path"
+                }
+            ]
         },
         {
             "tool": "godot_node",
@@ -1649,7 +1684,12 @@
                 ]
             },
             "command": "node.delete",
-            "accepts": ["scene"]
+            "accepts": [
+                {
+                    "name": "scene",
+                    "kind": "path"
+                }
+            ]
         },
         {
             "tool": "godot_node",
@@ -1701,7 +1741,12 @@
                 ]
             },
             "command": "node.set_properties",
-            "accepts": ["scene"]
+            "accepts": [
+                {
+                    "name": "scene",
+                    "kind": "path"
+                }
+            ]
         },
         {
             "tool": "godot_node",
@@ -2304,7 +2349,7 @@
                 },
                 {
                     "name": "path",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 },
                 {
@@ -2713,7 +2758,7 @@
             "params": [
                 {
                     "name": "under",
-                    "kind": "text",
+                    "kind": "path",
                     "required": false
                 },
                 {
@@ -2758,7 +2803,7 @@
                     "name": "paths",
                     "kind": "listOf",
                     "of": {
-                        "kind": "text"
+                        "kind": "path"
                     },
                     "required": false
                 }
@@ -2792,12 +2837,12 @@
             "params": [
                 {
                     "name": "path",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 },
                 {
                     "name": "texture",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 },
                 {
@@ -2911,7 +2956,7 @@
             "params": [
                 {
                     "name": "path",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 },
                 {
@@ -3001,7 +3046,7 @@
             "params": [
                 {
                     "name": "path",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 },
                 {
@@ -3072,7 +3117,7 @@
             "params": [
                 {
                     "name": "path",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 }
             ],
@@ -3117,12 +3162,12 @@
             "params": [
                 {
                     "name": "from",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 },
                 {
                     "name": "to",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 }
             ],
@@ -3165,7 +3210,7 @@
             "params": [
                 {
                     "name": "path",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 },
                 {
@@ -3209,7 +3254,7 @@
             "params": [
                 {
                     "name": "under",
-                    "kind": "text",
+                    "kind": "path",
                     "required": false
                 }
             ],
@@ -3249,7 +3294,7 @@
                     "name": "paths",
                     "kind": "listOf",
                     "of": {
-                        "kind": "text"
+                        "kind": "path"
                     },
                     "required": true,
                     "minItems": 1
@@ -3300,7 +3345,7 @@
             "params": [
                 {
                     "name": "path",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 },
                 {
@@ -3333,7 +3378,7 @@
                     "entry": [
                         {
                             "name": "path",
-                            "kind": "text",
+                            "kind": "path",
                             "required": true
                         },
                         {
@@ -3410,7 +3455,7 @@
             "params": [
                 {
                     "name": "path",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 },
                 {
@@ -3466,7 +3511,7 @@
                     "name": "paths",
                     "kind": "listOf",
                     "of": {
-                        "kind": "text"
+                        "kind": "path"
                     },
                     "required": true,
                     "minItems": 1
@@ -3534,7 +3579,7 @@
             "params": [
                 {
                     "name": "path",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 },
                 {
@@ -3586,7 +3631,7 @@
             "params": [
                 {
                     "name": "path",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 },
                 {
@@ -3640,7 +3685,7 @@
             "params": [
                 {
                     "name": "path",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 },
                 {
@@ -3686,7 +3731,7 @@
             "params": [
                 {
                     "name": "path",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 },
                 {
@@ -3753,7 +3798,7 @@
             "params": [
                 {
                     "name": "path",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 },
                 {
@@ -3820,7 +3865,7 @@
             "params": [
                 {
                     "name": "path",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 },
                 {
@@ -3892,7 +3937,7 @@
             "params": [
                 {
                     "name": "path",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 },
                 {
@@ -3949,7 +3994,7 @@
                     "name": "paths",
                     "kind": "listOf",
                     "of": {
-                        "kind": "text"
+                        "kind": "path"
                     },
                     "required": true,
                     "minItems": 1
@@ -4003,7 +4048,7 @@
             "params": [
                 {
                     "name": "path",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 }
             ],
@@ -4094,7 +4139,7 @@
             "params": [
                 {
                     "name": "path",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 },
                 {
@@ -4150,7 +4195,7 @@
             "params": [
                 {
                     "name": "path",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 },
                 {
@@ -4230,7 +4275,7 @@
                     "entry": [
                         {
                             "name": "path",
-                            "kind": "text",
+                            "kind": "path",
                             "required": true
                         },
                         {
@@ -4313,7 +4358,7 @@
             "params": [
                 {
                     "name": "path",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 },
                 {
@@ -4358,7 +4403,7 @@
             "params": [
                 {
                     "name": "path",
-                    "kind": "text",
+                    "kind": "path",
                     "required": true
                 },
                 {
@@ -4416,7 +4461,7 @@
             "params": [
                 {
                     "name": "scene",
-                    "kind": "text",
+                    "kind": "path",
                     "required": false,
                     "default": "main"
                 },
@@ -4432,7 +4477,7 @@
                     "entry": [
                         {
                             "name": "path",
-                            "kind": "text",
+                            "kind": "path",
                             "required": true
                         },
                         {
@@ -5021,7 +5066,7 @@
             "params": [
                 {
                     "name": "scene",
-                    "kind": "text",
+                    "kind": "path",
                     "required": false
                 },
                 {
@@ -5034,7 +5079,7 @@
                 },
                 {
                     "name": "saveTo",
-                    "kind": "text",
+                    "kind": "path",
                     "required": false,
                     "note": "A path inside the project. The first frame is written there and the answer carries the path instead of the bytes. A directory this creates gets a .gdignore, so captures are not imported as assets."
                 }
@@ -5090,7 +5135,7 @@
             "params": [
                 {
                     "name": "saveTo",
-                    "kind": "text",
+                    "kind": "path",
                     "required": false,
                     "note": "A path inside the project. The first frame is written there and the answer carries the path instead of the bytes. A directory this creates gets a .gdignore, so captures are not imported as assets."
                 }
@@ -5394,7 +5439,7 @@
                 },
                 {
                     "name": "saveTo",
-                    "kind": "text",
+                    "kind": "path",
                     "required": false,
                     "note": "A path inside the project. A directory this creates gets a .gdignore, so captures are not imported as assets."
                 }

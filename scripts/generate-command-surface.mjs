@@ -104,6 +104,7 @@ const WRITES = ['projectSetting', 'editorSetting', 'scriptText']
 
 const KINDS = [
     'text',
+    'path',
     'int',
     'number',
     'flag',
@@ -116,7 +117,7 @@ const KINDS = [
 ]
 
 /** What a `default` may be, per kind. A kind absent here takes no default at all. */
-const DEFAULTS = {text: 'string', choice: 'string', int: 'number'}
+const DEFAULTS = {text: 'string', path: 'string', choice: 'string', int: 'number'}
 
 function checkKind(path, entry, param, vocabularies) {
     const where = `${path}: ${entry.tool} ${entry.op} ${param.name ?? '(unnamed)'}`
@@ -488,7 +489,7 @@ function rustFallback(value) {
 
 function rustOperation(entry) {
     const declared = (entry.params ?? []).map(rustParam)
-    const accepted = (entry.accepts ?? []).map(name => `hidden("${name}", Text)`)
+    const accepted = (entry.accepts ?? []).map(one => `hidden("${one.name}", ${rustKind(one)})`)
     const params = [...declared, ...accepted].join(', ')
     const answers = entry.command ? `Answers::Addon(${rustString(entry.command)})` : 'Answers::Rust'
     let call = `op(${rustString(entry.tool)}, ${rustString(entry.op)}, ${rustString(entry.summary)}, ${answers}, &[${params}])`
@@ -651,7 +652,7 @@ function declaredByParams(entry) {
         required: carried.filter(param => param.required && !param.hidden).map(param => param.name),
         optional: [
             ...carried.filter(param => !param.required || param.hidden).map(param => param.name),
-            ...(entry.accepts ?? [])
+            ...(entry.accepts ?? []).map(one => one.name)
         ]
     }
 }
@@ -1021,7 +1022,7 @@ function commandParams(entry) {
     return [
         ...carried.filter(param => param.required && !param.hidden),
         ...carried.filter(param => !param.required || param.hidden),
-        ...(entry.accepts ?? []).map(name => ({name, kind: 'text', required: false}))
+        ...(entry.accepts ?? []).map(one => ({...one, required: false}))
     ]
 }
 

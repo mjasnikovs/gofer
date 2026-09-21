@@ -1225,7 +1225,7 @@ fn route_one<R: Runtime>(
     let op = operation.op;
     match operation.route() {
         tool_params::Answers::Addon(command) => {
-            a_path_that_climbs_out(&params)?;
+            a_path_that_climbs_out(operation, &params)?;
             if domain.name == "godot_runtime" {
                 godot_session::a_game_the_debugger_has_halted(op)?;
             }
@@ -1458,7 +1458,7 @@ fn touches_a_file(operation: &Operation) -> bool {
     fn anywhere(params: &[tool_params::Param]) -> bool {
         params
             .iter()
-            .any(|param| names_a_path(param.name) || anywhere(param.entry))
+            .any(|param| declares_a_path(param) || anywhere(param.entry))
     }
     anywhere(operation.params)
 }
@@ -1701,7 +1701,7 @@ fn as_the_worktree_names_them(operation: &Operation, params: &mut Value) {
 
 /// One declared parameter, and everything the table says lives inside it.
 fn worktree_relative(param: &tool_params::Param, value: &mut Value) {
-    if names_a_path(param.name) {
+    if declares_a_path(param) {
         match value.as_array_mut() {
             Some(entries) => entries.iter_mut().for_each(strip_the_scheme),
             None => strip_the_scheme(value),
@@ -1745,7 +1745,7 @@ fn wherever_a_key_names_a_path(value: &mut Value) {
         Value::Array(entries) => entries.iter_mut().for_each(wherever_a_key_names_a_path),
         Value::Object(fields) => {
             for (key, held) in fields.iter_mut() {
-                if names_a_path(key) {
+                if key == A_NESTED_KEY_THAT_NAMES_A_FILE {
                     strip_the_scheme(held);
                 }
                 wherever_a_key_names_a_path(held);
@@ -1767,7 +1767,7 @@ fn paths_named(operation: &Operation, params: &Value) -> Vec<String> {
     operation
         .params
         .iter()
-        .filter(|param| names_a_path(param.name))
+        .filter(|param| declares_a_path(param))
         .filter_map(|param| object.get(param.name).and_then(Value::as_str))
         .map(str::to_owned)
         .collect()
@@ -1787,17 +1787,33 @@ fn paths_named(operation: &Operation, params: &Value) -> Vec<String> {
 /// task worktree can be named at all".
 ///
 /// A `..` inside a *path* is what is refused, not a `..` inside a value: a Label's `text` may say
-/// anything, so a string counts as a path only when it carries the scheme or a separator.
-fn a_path_that_climbs_out(params: &Value) -> Result<(), ToolFailure> {
-    fn climbing<'a>(under: &str, value: &'a Value) -> Option<&'a str> {
+/// anything, and a `godot_runtime` node path is `/root/Main/..` on purpose. So a string counts as
+/// a path only when it carries the scheme, or when the operation declared the parameter holding it
+/// as one.
+fn a_path_that_climbs_out(operation: &Operation, params: &Value) -> Result<(), ToolFailure> {
+    fn climbing(named: bool, value: &Value) -> Option<&str> {
         match value {
-            Value::String(text) => climbs(under, text).then_some(text.as_str()),
-            Value::Array(items) => items.iter().find_map(|item| climbing(under, item)),
-            Value::Object(fields) => fields.iter().find_map(|(key, held)| climbing(key, held)),
+            Value::String(text) => climbs(named, text).then_some(text.as_str()),
+            Value::Array(items) => items.iter().find_map(|item| climbing(named, item)),
+            Value::Object(fields) => fields
+                .iter()
+                .find_map(|(key, held)| climbing(key == A_NESTED_KEY_THAT_NAMES_A_FILE, held)),
             _ => None,
         }
     }
-    match climbing("", params) {
+    let declared = |key: &str| {
+        operation
+            .params
+            .iter()
+            .any(|param| param.name == key && declares_a_path(param))
+    };
+    let found = match params.as_object() {
+        Some(fields) => fields
+            .iter()
+            .find_map(|(key, held)| climbing(declared(key), held)),
+        None => climbing(false, params),
+    };
+    match found {
         None => Ok(()),
         Some(text) => Err(ToolFailure::new(
             "outside_workspace",
@@ -1810,31 +1826,31 @@ fn a_path_that_climbs_out(params: &Value) -> Result<(), ToolFailure> {
     }
 }
 
-/// The keys whose value is a file, so that a `..` in one is a path climbing and not prose.
+/// Whether a declared parameter carries a file the worktree holds, or a directory inside it.
 ///
-/// A node's `text` may say anything, `../docs/readme` included, and refusing that would be this
-/// gate inventing a rule nobody has. A string that carries the scheme is a path wherever it sits,
-/// and everything else has to be named here. `path` covers the nested one a resource value holds:
-/// `{"type": "Resource", "value": {"path": "res://…"}}` arrives under that key like any other.
-const A_KEY_THAT_NAMES_A_FILE: [&str; 9] = [
-    "path", "paths", "texture", "scene", "file", "files", "from", "to", "saveTo",
-];
-
-/// A directory a listing narrows to, which is a path spelled the way a file is.
-///
-/// Beside the file keys rather than inside them because it names a folder rather than a file, and
-/// the two questions asked of both — is this string a path, and does it carry the scheme — have
-/// one answer. `named_directory` took the scheme off itself for as long as this was the only key
-/// nothing else reached.
-const A_KEY_THAT_NAMES_A_DIRECTORY: &str = "under";
-
-/// Whether a key names a path at all: a file the worktree holds, or a directory inside it.
-fn names_a_path(key: &str) -> bool {
-    key == A_KEY_THAT_NAMES_A_DIRECTORY || A_KEY_THAT_NAMES_A_FILE.contains(&key)
+/// The operation's own row says so, through [`tool_params::Kind::Path`]. It was nine parameter
+/// names listed here, and a name decided three things it could not know: an operation whose path
+/// parameter was called anything else went through the confinement gate unexamined, and
+/// `godot_runtime`'s `path` — a node in the running game, where `..` is the parent node — was
+/// refused for climbing out of a project it never named.
+fn declares_a_path(param: &tool_params::Param) -> bool {
+    match param.kind {
+        tool_params::Kind::Path => true,
+        tool_params::Kind::ListOf(inner) => *inner == tool_params::Kind::Path,
+        _ => false,
+    }
 }
 
-/// Whether a string is a path, and climbs.
-fn climbs(under: &str, text: &str) -> bool {
+/// The one key that names a file inside a shape the catalogue does not describe.
+///
+/// A tagged `Resource` arrives as `{"type": "Resource", "value": {"path": "res://…"}}`, and what a
+/// tagged value carries is the protocol's rather than a row of `params.json`. Everything else that
+/// holds a path is a declared parameter, and a string carrying the scheme is a path wherever it
+/// sits without any key saying so.
+const A_NESTED_KEY_THAT_NAMES_A_FILE: &str = "path";
+
+/// Whether a string is a path, and climbs. `named` is what the position it sits in already said.
+fn climbs(named: bool, text: &str) -> bool {
     let (path, schemed) = match text
         .strip_prefix("res://")
         .or_else(|| text.strip_prefix("user://"))
@@ -1842,7 +1858,7 @@ fn climbs(under: &str, text: &str) -> bool {
         Some(rest) => (rest, true),
         None => (text, false),
     };
-    if !schemed && !names_a_path(under) {
+    if !schemed && !named {
         return false;
     }
     path.split('/').any(|segment| segment == "..") || (!schemed && path == "..")
@@ -3099,8 +3115,8 @@ mod tests {
                     }
                 };
                 for param in operation.params {
-                    if names_a_path(param.name)
-                        && matches!(param.kind, crate::tool_params::Kind::ListOf(_))
+                    if matches!(param.kind, crate::tool_params::Kind::ListOf(inner)
+                        if *inner == crate::tool_params::Kind::Path)
                     {
                         let answered = normalised(
                             domain.name,
@@ -3117,9 +3133,7 @@ mod tests {
                         );
                         checked += 1;
                     }
-                    if names_a_path(param.name)
-                        && matches!(param.kind, crate::tool_params::Kind::Text)
-                    {
+                    if matches!(param.kind, crate::tool_params::Kind::Path) {
                         let answered = normalised(
                             domain.name,
                             operation.op,
@@ -3146,7 +3160,7 @@ mod tests {
                         checked += 1;
                     }
                     for inner in param.entry {
-                        if !names_a_path(inner.name) {
+                        if !declares_a_path(inner) {
                             continue;
                         }
                         let answered = normalised(
@@ -3202,32 +3216,93 @@ mod tests {
             )["paths"][0],
             "../secrets.gd"
         );
-        for climbing in [
-            json!({"path": "res://../escaped.png"}),
-            json!({"path": "../escaped.png"}),
-            json!({"path": "assets/../../escaped.png"}),
-            json!({"path": "user://../escaped.png"}),
-            json!({"texture": "res://a.png", "tiles": ["res://../x.png"]}),
-            json!({"properties": [{"value": {"type": "Resource", "value": {"path": "res://../x.tres"}}}]}),
+        // Each case names the operation it is written against, because the row is what decides:
+        // the same `path` is a file under `godot_resource` and a node under `godot_runtime`.
+        let row = |tool: &str, op: &str| {
+            crate::tool_params::operation_of(tool, op)
+                .unwrap_or_else(|| panic!("{tool}.{op} is a catalogue operation"))
+        };
+        for (tool, op, climbing) in [
+            (
+                "godot_resource",
+                "create_texture",
+                json!({"path": "res://../escaped.png"}),
+            ),
+            (
+                "godot_resource",
+                "create_texture",
+                json!({"path": "../escaped.png"}),
+            ),
+            (
+                "godot_resource",
+                "create_texture",
+                json!({"path": "assets/../../escaped.png"}),
+            ),
+            (
+                "godot_resource",
+                "create_texture",
+                json!({"path": "user://../escaped.png"}),
+            ),
+            (
+                "godot_resource",
+                "create_tileset",
+                json!({"texture": "res://a.png", "tiles": ["res://../x.png"]}),
+            ),
+            (
+                "godot_node",
+                "set_properties",
+                json!({"properties": [{"value": {"type": "Resource", "value": {"path": "res://../x.tres"}}}]}),
+            ),
+            (
+                "godot_node",
+                "set_properties",
+                json!({"properties": [{"value": {"type": "String", "value": "res://../secrets"}}]}),
+            ),
         ] {
-            let refused = a_path_that_climbs_out(&climbing).expect_err("a climbing path");
-            assert_eq!(refused.code, "outside_workspace", "{climbing}");
+            let refused =
+                a_path_that_climbs_out(row(tool, op), &climbing).expect_err("a climbing path");
+            assert_eq!(refused.code, "outside_workspace", "{tool} {op} {climbing}");
         }
-        for ordinary in [
-            json!({"path": "res://assets/tiles.png"}),
-            json!({"value": {"type": "String", "value": "Loading.."}}),
-            json!({"properties": [{"property": "text", "value": {"type": "String", "value": "see ../docs/readme"}}]}),
-            json!({"name": "a..b"}),
-            json!({"query": "physics/2d/default_gravity"}),
+        for (tool, op, ordinary) in [
+            (
+                "godot_resource",
+                "create_texture",
+                json!({"path": "res://assets/tiles.png"}),
+            ),
+            (
+                "godot_project",
+                "set_setting",
+                json!({"value": {"type": "String", "value": "Loading.."}}),
+            ),
+            (
+                "godot_node",
+                "set_properties",
+                json!({"properties": [{"property": "text", "value": {"type": "String", "value": "see ../docs/readme"}}]}),
+            ),
+            ("godot_node", "rename", json!({"name": "a..b"})),
+            (
+                "godot_project",
+                "search_settings",
+                json!({"query": "physics/2d/default_gravity"}),
+            ),
+            // A node path is not a file path, and `..` is how it names a parent node. The nine
+            // key names this gate used to read refused every one of these.
+            (
+                "godot_runtime",
+                "set_property",
+                json!({"path": "/root/Main/../Other", "property": "text", "value": {"type": "String", "value": "hi"}}),
+            ),
+            (
+                "godot_runtime",
+                "inspect_node",
+                json!({"path": "/root/Main/../Other"}),
+            ),
         ] {
-            assert!(a_path_that_climbs_out(&ordinary).is_ok(), "{ordinary}");
+            assert!(
+                a_path_that_climbs_out(row(tool, op), &ordinary).is_ok(),
+                "{tool} {op} {ordinary}"
+            );
         }
-        assert!(
-            a_path_that_climbs_out(&json!({
-                "properties": [{"value": {"type": "String", "value": "res://../secrets"}}]
-            }))
-            .is_err(),
-        );
 
         let directory = tempfile::TempDir::new().expect("temporary directory");
         let workspace = crate::files::Workspace::open(directory.path()).expect("open workspace");
@@ -3263,7 +3338,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("godot_script {op} names its paths"));
             assert_eq!(
                 paths.kind,
-                crate::tool_params::Kind::ListOf(&crate::tool_params::Kind::Text),
+                crate::tool_params::Kind::ListOf(&crate::tool_params::Kind::Path),
                 "godot_script {op} must take a list of script paths"
             );
             assert!(paths.required, "godot_script {op} needs a path to work on");

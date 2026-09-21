@@ -19,6 +19,9 @@ function wordsOf(kind) {
 
 export function jsonSchemaOfKind(kind) {
     switch (kind.kind) {
+        // A path is a string to the sampler: the kind says what the router may confine, not what
+        // the model writes, so the emitted schema has to stay byte for byte what `text` emitted.
+        case 'path':
         case 'text': {
             const words = wordsOf(kind)
             return words ? {type: 'string', enum: words} : {type: 'string'}

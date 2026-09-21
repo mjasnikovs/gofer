@@ -359,7 +359,7 @@ fn path(where_: &str, name: &str) -> String {
 /// Whether a value is of a kind. Shape only: nothing here needs the editor or the filesystem.
 fn fits(kind: Kind, value: &Value) -> bool {
     match kind {
-        Kind::Text => value.is_string(),
+        Kind::Text | Kind::Path => value.is_string(),
         Kind::Int => value.is_i64() || value.is_u64(),
         Kind::Number => value.is_number(),
         Kind::Flag => value.is_boolean(),
@@ -383,6 +383,7 @@ fn is_hash(text: &str) -> bool {
 fn wanted(kind: Kind) -> String {
     match kind {
         Kind::Text => "a string".to_owned(),
+        Kind::Path => "a path".to_owned(),
         Kind::Int => "a whole number".to_owned(),
         Kind::Number => "a number".to_owned(),
         Kind::Flag => "true or false".to_owned(),
@@ -967,7 +968,7 @@ mod tests {
     /// under test is whether the call is read as this operation's, not whether it is sensible.
     fn something_of(kind: Kind) -> Value {
         match kind {
-            Kind::Text => json!("a"),
+            Kind::Text | Kind::Path => json!("a"),
             Kind::Hash => json!("0".repeat(64)),
             Kind::Int => json!(1),
             Kind::Number => json!(1.5),
@@ -1577,7 +1578,7 @@ mod tests {
     fn the_signature_carries_the_shape_inside_a_list() {
         assert_eq!(
             signature(params_of("godot_script", "edit").expect("edit declares its parameters")),
-            "{files: list of {path: text, edits: list of {oldText: text, newText: text}}}"
+            "{files: list of {path: path, edits: list of {oldText: text, newText: text}}}"
         );
     }
 
@@ -2025,7 +2026,7 @@ mod tests {
             params_of("godot_node", "instantiate").expect("node.instantiate is in the table");
         assert_eq!(
             signature(params),
-            "{parent: text, path: text, name?: text, index?: int}"
+            "{parent: text, path: path, name?: text, index?: int}"
         );
         assert_eq!(signature(&[]), "");
     }

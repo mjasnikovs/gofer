@@ -107,6 +107,7 @@ function rustString(text) {
  */
 function rustType(kind, owner, field, nest) {
     switch (kind.kind) {
+        case 'path':
         case 'text':
             return 'String'
         case 'int':
@@ -215,6 +216,7 @@ export function rustResults(shapes, commands, operations) {
 
 function typescriptType(kind, shapes) {
     switch (kind.kind) {
+        case 'path':
         case 'text':
             return 'string'
         case 'int':

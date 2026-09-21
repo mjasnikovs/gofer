@@ -1,8 +1,8 @@
 import {readFile} from 'node:fs/promises'
 import {engineWords, readVocabulary} from './godot-vocabulary.mjs'
 
-function hidden(name) {
-    return {name, kind: 'text', required: false, hidden: true}
+function hidden(accepted) {
+    return {...accepted, required: false, hidden: true}
 }
 
 /** A vocabulary name replaced by the words the engine publishes under it, everywhere it appears. */
