@@ -1227,7 +1227,7 @@ fn route_one<R: Runtime>(
         tool_params::Answers::Addon(command) => {
             a_path_that_climbs_out(operation, &params)?;
             if domain.name == "godot_runtime" {
-                godot_session::a_game_the_debugger_has_halted(op)?;
+                crate::session_diagnosis::a_game_the_debugger_has_halted(op)?;
             }
             let save_to = matches!(
                 command,
@@ -1270,7 +1270,8 @@ fn route_one<R: Runtime>(
                 if answered.is_ok() && op == "stop" {
                     crate::debug::note_the_game_is_gone();
                 }
-                return answered.map_err(godot_session::carrying_the_error_that_ended_the_game);
+                return answered
+                    .map_err(crate::session_diagnosis::carrying_the_error_that_ended_the_game);
             }
             Ok(answered?)
         }

@@ -67,6 +67,16 @@ cannot be killed, and its addon must not be pulled out from under a directory Go
 the state of. What they share is an order — clients before the process, the run closed after it, the
 addon out last — and that order is `end_session`, not a habit two functions have.
 
+**Diagnosis** — what the model is told when a runtime call could not be answered, and it is a fold
+rather than a sentence written where the failure was caught. The addon knows a call went unanswered
+and knows nothing about why: the reason is on the editor's own stderr, or in the debugger holding
+the game, or in a breakpoint this session armed, or in a `project.godot` that has stopped
+registering the runtime helper. `SessionFacts` gathers those seven facts once — the only part of it
+that touches anything outside itself — and every explainer is arithmetic over that value, which is
+why an armed breakpoint can be asserted without forging another module's globals. It is
+`src-tauri/src/session_diagnosis.rs`. Distinct from **Failure**, which is the shape a rejection has;
+this is what a runtime rejection is given to say.
+
 **Addon** — the GDScript plugin Gofer stages into the project, which answers protocol commands from
 inside the editor. Six scripts: `plugin.gd` in the editor, `runtime.gd` in the running game, and
 `protocol.gd`, `params.gd`, `project_config.gd` and `runtime_queue.gd` beside both.

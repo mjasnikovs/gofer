@@ -65,6 +65,7 @@ mod rag;
 mod read_ledger;
 mod remember;
 mod script;
+mod session_diagnosis;
 mod settings;
 mod skills;
 mod storage;

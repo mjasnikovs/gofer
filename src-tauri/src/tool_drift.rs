@@ -1235,14 +1235,14 @@ fn mutating_operations_document_the_revision_they_require() {
 #[test]
 fn the_line_the_editor_talks_to_itself_with_is_the_one_the_filter_drops() {
     assert!(
-        crate::godot_session::is_the_editor_talking_to_itself(
+        crate::session_diagnosis::is_the_editor_talking_to_itself(
             "ERROR: Couldn't find the given section \"res://scripts/player.gd\" and key \"state\", \
              and no default was given."
         ),
         "the filter has to be about that line"
     );
     assert!(
-        !crate::godot_session::is_the_editor_talking_to_itself(
+        !crate::session_diagnosis::is_the_editor_talking_to_itself(
             "ERROR: Failed loading resource: res://scenes/level_one.tscn."
         ),
         "and a real project error is not it"
