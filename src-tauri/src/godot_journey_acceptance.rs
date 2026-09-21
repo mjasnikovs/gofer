@@ -584,7 +584,7 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
     let broken = journey.open_script(BROKEN_PATH);
     assert_eq!(
         broken["text"],
-        crate::ai_tools::numbered_lines(BROKEN_SCRIPT)
+        crate::script_answers::numbered_lines(BROKEN_SCRIPT)
     );
     let reported = journey.call(
         "godot_script",

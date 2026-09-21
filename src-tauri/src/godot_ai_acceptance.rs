@@ -530,7 +530,7 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
 
     assert_eq!(
         results[4]["files"][0]["text"],
-        crate::ai_tools::numbered_lines(BROKEN_SCRIPT)
+        crate::script_answers::numbered_lines(BROKEN_SCRIPT)
     );
     assert_eq!(
         results[5]["files"][0]["published"],

@@ -22,6 +22,8 @@ mod clipboard;
 mod command_error;
 mod command_line;
 mod debug;
+#[cfg(all(test, feature = "godot-acceptance"))]
+mod dispatch_ledger;
 mod files;
 mod gdformat;
 mod git;
@@ -65,7 +67,9 @@ mod rag;
 mod read_ledger;
 mod remember;
 mod script;
+mod script_answers;
 mod session_diagnosis;
+mod session_output;
 mod settings;
 mod skills;
 mod storage;
@@ -74,6 +78,7 @@ mod tool_check;
 /// The catalogue's parameter contract, checked against everything that reads it. Tests only.
 mod tool_drift;
 mod tool_params;
+mod tool_paths;
 mod tool_results;
 mod unsaved_work;
 mod workers;

@@ -18,16 +18,32 @@
 //! Every call also passes [`crate::approvals`] on its way in: most operations are auto-allowed
 //! because the worktree and the editor's undo stack can take them back, and the few that leave both
 //! of those nets wait for the user before they reach a handler.
+//!
+//! What is *not* here is the arithmetic each answer needs, which was two thirds of this file and
+//! none of it routing: [`crate::tool_paths`] for which parameter names a file and what to do about
+//! it, [`crate::script_answers`] for a language-server answer the model can read,
+//! [`crate::session_output`] for the editor's output, and [`crate::dispatch_ledger`] for what the
+//! acceptance suite records. A change to how a terminal escape sequence is stripped from a Godot
+//! log line used to edit the router.
 
 use crate::approvals;
 use crate::debug::{self, DebugRequest};
 use crate::files;
 use crate::gdformat;
-use crate::godot_session::{self, LogQuery};
+use crate::godot_session;
 use crate::godot_session_api::{self, CallGodotRequest, StartGodotSessionRequest};
 use crate::rag;
 use crate::script::{self, ScriptRequest};
+use crate::script_answers::{
+    a_completion_the_model_can_read, answer_names_nothing, numbered_lines, the_whole_file,
+    with_the_placeholder_the_range_holds, with_where_the_cursor_was, withholds_the_text,
+};
+use crate::session_output::logs_domain;
 use crate::tool_params::{self, Operation, Sharing};
+use crate::tool_paths::{
+    a_path_that_climbs_out, as_the_worktree_names_them, declares_a_path, is_goferns_own, is_under,
+    named_directory, paths_named, reject_outside_paths,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Runtime};
@@ -1047,81 +1063,17 @@ fn expecting_what_the_last_entry_produced(entry: &Requested, revision: Option<i6
     params
 }
 
-/// The ledger of operations a real editor answered, kept only while the acceptance suite or a
-/// live turn runs.
-///
-/// The catalogue promises the model an operation, and only a run proves it still answers. The
-/// suite is one process per test with several in flight, so each write opens the file, appends one
-/// line and closes it: an `O_APPEND` write lands whole for a line under `PIPE_BUF`, so parallel
-/// processes interleave lines instead of clobbering each other. A line holding a script's whole
-/// text can be longer than that, and the live turn is one process, which is the only reader that
-/// asks for the parameters.
-#[cfg(all(test, feature = "godot-acceptance"))]
-pub(crate) mod dispatch_ledger {
-    use super::ToolFailure;
-    use serde_json::{Value, json};
-    use std::io::Write;
-
-    /// Where `scripts/godot-acceptance.mjs` and `scripts/live-turn.mjs` want the ledger. Unset
-    /// everywhere else, and then nothing is written.
-    pub(crate) const LEDGER: &str = "GOFER_DISPATCH_LEDGER";
-
-    /// One dispatched operation as a JSON line: `op` spelled the way
-    /// `protocol/schemas/v2/godot-tool.json` spells it, which is what the complement is computed
-    /// against; `code` and `message` of the failure, or null; the milliseconds it took; and the
-    /// parameters the router handed the handler.
-    pub(crate) fn line(
-        domain: &str,
-        op: &str,
-        params: &Value,
-        answered: &Result<Value, ToolFailure>,
-        ms: u128,
-    ) -> String {
-        let failure = answered.as_ref().err();
-        let mut line = json!({
-            "op": format!("{}.{op}", domain.strip_prefix("godot_").unwrap_or(domain)),
-            "code": failure.map(|f| f.code.clone()),
-            "message": failure.map(|f| f.message.clone()),
-            "ms": ms,
-            "params": params,
-        })
-        .to_string();
-        line.push('\n');
-        line
-    }
-
-    pub(crate) fn record(
-        domain: &str,
-        op: &str,
-        params: &Value,
-        answered: &Result<Value, ToolFailure>,
-        ms: u128,
-    ) {
-        let Ok(path) = std::env::var(LEDGER) else {
-            return;
-        };
-        let Ok(mut ledger) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        else {
-            return;
-        };
-        let _ = ledger.write_all(line(domain, op, params, answered, ms).as_bytes());
-    }
-}
-
 /// Records that this operation reached its handler, and what came back. Compiles to nothing
 /// outside the suite.
 #[cfg(all(test, feature = "godot-acceptance"))]
-fn record_dispatched(
+pub(crate) fn record_dispatched(
     domain: &ToolDomain,
     operation: &Operation,
     params: &Value,
     answered: &Result<Value, ToolFailure>,
     started: std::time::Instant,
 ) {
-    dispatch_ledger::record(
+    crate::dispatch_ledger::record(
         domain.name,
         operation.op,
         params,
@@ -1131,71 +1083,13 @@ fn record_dispatched(
 }
 
 #[cfg(not(all(test, feature = "godot-acceptance")))]
-fn record_dispatched(
+pub(crate) fn record_dispatched(
     _domain: &ToolDomain,
     _operation: &Operation,
     _params: &Value,
     _answered: &Result<Value, ToolFailure>,
     _started: std::time::Instant,
 ) {
-}
-
-#[cfg(all(test, feature = "godot-acceptance"))]
-mod ledger_acceptance_tests {
-    use super::*;
-
-    /// The runner reads what this writes, so the line format is a contract between two files.
-    #[test]
-    fn the_hook_appends_one_json_line_per_dispatched_operation() {
-        let directory = tempfile::tempdir().expect("a directory for the ledger");
-        let ledger = directory.path().join("dispatch-ledger.jsonl");
-        let held = std::env::var(dispatch_ledger::LEDGER).ok();
-        // SAFETY: the acceptance runner gives each test its own process.
-        unsafe { std::env::set_var(dispatch_ledger::LEDGER, &ledger) };
-
-        let started = std::time::Instant::now();
-        record_dispatched(
-            &ToolDomain {
-                name: "godot_scene",
-                operations: &[],
-            },
-            tool_params::operation_of("godot_scene", "open")
-                .expect("scene.open is a catalogue row"),
-            &json!({"path": "res://scenes/main.tscn"}),
-            &Ok(json!({"opened": true})),
-            started,
-        );
-        record_dispatched(
-            &ToolDomain {
-                name: "godot_docs_search",
-                operations: &[],
-            },
-            tool_params::operation_of("godot_docs_search", "ask")
-                .expect("docs_search.ask is a catalogue row"),
-            &json!({"question": "what is a Timer"}),
-            &Err(ToolFailure::new("docs_unavailable", "no index")),
-            started,
-        );
-
-        // SAFETY: as above.
-        match held {
-            Some(path) => unsafe { std::env::set_var(dispatch_ledger::LEDGER, path) },
-            None => unsafe { std::env::remove_var(dispatch_ledger::LEDGER) },
-        }
-        let lines: Vec<Value> = std::fs::read_to_string(&ledger)
-            .expect("the ledger the hook opened")
-            .lines()
-            .map(|line| serde_json::from_str(line).expect("a JSON line"))
-            .collect();
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0]["op"], "scene.open");
-        assert_eq!(lines[0]["code"], Value::Null);
-        assert_eq!(lines[0]["params"]["path"], "res://scenes/main.tscn");
-        assert_eq!(lines[1]["op"], "docs_search.ask");
-        assert_eq!(lines[1]["code"], "docs_unavailable");
-        assert_eq!(lines[1]["message"], "no index");
-        assert!(lines[1]["ms"].is_u64());
-    }
 }
 
 /// One operation, routed to the handler the renderer uses for the same thing.
@@ -1527,53 +1421,6 @@ fn forget_a_vanished_file<R: Runtime>(app: &AppHandle<R>, path: &str, failure: &
     }
 }
 
-/// A directory named the way the project names it, whichever way it was written.
-///
-/// `res://` and stray slashes are taken off, because a model that has been reading scene paths all
-/// turn writes `res://assets` as readily as `assets`, and both mean the same folder. The scheme is
-/// off before this sees it now — `under` is a path the operation declares, so the router normalises
-/// it with every other one — and the trim stays as the backstop it always was.
-///
-/// The root is no directory at all, and that is what `None` says. `res://`, `/` and `.` all come
-/// out of the trimming with nothing left, and nothing was matched as a prefix against every
-/// worktree-relative path — so `godot_resource list` and `godot_script list` answered
-/// `{"files": []}` about a worktree full of files. `res://` is the spelling a model reaching for
-/// the whole project writes, precisely because this helper accepts it everywhere else.
-fn named_directory(named: &str) -> Option<String> {
-    let trimmed = named
-        .trim()
-        .trim_start_matches("res://")
-        .trim_matches('/')
-        .trim();
-    (!trimmed.is_empty() && trimmed != ".").then(|| trimmed.to_owned())
-}
-
-/// Whether a path is Gofer's own staged addon rather than anything in the project.
-///
-/// `addons/gofer` is not the user's code and Gofer says so itself: it stages the directory into the
-/// worktree on session start and writes `addons/gofer/` into the checkout's Git exclude file, under
-/// the marker "the managed Godot addon is never part of the project". Listing it contradicts that,
-/// and it is the *first* thing most turns read — ten of the sixteen entries in a bare fixture's
-/// listing are it.
-///
-/// The cost is not the bytes. A live turn stuck on a runtime call that would not answer stopped
-/// working on the game and spent four subagent calls reading `addons/gofer/runtime.gd` to work out
-/// why — debugging Gofer instead of the thing it was asked to build, down a road it only knew about
-/// because the listing named it. A file nobody may usefully change does not belong in the answer to
-/// "what is in this project".
-fn is_goferns_own(path: &str) -> bool {
-    path == crate::addon::ADDON_DIRECTORY
-        || path.starts_with(&format!("{}/", crate::addon::ADDON_DIRECTORY))
-}
-
-/// Whether one worktree-relative path sits inside that directory. No directory means every path.
-fn is_under(path: &str, under: Option<&str>) -> bool {
-    under.is_none_or(|under| {
-        path.strip_prefix(under)
-            .is_some_and(|rest| rest.starts_with('/'))
-    })
-}
-
 fn resource_domain<R: Runtime>(
     app: &AppHandle<R>,
     op: &str,
@@ -1640,231 +1487,6 @@ fn tell_the_editor_the_worktree_moved<R: Runtime>(app: &AppHandle<R>) {
     crate::script::reparse_open_documents();
 }
 
-/// Resolves every path a gated call names before the user is asked about it. Outside-worktree
-/// files are refused outright — "outside the worktree" is not a decision to put in front of the
-/// user one file at a time — and the resolution is the workspace's own, so this check cannot drift
-/// from the one the operation itself will run.
-fn reject_outside_paths<R: Runtime>(
-    app: &AppHandle<R>,
-    operation: &Operation,
-    params: &Value,
-) -> Result<(), ToolFailure> {
-    let named = paths_named(operation, params);
-    if named.is_empty() {
-        return Ok(());
-    }
-    let workspace = crate::active_workspace(app)?;
-    for path in &named {
-        workspace.resolve(path)?;
-    }
-    Ok(())
-}
-
-/// Rewrites `res://…` into the worktree-relative path the file tools take, once, for every
-/// operation the desktop answers itself.
-///
-/// Two conventions meet in this catalog and neither is wrong: the editor names a file the way Godot
-/// does, `res://scripts/mario.gd`, and everything that reaches the filesystem names it the way the
-/// worktree does, `scripts/mario.gd`. A model has no way to know which domain wants which, and it
-/// reaches for `res://` because that is what it just used to build the scene — then `godot_script
-/// open` answers that the file does not exist, about a file it wrote a moment ago. The mapping is
-/// exact, so it is done here rather than explained. Confinement is untouched: what is left after
-/// the prefix is still a relative path, so `res://../secrets` is refused exactly as `../secrets` is.
-///
-/// It runs in `dispatch_under`, before anything is held to the parameters, because an arm that has
-/// to remember to call it is an arm that can forget to.
-/// `script_domain` and `debug_domain` called it; `resource_domain` never did, and nothing failed —
-/// `files::validate_relative` strips the scheme too, so an unnormalised `delete` reached the right
-/// file while [`crate::read_ledger`], which keys on the string the caller wrote, missed every
-/// record for it. The delete then ran with no hash to be held to at all.
-///
-/// Which parameters are paths is the operation's own row rather than a list kept here: a name the
-/// table declares as a path is rewritten wherever it sits, including inside the `entry` shape a
-/// list of files declares, so a new operation inherits this by declaring its parameters.
-///
-/// Only the operations [`tool_params::Answers::Rust`] answers. Everything routed to the addon is
-/// forwarded verbatim and the addon names files the way Godot does — `_as_resource_path` puts the
-/// scheme back on a worktree-relative path, and `project.set_autoload` refuses a path that does not
-/// carry it, because that string is written into `project.godot` for the engine to load.
-fn as_the_worktree_names_them(operation: &Operation, params: &mut Value) {
-    if operation.route() != tool_params::Answers::Rust {
-        return;
-    }
-    let Some(object) = params.as_object_mut() else {
-        return;
-    };
-    for param in operation.params {
-        if let Some(value) = object.get_mut(param.name) {
-            worktree_relative(param, value);
-        }
-    }
-}
-
-/// One declared parameter, and everything the table says lives inside it.
-fn worktree_relative(param: &tool_params::Param, value: &mut Value) {
-    if declares_a_path(param) {
-        match value.as_array_mut() {
-            Some(entries) => entries.iter_mut().for_each(strip_the_scheme),
-            None => strip_the_scheme(value),
-        }
-    }
-    match param.entry {
-        [_, ..] => {
-            for entry in entries_of(value) {
-                let Some(fields) = entry.as_object_mut() else {
-                    continue;
-                };
-                for inner in param.entry {
-                    if let Some(held) = fields.get_mut(inner.name) {
-                        worktree_relative(inner, held);
-                    }
-                }
-            }
-        }
-        [] if value.is_array() || value.is_object() => wherever_a_key_names_a_path(value),
-        [] => (),
-    }
-}
-
-/// The entries of a list parameter, or the single object one that is not a list.
-fn entries_of(value: &mut Value) -> &mut [Value] {
-    match value {
-        Value::Array(entries) => entries.as_mut_slice(),
-        other => std::slice::from_mut(other),
-    }
-}
-
-fn strip_the_scheme(value: &mut Value) {
-    if let Some(path) = value.as_str().and_then(|path| path.strip_prefix("res://")) {
-        *value = Value::String(path.to_owned());
-    }
-}
-
-/// The same rewrite through a shape the table does not describe, keyed on the names it does.
-fn wherever_a_key_names_a_path(value: &mut Value) {
-    match value {
-        Value::Array(entries) => entries.iter_mut().for_each(wherever_a_key_names_a_path),
-        Value::Object(fields) => {
-            for (key, held) in fields.iter_mut() {
-                if key == A_NESTED_KEY_THAT_NAMES_A_FILE {
-                    strip_the_scheme(held);
-                }
-                wherever_a_key_names_a_path(held);
-            }
-        }
-        _ => (),
-    }
-}
-
-/// The worktree-relative paths one call names, read off the operation's own row.
-///
-/// Only the parameters that carry a path as a string: a list of files and a nested `path` are the
-/// answer to a different question, and the two callers here — the outside-worktree rejection and
-/// the vanished-record drop — each act on one file at a time.
-fn paths_named(operation: &Operation, params: &Value) -> Vec<String> {
-    let Some(object) = params.as_object() else {
-        return Vec::new();
-    };
-    operation
-        .params
-        .iter()
-        .filter(|param| declares_a_path(param))
-        .filter_map(|param| object.get(param.name).and_then(Value::as_str))
-        .map(str::to_owned)
-        .collect()
-}
-
-/// Refuses a call carrying a path that climbs out of the project, before it reaches the addon.
-///
-/// The editor names files `res://…`, and `res://../` is a real path: Godot resolves it out of the
-/// project and follows it. Measured against the pinned 4.7.2 editor — `Image.save_png` wrote
-/// `res://../escaped.png` and `ResourceSaver.save` wrote `res://../escaped.tres`, both one
-/// directory above the project, both answering OK.
-///
-/// The file and script tools have their own confinement and this is not it. Everything routed by
-/// [`crate::tool_params::Answers::Addon`] is forwarded to the addon verbatim, so the writers that
-/// live there — `resource.create_texture`, `create_shape`, `create_tileset` — had no gate on the
-/// way at all, under a catalogue that describes their domain as one where "nothing outside the
-/// task worktree can be named at all".
-///
-/// A `..` inside a *path* is what is refused, not a `..` inside a value: a Label's `text` may say
-/// anything, and a `godot_runtime` node path is `/root/Main/..` on purpose. So a string counts as
-/// a path only when it carries the scheme, or when the operation declared the parameter holding it
-/// as one.
-fn a_path_that_climbs_out(operation: &Operation, params: &Value) -> Result<(), ToolFailure> {
-    fn climbing(named: bool, value: &Value) -> Option<&str> {
-        match value {
-            Value::String(text) => climbs(named, text).then_some(text.as_str()),
-            Value::Array(items) => items.iter().find_map(|item| climbing(named, item)),
-            Value::Object(fields) => fields
-                .iter()
-                .find_map(|(key, held)| climbing(key == A_NESTED_KEY_THAT_NAMES_A_FILE, held)),
-            _ => None,
-        }
-    }
-    let declared = |key: &str| {
-        operation
-            .params
-            .iter()
-            .any(|param| param.name == key && declares_a_path(param))
-    };
-    let found = match params.as_object() {
-        Some(fields) => fields
-            .iter()
-            .find_map(|(key, held)| climbing(declared(key), held)),
-        None => climbing(false, params),
-    };
-    match found {
-        None => Ok(()),
-        Some(text) => Err(ToolFailure::new(
-            "outside_workspace",
-            format!(
-                "{text} climbs out of the project. Every path here names a file inside the task \
-                 worktree, spelled the way the project spells it — assets/tiles.png, or \
-                 res://assets/tiles.png — and a `..` segment is refused wherever it appears."
-            ),
-        )),
-    }
-}
-
-/// Whether a declared parameter carries a file the worktree holds, or a directory inside it.
-///
-/// The operation's own row says so, through [`tool_params::Kind::Path`]. It was nine parameter
-/// names listed here, and a name decided three things it could not know: an operation whose path
-/// parameter was called anything else went through the confinement gate unexamined, and
-/// `godot_runtime`'s `path` — a node in the running game, where `..` is the parent node — was
-/// refused for climbing out of a project it never named.
-fn declares_a_path(param: &tool_params::Param) -> bool {
-    match param.kind {
-        tool_params::Kind::Path => true,
-        tool_params::Kind::ListOf(inner) => *inner == tool_params::Kind::Path,
-        _ => false,
-    }
-}
-
-/// The one key that names a file inside a shape the catalogue does not describe.
-///
-/// A tagged `Resource` arrives as `{"type": "Resource", "value": {"path": "res://…"}}`, and what a
-/// tagged value carries is the protocol's rather than a row of `params.json`. Everything else that
-/// holds a path is a declared parameter, and a string carrying the scheme is a path wherever it
-/// sits without any key saying so.
-const A_NESTED_KEY_THAT_NAMES_A_FILE: &str = "path";
-
-/// Whether a string is a path, and climbs. `named` is what the position it sits in already said.
-fn climbs(named: bool, text: &str) -> bool {
-    let (path, schemed) = match text
-        .strip_prefix("res://")
-        .or_else(|| text.strip_prefix("user://"))
-    {
-        Some(rest) => (rest, true),
-        None => (text, false),
-    };
-    if !schemed && !named {
-        return false;
-    }
-    path.split('/').any(|segment| segment == "..") || (!schemed && path == "..")
-}
-
 /// Keeps this domain to the files it is for: GDScript, and the shaders no other tool writes.
 ///
 /// `save` writes whatever path it is given, and the language server behind it only knows GDScript.
@@ -1929,84 +1551,6 @@ fn named_scripts(params: &Value) -> Result<Vec<String>, ToolFailure> {
         paths.push(path.to_owned());
     }
     Ok(paths)
-}
-
-/// The model counts lines badly: a named breakpoint line went from 15/60 right to 60/60 once the
-/// text carried its numbers (scripts/bench/lines-run.mjs), so a script reads the way the read
-/// tool answers.
-///
-/// A blank line is its number alone. `45\t` reads as a line holding one tab, and the model quoted
-/// that tab back in an anchor, which the file does not have.
-pub(crate) fn numbered_lines(text: &str) -> String {
-    if text.is_empty() {
-        return String::new();
-    }
-    text.strip_suffix('\n')
-        .unwrap_or(text)
-        .split('\n')
-        .enumerate()
-        .map(|(index, line)| {
-            if line.trim().is_empty() {
-                (index + 1).to_string()
-            } else {
-                format!("{}\t{line}", index + 1)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// How much script text one `open` call answers with before it starts withholding.
-///
-/// The worker holds a tool result at 24,000 characters and slices it there, mid-file. Ten of
-/// thirty-two `open` calls in a live project hit that, and the file cut in half was the last one
-/// named — after which an `edit` anchored on text the model had been shown only part of failed with
-/// `anchor_not_found`. A budget answers instead with whole files and a note about the rest, which
-/// is a thing the model can act on.
-const OPEN_TEXT_BUDGET: usize = 16_000;
-
-/// Whether this file's text is the one an `open` call stops carrying.
-///
-/// The first file is answered however large it is. A budget that could withhold everything would
-/// turn `open scripts/main.gd` — one file, larger than the budget on its own — into a call that
-/// says only how big it is, and there is no smaller call to fall back to. Truncation is the worse
-/// failure of the two, but it is only worse when the model has somewhere else to go.
-fn withholds_the_text(spent: usize, text_bytes: usize, first: bool) -> bool {
-    !first && spent + text_bytes > OPEN_TEXT_BUDGET
-}
-
-/// Names the operation that needs no anchors, when an edit call arrives in a shape it cannot use.
-///
-/// `godot_script edit` carries the largest nested payload of any operation — a list of files, each
-/// holding a list of before-and-after strings that are whole functions — and it is where this
-/// model's JSON tears most often. `files[0] requires path` is the second commonest refusal in every
-/// recorded live turn: nine of them across five turns, three of those inside one call sequence.
-///
-/// It is not a misunderstanding of the shape. Asked directly, twelve seeds out of twelve wrote
-/// `files[{path, edits}]` correctly. The turn that met it three times said so itself, in the middle
-/// of the run:
-///
-/// > The JSON structure is getting mangled. Let me just save the whole file:
-///
-/// — and `godot_script save`, which takes one path and one string, worked immediately. So there is
-/// nothing here to repair: the intended text never reaches the wire, and a router that guessed a
-/// path would be writing a guess into somebody's script. What can be done is name the way out that
-/// this run took four calls to find on its own.
-fn the_whole_file(tool: &str, op: &str, failure: ToolFailure) -> ToolFailure {
-    let shape = matches!(
-        failure.code.as_str(),
-        "missing_param" | "unknown_param" | "invalid_param"
-    );
-    if !shape || tool != "godot_script" || op != "edit" {
-        return failure;
-    }
-    let mut failure = failure;
-    failure.message = format!(
-        "{} If this call keeps arriving in a shape it cannot use, script.save writes the \
-         whole file as one string and needs no anchors at all.",
-        failure.message.trim_end()
-    );
-    failure
 }
 
 fn script_domain<R: Runtime>(
@@ -2156,186 +1700,6 @@ fn script_domain<R: Runtime>(
     }
 }
 
-/// Whether a position-taking answer came back empty: no hover, no location, no highlight.
-fn answer_names_nothing(op: &str, answered: &Value) -> bool {
-    match op {
-        "hover" => answered.get("hover").is_none_or(|hover| {
-            hover.is_null() || hover["contents"].as_array().is_some_and(Vec::is_empty)
-        }),
-        "definition" | "declaration" | "references" => {
-            answered["locations"].as_array().is_some_and(Vec::is_empty)
-        }
-        "highlights" => answered["highlights"].as_array().is_some_and(Vec::is_empty),
-        _ => false,
-    }
-}
-
-/// An empty answer with a sentence about the position that earned it.
-///
-/// Four hovers on a blank line, two declarations on a `(` and a space, five rename probes: every
-/// one answered nothing and said nothing, and the model guessed the next column. The names on
-/// the line and where each starts is what lets it aim once.
-fn with_where_the_cursor_was(
-    mut answered: Value,
-    asked: &Value,
-    text_of: impl Fn(&str) -> Option<String>,
-) -> Value {
-    let Some(path) = asked["path"].as_str() else {
-        return answered;
-    };
-    let (Some(line), Some(character)) = (
-        asked["position"]["line"].as_u64(),
-        asked["position"]["character"].as_u64(),
-    ) else {
-        return answered;
-    };
-    let Some(text) = text_of(path) else {
-        return answered;
-    };
-    let note = where_the_cursor_is(&text, line, character);
-    if let Some(fields) = answered.as_object_mut() {
-        fields.insert("note".to_owned(), Value::String(note));
-    }
-    answered
-}
-
-/// Godot's server answers a rename check with the range and no placeholder; one live turn in
-/// three then invented one. The text inside the range is the placeholder, and it is read here.
-fn with_the_placeholder_the_range_holds(
-    mut answered: Value,
-    asked: &Value,
-    text_of: impl Fn(&str) -> Option<String>,
-) -> Value {
-    if answered["renameable"] != true || answered.get("placeholder").is_some() {
-        return answered;
-    }
-    let (Some(line), Some(from), Some(to)) = (
-        answered["range"]["start"]["line"].as_u64(),
-        answered["range"]["start"]["character"].as_u64(),
-        answered["range"]["end"]["character"].as_u64(),
-    ) else {
-        return answered;
-    };
-    if answered["range"]["end"]["line"].as_u64() != Some(line) {
-        return answered;
-    }
-    let Some(text) = asked["path"].as_str().and_then(&text_of) else {
-        return answered;
-    };
-    let Some(row) = usize::try_from(line)
-        .ok()
-        .and_then(|index| text.lines().nth(index))
-    else {
-        return answered;
-    };
-    let held: String = row
-        .chars()
-        .skip(usize::try_from(from).unwrap_or(usize::MAX))
-        .take(usize::try_from(to.saturating_sub(from)).unwrap_or(0))
-        .collect();
-    if let Some(fields) = answered.as_object_mut()
-        && !held.is_empty()
-    {
-        fields.insert("placeholder".to_owned(), Value::String(held));
-    }
-    answered
-}
-
-fn where_the_cursor_is(text: &str, line: u64, character: u64) -> String {
-    let Some(row) = usize::try_from(line)
-        .ok()
-        .and_then(|index| text.lines().nth(index))
-    else {
-        return format!(
-            "Line {line} (0-based) is past the end of the file, which has {} lines.",
-            text.lines().count()
-        );
-    };
-    let names: Vec<(usize, &str)> = identifiers_on(row);
-    let under = row
-        .chars()
-        .nth(usize::try_from(character).unwrap_or(usize::MAX))
-        .map_or_else(
-            || "past the end of the line".to_owned(),
-            |found| {
-                names
-                    .iter()
-                    .find(|(start, name)| {
-                        let column = usize::try_from(character).unwrap_or(usize::MAX);
-                        column >= *start && column < start + name.len()
-                    })
-                    .map_or_else(
-                        || format!("'{found}', which is not part of a name"),
-                        |(_, name)| format!("inside `{name}`"),
-                    )
-            },
-        );
-    let where_names_start = if names.is_empty() {
-        "no names on that line".to_owned()
-    } else {
-        format!(
-            "the names on that line start at {}",
-            names
-                .iter()
-                .map(|(start, name)| format!("{name} {start}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    };
-    format!(
-        "Line {line} char {character} (0-based) is {under}; {where_names_start}. Positions count \
-         from 0, one less than the numbers script.open shows."
-    )
-}
-
-/// Every identifier on one line with the 0-based column it starts at.
-fn identifiers_on(row: &str) -> Vec<(usize, &str)> {
-    let mut found = Vec::new();
-    let mut start = None;
-    for (index, ch) in row.char_indices() {
-        let continues = ch.is_alphanumeric() || ch == '_';
-        match (start, continues) {
-            (None, true) if !ch.is_ascii_digit() => start = Some(index),
-            (Some(from), false) => {
-                found.push((from, &row[from..index]));
-                start = None;
-            }
-            _ => {}
-        }
-    }
-    if let Some(from) = start {
-        found.push((from, &row[from..]));
-    }
-    found
-}
-
-/// Completion items as the model can use them: members first, and no `data`.
-///
-/// After `timer.` the server answered 276 items, every one carrying a `data` blob that repeats the
-/// request it came from, and the enum types and `NOTIFICATION_*` constants sorted first. The
-/// result budget cut the list at 88, before `wait_time`, `start` or `timeout` — the only items the
-/// question was about. `data` is what `completionItem/resolve` needs, and Monaco keeps it on its
-/// own path; the model never resolves. Methods, fields, properties, variables and events come
-/// first, in the server's order within each half.
-fn a_completion_the_model_can_read(mut answered: Value) -> Value {
-    const MEMBER_KINDS: [u64; 6] = [2, 3, 5, 6, 10, 23];
-    let Some(items) = answered.get_mut("items").and_then(Value::as_array_mut) else {
-        return answered;
-    };
-    for item in items.iter_mut() {
-        if let Some(fields) = item.as_object_mut() {
-            fields.remove("data");
-            fields.remove("sortText");
-            fields.remove("filterText");
-        }
-    }
-    items.sort_by_key(|item| {
-        let kind = item.get("kind").and_then(Value::as_u64).unwrap_or(0);
-        u8::from(!MEMBER_KINDS.contains(&kind))
-    });
-    answered
-}
-
 /// Refuses a launch the debugger already made, before the editor is asked to make a second one.
 ///
 /// `runtime.run` guards on `EditorInterface.is_playing_scene()`, and a game the debug adapter
@@ -2362,200 +1726,6 @@ fn refuse_a_second_game(op: &str, debugger_holds_a_game: bool) -> Result<(), Too
 fn debug_domain(op: &str, params: Value) -> Result<Value, ToolFailure> {
     let request: DebugRequest = from_tagged_params(op, params)?;
     Ok(to_value(debug::call(request)?))
-}
-
-/// Reads log lines until the caller's limit is filled with lines a model can read.
-///
-/// The page is filtered after the buffer applies the limit, so one page of two hundred can come
-/// back as forty once the editor's own terminal output is out of it — and forty lines where two
-/// hundred were asked for reads as "there is no more", which is the one thing it must not mean.
-/// So the pages are read forward until the limit is met or the buffer runs out.
-///
-/// The cursor answered is the one that continues from the last line actually handed over, never
-/// from a line read past it: `after` takes a sequence, and every entry carries its own.
-fn logs_domain(params: Value) -> Result<Value, ToolFailure> {
-    let mut query: LogQuery = from_params(with_declared_defaults(
-        tool_params::GODOT_LOGS_OPERATIONS,
-        "read",
-        params,
-    ))?;
-    // `editor` is the editor process, both its streams; `editorError` is its stderr alone. Every
-    // warning and error the engine prints is on stderr, and a live turn that asked for warnings on
-    // `editor` three ways was answered three empty pages and reported none had happened.
-    if query.source == Some(godot_session::LogSource::Editor) {
-        query.source = None;
-    }
-    let wanted = query
-        .limit
-        .unwrap_or(godot_session::DEFAULT_LOG_PAGE)
-        .clamp(1, godot_session::MAX_LOG_PAGE);
-    query.limit = Some(godot_session::MAX_LOG_PAGE);
-    let mut kept: Vec<Value> = Vec::new();
-    let mut omitted = 0;
-    let first = godot_session::read_logs(&query)?;
-    let dropped = first.dropped;
-    let mut cursor = first.cursor;
-    let mut page = first;
-    loop {
-        let counted = page.entries.len();
-        for entry in page.entries {
-            if kept.len() >= wanted {
-                break;
-            }
-            cursor = entry.sequence;
-            match a_line_a_model_can_read(&entry) {
-                Some(line) => kept.push(line),
-                None => omitted += 1,
-            }
-        }
-        if counted == 0 || kept.len() >= wanted {
-            break;
-        }
-        query.after = Some(cursor);
-        page = godot_session::read_logs(&query)?;
-    }
-    Ok(json!({
-        "entries": kept,
-        "cursor": cursor,
-        "dropped": dropped,
-        "terminalLinesOmitted": omitted,
-    }))
-}
-
-/// The call with every parameter the catalogue defaults filled in, where the call named none.
-///
-/// The default is read off the generated row rather than written here, so the value the model is
-/// shown in the schema and the value this router applies cannot become two different words. Every
-/// non-flat failure of the surface measurement was `logs read` sent with no `minSeverity`.
-fn with_declared_defaults(
-    operations: &'static [tool_params::Operation],
-    op: &str,
-    params: Value,
-) -> Value {
-    let Some(operation) = operations.iter().find(|operation| operation.op == op) else {
-        return params;
-    };
-    let mut params = params;
-    let Some(object) = params.as_object_mut() else {
-        return params;
-    };
-    for param in operation.params {
-        let Some(default) = param.default else {
-            continue;
-        };
-        if !object.contains_key(param.name) {
-            object.insert(param.name.to_owned(), to_value(default));
-        }
-    }
-    params
-}
-
-/// One line with the terminal's own control codes taken out of it.
-///
-/// The editor writes to a terminal and colours what it writes. `\u{1b}[90m\u{1b}[1mfirst_scan…`
-/// is one line of Godot's import progress, and a third of that line is the escapes. Written
-/// without the `regex` crate, which this binary does not carry: an escape here is always
-/// `ESC [ … letter`, the CSI form, which is all a terminal colour is.
-fn without_terminal_colour(line: &str) -> String {
-    let mut plain = String::with_capacity(line.len());
-    let mut rest = line.chars();
-    while let Some(character) = rest.next() {
-        if character != '\u{1b}' {
-            plain.push(character);
-            continue;
-        }
-        if rest.next() != Some('[') {
-            continue;
-        }
-        for parameter in rest.by_ref() {
-            if parameter.is_ascii_alphabetic() {
-                break;
-            }
-        }
-    }
-    plain
-}
-
-/// Whether this line is the editor's own progress bar rather than anything about the project.
-///
-/// `EditorProgress` prints `[  16% ] first_scan_filesystem | Scanning file structure...` and
-/// `[ DONE ] save` to standard output, and both are a terminal drawing itself. **159 of the 655 log
-/// entries in the recorded corpus are these**, 22,653 characters of 102,196 — more than a fifth of
-/// everything `godot_logs read` has ever handed a model. Nothing in one is actionable: an import
-/// that fails prints an `ERROR`, and a save that worked is answered by the save.
-fn is_the_editors_progress_bar(line: &str) -> bool {
-    let Some(bracketed) = line.strip_prefix('[') else {
-        return false;
-    };
-    let Some((inside, _)) = bracketed.split_once(']') else {
-        return false;
-    };
-    if inside.chars().count() != 6 {
-        return false;
-    }
-    let inside = inside.trim();
-    inside == "DONE"
-        || inside
-            .strip_suffix('%')
-            .is_some_and(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
-}
-
-/// The log page, with what only a terminal can use taken out of it, and a count of what went.
-///
-/// Three things, measured over the 655 entries the recorded live runs read back: the escape codes
-/// are 7.5% of them, the lines that are nothing but escape codes are 3.7%, and the editor's own
-/// progress bar is 22%. Together they are a third of every character `godot_logs read` answers
-/// with, and `godot_logs read` is 18% of everything the ten Godot tools answer — 15% once `read`
-/// and `bash` are counted in too.
-///
-/// Counted rather than silently dropped, and only here: the renderer reads the same buffer through
-/// [`godot_session::read_logs`] and shows the user their editor's output as their editor wrote it.
-fn a_line_a_model_can_read(entry: &godot_session::LogEntry) -> Option<Value> {
-    let message = without_terminal_colour(&entry.message);
-    if message.trim().is_empty()
-        || is_the_editors_progress_bar(message.trim())
-        || is_gofers_own_addon_talking(message.trim())
-    {
-        return None;
-    }
-    Some(json!({
-        "sequence": entry.sequence,
-        "source": entry.source,
-        "severity": entry.severity,
-        "message": message,
-        "timestamp": entry.timestamp,
-    }))
-}
-
-/// A line Gofer's own addon put in the log, which is never about the model's game.
-///
-/// The headless editor cannot draw the thumbnail `EditorInterface.save_scene` asks for, and says
-/// so as an engine error with a GDScript backtrace whose every frame is in `res://addons/gofer/`.
-/// Two live turns read that as their game failing and spent a page of the log on it.
-fn is_gofers_own_addon_talking(line: &str) -> bool {
-    line.contains("(res://addons/gofer/")
-        || line.contains("texture_2d_get") && line.contains("/dummy/")
-        || line.starts_with("ERROR: Parameter \"t\" is null")
-        // The header above every backtrace, the addon's included; a game's own frames follow
-        // theirs and say where they are without it.
-        || line == "GDScript backtrace (most recent call first):"
-        // The editor's breakpoint store has no entry for a file until Gofer's first
-        // set_breakpoints writes one, and says so as an error.
-        || line.contains("Couldn't find the given section") && line.contains("key \"state\"")
-}
-
-/// The same question asked of a whole page, which is what the tests drive.
-#[cfg(test)]
-fn what_a_model_can_read(entries: Vec<godot_session::LogEntry>) -> (Vec<Value>, usize) {
-    let mut kept = Vec::with_capacity(entries.len());
-    let mut omitted = 0;
-    for entry in entries {
-        match a_line_a_model_can_read(&entry) {
-            Some(line) => kept.push(line),
-            None => omitted += 1,
-        }
-    }
-    (kept, omitted)
 }
 
 /// Answers a documentation search, telling the sidecar which model to reach for.
@@ -2709,7 +1879,7 @@ fn take_u64(params: &mut Value, key: &str) -> Option<u64> {
 
 /// Deserializes tool parameters into a handler's own request type, so the handler's validation is
 /// the only validation and a malformed call is refused before it reaches the editor.
-fn from_params<T: serde::de::DeserializeOwned>(params: Value) -> Result<T, ToolFailure> {
+pub(crate) fn from_params<T: serde::de::DeserializeOwned>(params: Value) -> Result<T, ToolFailure> {
     serde_json::from_value(params)
         .map_err(|error| ToolFailure::new("invalid_params", error.to_string()))
 }
@@ -2749,20 +1919,13 @@ pub(crate) fn to_camel_case(op: &str) -> String {
 
 /// Serialization of a handler's own response type cannot fail — every one of them is a plain
 /// struct or enum — but a router that panicked on it would take the agent turn with it.
-fn to_value<T: Serialize>(value: T) -> Value {
+pub(crate) fn to_value<T: Serialize>(value: T) -> Value {
     serde_json::to_value(value)
         .unwrap_or_else(|error| json!({"serializationError": error.to_string()}))
 }
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn a_listing_numbers_every_line_and_not_the_newline_after_the_last() {
-        assert_eq!(super::numbered_lines(""), "");
-        assert_eq!(super::numbered_lines("a\n\nb\n"), "1\ta\n2\n3\tb");
-        assert_eq!(super::numbered_lines("a\n\t\nb"), "1\ta\n2\n3\tb");
-        assert_eq!(super::numbered_lines("a\r\nb"), "1\ta\r\n2\tb");
-    }
 
     use super::*;
     use tauri::Manager;
@@ -3077,239 +2240,6 @@ mod tests {
             listed,
             crate::protocol_v2::MUTATING_COMMANDS.to_vec(),
             "the schema's mutating commands must be the ones the code guards, in the same order"
-        );
-    }
-
-    /// Every operation that names a path takes it either way, and takes it at the router.
-    ///
-    /// The catalog mixes two path conventions because Godot does: a scene is `res://main.tscn` and
-    /// a script is `scripts/main.gd`. A model reaches for the one it just used, so `godot_script
-    /// open` was told a file it had written a moment earlier did not exist.
-    ///
-    /// A table test over the whole catalogue, because the failure it replaces was never a path that
-    /// came out wrong. The rewrite worked; it was three arms that called it and a fourth that did
-    /// not, and the test that stood here called the rewrite as a pure function and asserted nothing
-    /// about which arms applied it. `resource_domain` was the arm that did not, and nothing failed:
-    /// `files::validate_relative` strips the scheme too, so the delete reached the right file and
-    /// only the read ledger — keyed on the string the caller wrote — could tell. So the assertion
-    /// is the table: every operation that declares a path, whichever domain adds it next.
-    #[test]
-    fn every_operation_that_names_a_path_takes_it_either_way() {
-        /// The parameter as the router hands it to the arm, resolved off the catalogue's own row.
-        fn normalised(tool: &str, op: &str, params: Value) -> Value {
-            let operation = crate::tool_params::operation_of(tool, op)
-                .unwrap_or_else(|| panic!("{tool}.{op} is a catalogue operation"));
-            let mut params = params;
-            as_the_worktree_names_them(operation, &mut params);
-            params
-        }
-
-        let mut checked = 0;
-        for domain in CATALOG {
-            for operation in domain.operations {
-                let worktree = operation.route() == crate::tool_params::Answers::Rust;
-                let expected = |named: &str| {
-                    if worktree {
-                        format!("levels/{named}")
-                    } else {
-                        format!("res://levels/{named}")
-                    }
-                };
-                for param in operation.params {
-                    if matches!(param.kind, crate::tool_params::Kind::ListOf(inner)
-                        if *inner == crate::tool_params::Kind::Path)
-                    {
-                        let answered = normalised(
-                            domain.name,
-                            operation.op,
-                            json!({param.name: ["res://levels/level.tscn"]}),
-                        );
-                        assert_eq!(
-                            answered[param.name][0],
-                            json!(expected("level.tscn")),
-                            "{} {} `{}[]`",
-                            domain.name,
-                            operation.op,
-                            param.name
-                        );
-                        checked += 1;
-                    }
-                    if matches!(param.kind, crate::tool_params::Kind::Path) {
-                        let answered = normalised(
-                            domain.name,
-                            operation.op,
-                            json!({param.name: "res://levels/level.tscn"}),
-                        );
-                        assert_eq!(
-                            answered[param.name],
-                            json!(expected("level.tscn")),
-                            "{} {} `{}`",
-                            domain.name,
-                            operation.op,
-                            param.name
-                        );
-                        let untouched = normalised(
-                            domain.name,
-                            operation.op,
-                            json!({param.name: "levels/level.tscn"}),
-                        );
-                        assert_eq!(
-                            untouched[param.name], "levels/level.tscn",
-                            "{} {} `{}`",
-                            domain.name, operation.op, param.name
-                        );
-                        checked += 1;
-                    }
-                    for inner in param.entry {
-                        if !declares_a_path(inner) {
-                            continue;
-                        }
-                        let answered = normalised(
-                            domain.name,
-                            operation.op,
-                            json!({param.name: [{inner.name: "res://levels/level.tscn"}]}),
-                        );
-                        assert_eq!(
-                            answered[param.name][0][inner.name],
-                            json!(expected("level.tscn")),
-                            "{} {} `{}[].{}`",
-                            domain.name,
-                            operation.op,
-                            param.name,
-                            inner.name
-                        );
-                        checked += 1;
-                    }
-                }
-            }
-        }
-        assert!(
-            checked > 30,
-            "the catalogue declares more paths than this walked: {checked}"
-        );
-
-        let batched = normalised(
-            "godot_script",
-            "open",
-            json!({"paths": ["res://scripts/a.gd", "scripts/b.gd"]}),
-        );
-        assert_eq!(batched["paths"][0], "scripts/a.gd");
-        assert_eq!(batched["paths"][1], "scripts/b.gd");
-
-        let renamed = normalised(
-            "godot_script",
-            "apply_rename",
-            json!({"files": [{"path": "res://scripts/a.gd", "updatedText": "extends Node\n"}]}),
-        );
-        assert_eq!(renamed["files"][0]["path"], "scripts/a.gd");
-        assert_eq!(renamed["files"][0]["updatedText"], "extends Node\n");
-
-        assert_eq!(
-            normalised("godot_resource", "list", json!({"under": "res://assets"}))["under"],
-            "assets"
-        );
-
-        assert_eq!(
-            normalised(
-                "godot_script",
-                "open",
-                json!({"paths": ["res://../secrets.gd"]})
-            )["paths"][0],
-            "../secrets.gd"
-        );
-        // Each case names the operation it is written against, because the row is what decides:
-        // the same `path` is a file under `godot_resource` and a node under `godot_runtime`.
-        let row = |tool: &str, op: &str| {
-            crate::tool_params::operation_of(tool, op)
-                .unwrap_or_else(|| panic!("{tool}.{op} is a catalogue operation"))
-        };
-        for (tool, op, climbing) in [
-            (
-                "godot_resource",
-                "create_texture",
-                json!({"path": "res://../escaped.png"}),
-            ),
-            (
-                "godot_resource",
-                "create_texture",
-                json!({"path": "../escaped.png"}),
-            ),
-            (
-                "godot_resource",
-                "create_texture",
-                json!({"path": "assets/../../escaped.png"}),
-            ),
-            (
-                "godot_resource",
-                "create_texture",
-                json!({"path": "user://../escaped.png"}),
-            ),
-            (
-                "godot_resource",
-                "create_tileset",
-                json!({"texture": "res://a.png", "tiles": ["res://../x.png"]}),
-            ),
-            (
-                "godot_node",
-                "set_properties",
-                json!({"properties": [{"value": {"type": "Resource", "value": {"path": "res://../x.tres"}}}]}),
-            ),
-            (
-                "godot_node",
-                "set_properties",
-                json!({"properties": [{"value": {"type": "String", "value": "res://../secrets"}}]}),
-            ),
-        ] {
-            let refused =
-                a_path_that_climbs_out(row(tool, op), &climbing).expect_err("a climbing path");
-            assert_eq!(refused.code, "outside_workspace", "{tool} {op} {climbing}");
-        }
-        for (tool, op, ordinary) in [
-            (
-                "godot_resource",
-                "create_texture",
-                json!({"path": "res://assets/tiles.png"}),
-            ),
-            (
-                "godot_project",
-                "set_setting",
-                json!({"value": {"type": "String", "value": "Loading.."}}),
-            ),
-            (
-                "godot_node",
-                "set_properties",
-                json!({"properties": [{"property": "text", "value": {"type": "String", "value": "see ../docs/readme"}}]}),
-            ),
-            ("godot_node", "rename", json!({"name": "a..b"})),
-            (
-                "godot_project",
-                "search_settings",
-                json!({"query": "physics/2d/default_gravity"}),
-            ),
-            // A node path is not a file path, and `..` is how it names a parent node. The nine
-            // key names this gate used to read refused every one of these.
-            (
-                "godot_runtime",
-                "set_property",
-                json!({"path": "/root/Main/../Other", "property": "text", "value": {"type": "String", "value": "hi"}}),
-            ),
-            (
-                "godot_runtime",
-                "inspect_node",
-                json!({"path": "/root/Main/../Other"}),
-            ),
-        ] {
-            assert!(
-                a_path_that_climbs_out(row(tool, op), &ordinary).is_ok(),
-                "{tool} {op} {ordinary}"
-            );
-        }
-
-        let directory = tempfile::TempDir::new().expect("temporary directory");
-        let workspace = crate::files::Workspace::open(directory.path()).expect("open workspace");
-        assert!(
-            workspace.resolve("../secrets.gd").is_err(),
-            "a path that climbs out of the worktree must still be refused"
         );
     }
 
@@ -3859,57 +2789,6 @@ mod tests {
         );
     }
 
-    /// The editor's terminal drawing itself is not something a model can read.
-    ///
-    /// Measured over the 655 log entries the recorded live runs read back: the escape codes are
-    /// 7.5% of them, the lines that are nothing but escape codes are 3.7%, and the progress bar is
-    /// 22%. The lines below are real ones out of `logs/oxloop`.
-    #[test]
-    fn the_editors_terminal_colour_and_progress_bar_do_not_reach_the_model() {
-        let escape = char::from(27);
-        let line = |sequence: u64, message: &str| godot_session::LogEntry {
-            sequence,
-            source: godot_session::LogSource::Editor,
-            severity: godot_session::LogSeverity::Info,
-            message: message.to_owned(),
-            timestamp: 1_787_680_547_282,
-        };
-        let (kept, omitted) = what_a_model_can_read(vec![
-            line(
-                1,
-                &format!(
-                    "[  16% ] {escape}[90m{escape}[1mfirst_scan_filesystem{escape}[22m | Scanning \
-                     file structure...{escape}[39m{escape}[0m"
-                ),
-            ),
-            line(
-                2,
-                &format!("{escape}[92m[ DONE ]{escape}[39m {escape}[1msave{escape}[22m"),
-            ),
-            line(3, &format!("{escape}[0m")),
-            line(4, ""),
-            line(
-                5,
-                &format!("{escape}[1mSCRIPT ERROR:{escape}[0m Parse Error: Identifier not found"),
-            ),
-            line(6, "[player] hit right window edge after 580.1 px"),
-            line(7, "[ 50% ] loading the level"),
-        ]);
-
-        assert_eq!(omitted, 4, "{kept:?}");
-        assert_eq!(kept.len(), 3, "{kept:?}");
-        assert_eq!(kept[2]["message"], "[ 50% ] loading the level");
-        assert_eq!(
-            kept[0]["message"],
-            "SCRIPT ERROR: Parse Error: Identifier not found"
-        );
-        assert_eq!(
-            kept[1]["message"],
-            "[player] hit right window edge after 580.1 px"
-        );
-        assert_eq!(kept[0]["sequence"], json!(5));
-    }
-
     /// A page asked for `limit` lines comes back with `limit` lines a model can read.
     ///
     /// The buffer applies the limit and the filter runs after it, so one page of two hundred can
@@ -4077,24 +2956,6 @@ mod tests {
             failure.message
         );
         assert_eq!(failure.details["opIndex"], Value::Null);
-    }
-
-    /// A batched `open` answers with whole files and a note, never with one cut in half.
-    ///
-    /// The worker slices a tool result at 24,000 characters. Ten of thirty-two `open` calls in a
-    /// live project reached that, always in the last file named, and an `edit` anchored on the text
-    /// the model had been shown half of then failed with `anchor_not_found`.
-    #[test]
-    fn a_batched_open_stops_carrying_text_before_the_worker_cuts_it() {
-        assert!(!withholds_the_text(0, OPEN_TEXT_BUDGET * 4, true));
-
-        assert!(!withholds_the_text(OPEN_TEXT_BUDGET - 1, 1, false));
-        assert!(withholds_the_text(OPEN_TEXT_BUDGET - 1, 2, false));
-
-        assert!(!withholds_the_text(0, 22_752, true));
-        assert!(withholds_the_text(22_752, 6_671, false));
-
-        const { assert!(OPEN_TEXT_BUDGET < 24_000) };
     }
 
     /// The gate on its own, given a list of operation names.
@@ -4299,65 +3160,6 @@ mod tests {
         for op in ["stop", "get_state", "get_tree", "capture", "input", "wait"] {
             assert!(super::refuse_a_second_game(op, true).is_ok(), "{op}");
         }
-    }
-
-    /// One directory, however it is spelled, and no directory means the whole worktree.
-    ///
-    /// The rule both `list` operations narrow by. A live turn asked `godot_resource list` for one
-    /// folder with the only key it could think of — `{"op": "list", "path": "assets"}` — was
-    /// refused because there was no such parameter, and fell back to `bash find`.
-    #[test]
-    fn a_listing_narrowed_to_a_directory_holds_only_what_is_under_it() {
-        for spelling in ["assets", "res://assets", "/assets/", "res://assets/"] {
-            let under = super::named_directory(spelling);
-            assert!(
-                super::is_under("assets/tiles.png", under.as_deref()),
-                "{spelling}"
-            );
-            assert!(
-                super::is_under("assets/Effects/hit.png", under.as_deref()),
-                "a directory holds what is under it, at any depth: {spelling}"
-            );
-            assert!(
-                !super::is_under("scripts/main.gd", under.as_deref()),
-                "{spelling}"
-            );
-            assert!(
-                !super::is_under("assetsold/tiles.png", under.as_deref()),
-                "{spelling}"
-            );
-            assert!(!super::is_under("assets", under.as_deref()), "{spelling}");
-        }
-        assert!(
-            super::is_under("anything/at/all.png", None),
-            "no directory named is every file"
-        );
-    }
-
-    /// The project root, however it is spelled, narrows nothing.
-    ///
-    /// `res://` is the spelling a model reaching for "the whole project" writes, and it is one
-    /// `named_directory` deliberately accepts — it took the scheme off and was left with nothing,
-    /// and nothing matched nothing. `godot_resource list` and `godot_script list` both answered
-    /// `{"files": []}` about a worktree full of files, which reads as an empty project rather than
-    /// as a listing that narrowed itself away.
-    #[test]
-    fn the_project_root_is_not_a_directory_to_narrow_by() {
-        for spelling in ["res://", "/", "//", ".", "res:///", "  "] {
-            assert_eq!(super::named_directory(spelling), None, "{spelling}");
-        }
-        for spelling in ["assets", "res://assets"] {
-            assert_eq!(
-                super::named_directory(spelling),
-                Some("assets".to_owned()),
-                "{spelling}"
-            );
-        }
-        let root = super::named_directory("res://");
-        assert!(
-            super::is_under("scripts/main.gd", root.as_deref()),
-            "the root holds every file the worktree holds"
-        );
     }
 
     /// Every distinct `ops` shape a model wrote across real work, and not one refused.
@@ -5194,150 +3996,5 @@ mod tests {
         let failure = from_tagged_params::<DebugRequest>("status", json!("nope"))
             .expect_err("a string is not a parameter object");
         assert_eq!(failure.code, "invalid_params");
-    }
-}
-
-#[cfg(test)]
-mod completion_trim_tests {
-    use super::*;
-
-    #[test]
-    fn members_come_first_and_the_resolve_blob_is_dropped() {
-        let trimmed = a_completion_the_model_can_read(json!({
-            "op": "completion",
-            "isIncomplete": false,
-            "items": [
-                {"label": "ConnectFlags", "kind": 13, "data": {"position": 1}, "sortText": "a"},
-                {"label": "NOTIFICATION_READY", "kind": 21, "data": {"position": 1}},
-                {"label": "wait_time", "kind": 10, "data": {"position": 1}, "insertText": "wait_time"},
-                {"label": "start", "kind": 2, "data": {"position": 1}},
-                {"label": "timeout", "kind": 23, "data": {"position": 1}}
-            ]
-        }));
-        let labels: Vec<&str> = trimmed["items"]
-            .as_array()
-            .expect("items")
-            .iter()
-            .map(|item| item["label"].as_str().expect("label"))
-            .collect();
-        assert_eq!(
-            labels,
-            [
-                "wait_time",
-                "start",
-                "timeout",
-                "ConnectFlags",
-                "NOTIFICATION_READY"
-            ]
-        );
-        assert!(
-            trimmed["items"]
-                .as_array()
-                .expect("items")
-                .iter()
-                .all(|item| item.get("data").is_none() && item.get("sortText").is_none()),
-            "{trimmed}"
-        );
-        assert_eq!(trimmed["items"][0]["insertText"], "wait_time");
-        assert_eq!(
-            a_completion_the_model_can_read(json!({"op": "hover"})),
-            json!({"op": "hover"}),
-            "an answer without items is left alone"
-        );
-    }
-}
-
-#[cfg(test)]
-mod cursor_note_tests {
-    use super::*;
-
-    #[test]
-    fn an_empty_answer_says_what_was_under_the_cursor_and_where_the_names_start() {
-        let text = "extends Node2D\n\n\tprint(\"%s %d\" % [TICK_MESSAGE, ticks])\n";
-        let asked = json!({"path": "scripts/main.gd", "position": {"line": 2, "character": 6}});
-        let noted =
-            with_where_the_cursor_was(json!({"op": "locations", "locations": []}), &asked, |_| {
-                Some(text.to_owned())
-            });
-        let note = noted["note"].as_str().expect("a note");
-        assert!(note.starts_with("Line 2 char 6 (0-based) is '(', which is not part of a name; the names on that line start at print 1, s 9, d 12, TICK_MESSAGE 18, ticks 32"), "{note}");
-
-        let inside = with_where_the_cursor_was(
-            json!({"op": "locations", "locations": []}),
-            &json!({"path": "scripts/main.gd", "position": {"line": 2, "character": 20}}),
-            |_| Some(text.to_owned()),
-        );
-        assert!(
-            inside["note"]
-                .as_str()
-                .expect("a note")
-                .contains("is inside `TICK_MESSAGE`"),
-            "{inside}"
-        );
-
-        let beyond = with_where_the_cursor_was(
-            json!({"op": "hover", "hover": null}),
-            &json!({"path": "scripts/main.gd", "position": {"line": 9, "character": 0}}),
-            |_| Some(text.to_owned()),
-        );
-        assert!(
-            beyond["note"]
-                .as_str()
-                .expect("a note")
-                .contains("past the end of the file, which has 3 lines"),
-            "{beyond}"
-        );
-
-        let unread =
-            with_where_the_cursor_was(json!({"op": "hover", "hover": null}), &asked, |_| None);
-        assert!(unread.get("note").is_none(), "no text, no note: {unread}");
-
-        assert!(answer_names_nothing(
-            "hover",
-            &json!({"hover": {"contents": []}})
-        ));
-        assert!(answer_names_nothing("hover", &json!({"hover": null})));
-        assert!(!answer_names_nothing(
-            "hover",
-            &json!({"hover": {"contents": {"kind": "markdown", "value": "x"}}})
-        ));
-        assert!(answer_names_nothing(
-            "declaration",
-            &json!({"locations": []})
-        ));
-        assert!(!answer_names_nothing(
-            "references",
-            &json!({"locations": [{"path": "a"}]})
-        ));
-        assert!(!answer_names_nothing("completion", &json!({"items": []})));
-    }
-
-    #[test]
-    fn a_rename_check_without_a_placeholder_reads_it_off_the_range() {
-        let text = "extends Node2D\n\nvar total_ticks := 0\n";
-        let asked = json!({"path": "scripts/main.gd", "position": {"line": 2, "character": 6}});
-        let filled = with_the_placeholder_the_range_holds(
-            json!({"op": "prepareRename", "renameable": true,
-                "range": {"start": {"line": 2, "character": 4}, "end": {"line": 2, "character": 15}}}),
-            &asked,
-            |_| Some(text.to_owned()),
-        );
-        assert_eq!(filled["placeholder"], "total_ticks", "{filled}");
-        let refused = with_the_placeholder_the_range_holds(
-            json!({"op": "prepareRename", "renameable": false}),
-            &asked,
-            |_| Some(text.to_owned()),
-        );
-        assert!(refused.get("placeholder").is_none(), "{refused}");
-        let kept = with_the_placeholder_the_range_holds(
-            json!({"op": "prepareRename", "renameable": true, "placeholder": "given",
-                "range": {"start": {"line": 2, "character": 4}, "end": {"line": 2, "character": 15}}}),
-            &asked,
-            |_| Some(text.to_owned()),
-        );
-        assert_eq!(
-            kept["placeholder"], "given",
-            "the server's own placeholder wins"
-        );
     }
 }
