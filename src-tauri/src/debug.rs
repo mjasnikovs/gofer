@@ -24,7 +24,7 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -213,6 +213,8 @@ pub enum DebugResponse {
     Evaluate {
         #[serde(flatten)]
         result: EvaluateResult,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     Continued {
         all_threads: bool,
@@ -477,37 +479,50 @@ fn what_a_timed_out_evaluate_usually_means(expression: &str, failure: DapError) 
     failure
 }
 
-static EVALUATE_MARKS: AtomicU64 = AtomicU64::new(0);
+/// The runtime helper as an expression can reach it from any frame.
+const RUNTIME_HELPER: &str = "Engine.get_main_loop().root.get_node_or_null(\"GoferRuntime\")";
+
+/// One of Gofer's own reads of the helper. Best effort: it only ever adds to an answer.
+fn helper_evaluate(client: &DapClient, call: &str, frame_id: Option<i64>) -> Option<String> {
+    client
+        .evaluate(&format!("{RUNTIME_HELPER}.{call}"), frame_id)
+        .ok()
+        .map(|answer| answer.result)
+        .filter(|result| result != "<null>")
+}
 
 /// Godot answers `<null>` alike for a real null, an expression it cannot parse and a call that
-/// failed; only the errors the stopped game printed while evaluating tell them apart.
-fn refusing_a_null_the_game_failed_to_compute(
+/// failed; only the errors the stopped thread logged while evaluating tell them apart. Where the
+/// project keeps the game from logging any, the answer says it cannot tell.
+fn judging_a_null(
     client: &DapClient,
     expression: &str,
     frame_id: Option<i64>,
-    before: u64,
-) -> Result<(), DapError> {
-    let mark = format!(
-        "{}{}",
-        godot_session::LOG_MARK_PREFIX,
-        EVALUATE_MARKS.fetch_add(1, Ordering::Relaxed)
-    );
-    // printerr shares stderr with the engine's errors, so its line arriving means theirs have.
-    client.evaluate(&format!("printerr(\"{mark}\")"), frame_id)?;
-    let errors =
-        godot_session::errors_before_mark(before, &mark, crate::godot_dap::DEFAULT_REQUEST_TIMEOUT)
-            .unwrap_or_default();
-    if errors.is_empty() {
-        return Ok(());
-    }
-    let printed: Vec<&str> = errors.iter().map(|entry| entry.message.as_str()).collect();
+    before: Option<i64>,
+) -> Result<Option<String>, DapError> {
+    let Some(before) = before else {
+        return Ok(None);
+    };
+    let Some(printed) = helper_evaluate(
+        client,
+        &format!("main_thread_errors_after({before})"),
+        frame_id,
+    )
+    .filter(|printed| !printed.is_empty()) else {
+        let unreported = helper_evaluate(client, "errors_go_unreported()", frame_id);
+        return Ok((unreported.as_deref() == Some("true")).then(|| {
+            "application/run/disable_stderr is on, so the game reports no errors at all: this null \
+             may be an expression Godot could not evaluate."
+                .to_owned()
+        }));
+    };
     Err(DapError::new(
         "evaluate_failed",
         format!(
             "Godot could not evaluate `{expression}` and answered null in its place. The game \
-             printed: {} Evaluate parses Godot's Expression syntax, which is narrower than \
+             logged: {} Evaluate parses Godot's Expression syntax, which is narrower than \
              GDScript: a StringName literal like &\"name\" does not parse, use \"name\".",
-            printed.join(" ")
+            printed.replace('\n', " ")
         ),
     ))
 }
@@ -726,14 +741,17 @@ fn answer(request: DebugRequest) -> Result<DebugResponse, DapError> {
                 crate::godot_dap::debuggee_is_stopped(),
                 crate::godot_dap::debuggee_is_paused(),
             )?;
-            let before = godot_session::log_cursor();
+            let before = helper_evaluate(&client, "error_total()", frame_id)
+                .and_then(|total| total.parse::<i64>().ok());
             let result = client
                 .evaluate(&expression, frame_id)
                 .map_err(|failure| what_a_timed_out_evaluate_usually_means(&expression, failure))?;
-            if result.result == "<null>" && result.variables_reference == 0 {
-                refusing_a_null_the_game_failed_to_compute(&client, &expression, frame_id, before)?;
-            }
-            Ok(DebugResponse::Evaluate { result })
+            let note = if result.result == "<null>" && result.variables_reference == 0 {
+                judging_a_null(&client, &expression, frame_id, before)?
+            } else {
+                None
+            };
+            Ok(DebugResponse::Evaluate { result, note })
         }
         DebugRequest::Continue { thread_id } => Ok(DebugResponse::Continued {
             all_threads: client.continue_execution(thread_id.unwrap_or(MAIN_THREAD_ID))?,
@@ -890,7 +908,6 @@ fn launch(
     breakpoints: Vec<SourceBreakpoints>,
 ) -> Result<DebugResponse, DapError> {
     ensure_scene_open()?;
-    godot_session::note_a_game_launch();
     let launching = client.start_launch(workspace.root(), scene, &play_args)?;
 
     let mut verified = Vec::new();
@@ -1995,5 +2012,63 @@ func _ready() -> void:
             Some("res://test_scenes/unit_combat_check.tscn"),
             "the scene the call named has to reach the launch"
         );
+    }
+
+    /// Review of a6aef2e: the marker Gofer evaluates after a null is Gofer's own call, and its
+    /// failure replaced the model's correct answer with an error about an expression it never
+    /// wrote.
+    #[test]
+    fn a_null_survives_the_follow_up_gofer_makes() {
+        use crate::godot_dap::tests::{
+            FakeAction, handshake_handler, push_event, start_fake_server,
+        };
+        let _test = breakpoint_test_lock();
+        let _session = crate::godot_session::SESSION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let server = start_fake_server(move |message, writer| {
+            match message["command"].as_str().unwrap_or_default() {
+                "evaluate" if message["arguments"]["expression"] == "missing_target" => {
+                    FakeAction::Result(json!({"result": "<null>", "variablesReference": 0}))
+                }
+                "evaluate" => FakeAction::Error("Timeout reached while processing a request."),
+                "initialize" => {
+                    push_event(
+                        writer,
+                        &json!({"seq": 1, "type": "event", "event": "stopped",
+                                "body": {"reason": "breakpoint", "threadId": 1}}),
+                    );
+                    handshake_handler(message, writer)
+                }
+                _ => handshake_handler(message, writer),
+            }
+        });
+        let worktree = tempfile::TempDir::new().expect("temporary worktree");
+        crate::godot_session::bind(Some(Arc::new(crate::godot_session::ExternalEditor::at(
+            0,
+            server.address.port(),
+            worktree.path(),
+        ))));
+        let _ = call(DebugRequest::Threads);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !crate::godot_dap::debuggee_is_stopped() && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+
+        let answered = call(DebugRequest::Evaluate {
+            expression: "missing_target".to_owned(),
+            frame_id: None,
+        });
+
+        crate::godot_session::bind(None);
+        crate::godot_dap::note_the_debuggee_is_running();
+        match answered {
+            Ok(DebugResponse::Evaluate { result, .. }) => assert_eq!(result.result, "<null>"),
+            Ok(other) => panic!("an evaluate answered {other:?}"),
+            Err(failure) => panic!(
+                "Gofer's own follow-up replaced the answer: {} {}",
+                failure.code, failure.message
+            ),
+        }
     }
 }

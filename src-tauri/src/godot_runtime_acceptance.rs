@@ -1814,7 +1814,7 @@ fn a_headless_run_is_answered_without_a_frame() {
 }
 
 /// A probe that looks up a node that is not there each time it is clicked, as a swarm panel did.
-const ERRORING_ON_CLICK_PROBE_SCRIPT: &str = "extends Node2D\n\nconst INJECTED_DEVICE := 7777\n\nfunc _input(event: InputEvent) -> void:\n\tif event.device == INJECTED_DEVICE and event is InputEventKey and event.pressed:\n\t\tget_node(\"../Missing/World\")\n";
+const ERRORING_ON_CLICK_PROBE_SCRIPT: &str = "extends Node2D\n\nconst INJECTED_DEVICE := 7777\n\nfunc _input(event: InputEvent) -> void:\n\tif event.device != INJECTED_DEVICE or not event is InputEventKey or not event.pressed:\n\t\treturn\n\tif event.keycode == KEY_W:\n\t\tpush_warning(\"low ammo\")\n\telse:\n\t\tget_node(\"../Missing/World\")\n";
 
 /// swarm, 2026-09-06: three clicks each made the game log `Node not found`, and each answered
 /// `applied: 2` with a frame, so the model kept clicking.
@@ -1866,6 +1866,19 @@ fn an_input_the_game_errors_on_carries_the_error() {
     assert!(
         quiet.get("errors").is_none(),
         "an input nothing failed on names no error: {quiet}"
+    );
+
+    // Review of a6aef2e: the catcher kept every `_log_error`, warnings included.
+    let warned = session.call(
+        "runtime.input",
+        json!({"events": [
+            {"kind": "key", "key": "W", "pressed": true, "device": INJECTED_DEVICE},
+            {"kind": "key", "key": "W", "pressed": false, "device": INJECTED_DEVICE},
+        ]}),
+    );
+    assert!(
+        warned.get("errors").is_none(),
+        "a warning is not an error: {warned}"
     );
 }
 

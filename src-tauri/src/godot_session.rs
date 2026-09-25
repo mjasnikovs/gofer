@@ -26,7 +26,7 @@ use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const REQUIRED_ENGINE_VERSION: &str = "4.7.2";
@@ -64,11 +64,7 @@ pub(crate) const MAX_LOG_PAGE: usize = 1_000;
 static ACTIVE_SESSION: Mutex<Option<GodotSession>> = Mutex::new(None);
 static SESSION_STARTING: AtomicBool = AtomicBool::new(false);
 static LOGS: Mutex<LogBuffer> = Mutex::new(LogBuffer::new());
-static LOG_ARRIVED: Condvar = Condvar::new();
-
-/// A line starting with this is a caller's marker, printed only to learn when the lines before it
-/// have been read. It is never stored.
-pub(crate) const LOG_MARK_PREFIX: &str = "gofer-log-mark:";
+const ENGINE_BANNER: &str = "Godot Engine v";
 
 /// The lifecycle states of a Godot editor session.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -283,10 +279,9 @@ struct LogBuffer {
     entries: VecDeque<LogEntry>,
     next_sequence: u64,
     dropped: u64,
-    /// The newest marker read, and the sequence the line after it takes.
-    last_mark: Option<(String, u64)>,
-    /// The newest line captured before the current game was launched.
+    /// The newest line captured before the current game printed its banner.
     game_launched_after: u64,
+    banners: u64,
 }
 
 impl LogBuffer {
@@ -295,16 +290,20 @@ impl LogBuffer {
             entries: VecDeque::new(),
             next_sequence: 1,
             dropped: 0,
-            last_mark: None,
             game_launched_after: 0,
+            banners: 0,
         }
     }
 
     fn push(&mut self, source: LogSource, line: &str) {
         let message = truncate_chars(line.trim_end_matches(['\r', '\n']), MAX_LOG_LINE_CHARS);
-        if message.starts_with(LOG_MARK_PREFIX) {
-            self.last_mark = Some((message, self.next_sequence));
-            return;
+        // Every process prints the banner first: the editor once, then each game it runs, however
+        // that game was started.
+        if message.starts_with(ENGINE_BANNER) {
+            self.banners += 1;
+            if self.banners > 1 {
+                self.game_launched_after = self.next_sequence - 1;
+            }
         }
         let entry = LogEntry {
             sequence: self.next_sequence,
@@ -882,52 +881,13 @@ pub(crate) fn append_log(source: LogSource, line: &str) {
     if let Ok(mut logs) = LOGS.lock() {
         logs.push(source, line);
     }
-    LOG_ARRIVED.notify_all();
 }
 
-/// Marks where the game about to be launched starts printing.
-pub(crate) fn note_a_game_launch() {
-    if let Ok(mut logs) = LOGS.lock() {
-        logs.game_launched_after = logs.next_sequence - 1;
-    }
-}
-
-/// The newest line captured before the current game was launched, or 0 when none was.
+/// The newest line captured before the current game started, or 0 when none has.
 pub(crate) fn game_launch_cursor() -> u64 {
     LOGS.lock()
         .map(|logs| logs.game_launched_after)
         .unwrap_or_default()
-}
-
-/// The sequence of the newest line captured so far.
-pub(crate) fn log_cursor() -> u64 {
-    LOGS.lock()
-        .map(|logs| logs.next_sequence - 1)
-        .unwrap_or_default()
-}
-
-/// Waits for `mark` to be read, and answers the error lines captured after `after` and before it.
-/// None when the mark never arrives within `timeout`.
-pub(crate) fn errors_before_mark(
-    after: u64,
-    mark: &str,
-    timeout: Duration,
-) -> Option<Vec<LogEntry>> {
-    let logs = LOGS.lock().ok()?;
-    let (logs, _) = LOG_ARRIVED
-        .wait_timeout_while(logs, timeout, |logs| {
-            logs.last_mark.as_ref().is_none_or(|(seen, _)| seen != mark)
-        })
-        .ok()?;
-    let (_, before) = logs.last_mark.as_ref().filter(|(seen, _)| seen == mark)?;
-    Some(
-        logs.entries
-            .iter()
-            .filter(|entry| entry.sequence > after && entry.sequence < *before)
-            .filter(|entry| entry.severity == LogSeverity::Error)
-            .cloned()
-            .collect(),
-    )
 }
 
 /// Empties the buffer for a new session, so a page never mixes two editors' output.
@@ -2368,44 +2328,6 @@ mod tests {
         })
         .expect("read tail");
         assert_eq!(last.entries[0].message.chars().count(), MAX_LOG_LINE_CHARS);
-        clear_logs();
-    }
-
-    #[test]
-    fn a_mark_answers_the_errors_read_before_it_and_is_never_stored() {
-        let _test = session_test_lock();
-        clear_logs();
-        append_log(LogSource::EditorError, "ERROR: from before\n");
-        let after = log_cursor();
-        let mark = format!("{LOG_MARK_PREFIX}7");
-        let reader = std::thread::spawn({
-            let mark = mark.clone();
-            move || {
-                append_log(LogSource::EditorError, "ERROR: Expected expression..\n");
-                append_log(
-                    LogSource::EditorError,
-                    "   at: execute (core/math/expression.cpp)\n",
-                );
-                append_log(LogSource::EditorError, &format!("{mark}\n"));
-                append_log(LogSource::EditorError, "ERROR: from after\n");
-            }
-        });
-
-        let errors =
-            errors_before_mark(after, &mark, Duration::from_secs(30)).expect("the mark arrives");
-        reader.join().expect("reader thread");
-        let messages: Vec<&str> = errors.iter().map(|entry| entry.message.as_str()).collect();
-        assert_eq!(messages, ["ERROR: Expected expression.."]);
-        let stored = read_logs(&LogQuery {
-            contains: Some(LOG_MARK_PREFIX.to_owned()),
-            ..LogQuery::default()
-        })
-        .expect("read logs");
-        assert!(stored.entries.is_empty(), "{stored:?}");
-        assert_eq!(
-            errors_before_mark(after, &format!("{LOG_MARK_PREFIX}8"), Duration::ZERO),
-            None
-        );
         clear_logs();
     }
 

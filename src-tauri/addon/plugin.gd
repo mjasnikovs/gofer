@@ -1159,11 +1159,11 @@ func _on_runtime_debugger_session_started(session_id: int) -> void:
 ## failure that looks exactly like a slow game: the process is alive, the editor still reports a
 ## playing scene, and nothing arrives.
 ##
-## Only a launch still waiting for the helper is ended here. A break that arrives after the helper
-## has announced belongs to a game that is up — a breakpoint Gofer's own debug adapter set, most of
-## the time — and that game continues and goes on answering, so failing its requests would break
-## debugging to fix launching. A break *before* the announcement is the boot that will never
-## finish: the scene stopped at its error, and the helper it would have loaded never runs.
+## Only a launch is ended here, and only one that has not seen its first frame: a game that halts
+## before drawing it will not draw it. Other requests belong to a game that is up and will go on
+## answering once it continues. This addon cannot tell an error from a breakpoint, so a launch
+## halted at a breakpoint the caller armed is turned back into a success by the router, which
+## reads the adapter's stop reason.
 func _on_runtime_debugger_session_breaked(session_id: int) -> void:
     if session_id != _runtime_session_id:
         return
@@ -1940,7 +1940,14 @@ func _resource_rescan(params: Dictionary) -> Dictionary:
     var requested := Params.rescan_paths_param(params)
     if requested.has("_gofer_error"):
         return requested
-    var paths: Array = _files_under(requested["value"])
+    var named: Array = requested["value"]
+    var paths: Array = _files_under(named)
+    # An empty list means the whole project, which an empty directory never asked for.
+    if paths.is_empty() and not named.is_empty():
+        return {"scanned": true, "files": []}
+    # More than a batch is cheaper as the walk an empty list runs.
+    if paths.size() > Params.MAX_RESCAN_PATHS:
+        paths = []
     return {"_gofer_pending_scan": {
         "paths": paths,
         "walked": false,

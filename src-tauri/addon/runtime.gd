@@ -53,7 +53,8 @@ const MAX_KEPT_ERRORS := 64
 ## Every engine error the game prints, so an op can answer with the ones its own frames caused.
 class ErrorCatcher extends Logger:
     var _lock := Mutex.new()
-    var _kept: Array[String] = []
+    ## `[message, on_main_thread]` pairs, oldest first.
+    var _kept: Array[Array] = []
     var _total := 0
 
     func _log_error(
@@ -63,11 +64,14 @@ class ErrorCatcher extends Logger:
         code: String,
         rationale: String,
         _editor_notify: bool,
-        _error_type: int,
+        error_type: int,
         _script_backtraces: Array[ScriptBacktrace]
     ) -> void:
+        if error_type == ERROR_TYPE_WARNING:
+            return
+        var on_main := OS.get_thread_caller_id() == OS.get_main_thread_id()
         _lock.lock()
-        _kept.append(code if rationale.is_empty() else rationale)
+        _kept.append([code if rationale.is_empty() else rationale, on_main])
         if _kept.size() > MAX_KEPT_ERRORS:
             _kept.pop_front()
         _total += 1
@@ -80,14 +84,16 @@ class ErrorCatcher extends Logger:
         return counted
 
     ## The distinct errors printed since `total()` read `start`, oldest first.
-    func since(start: int) -> Array[String]:
+    func since(start: int, main_thread_only := false) -> Array[String]:
         _lock.lock()
         var fresh := _kept.slice(maxi(0, _kept.size() - (_total - start)))
         _lock.unlock()
         var distinct: Array[String] = []
-        for error in fresh:
-            if not distinct.has(error):
-                distinct.append(error)
+        for entry in fresh:
+            if main_thread_only and not entry[1]:
+                continue
+            if not distinct.has(entry[0]):
+                distinct.append(entry[0])
         return distinct
 
 var _errors := ErrorCatcher.new()
@@ -108,6 +114,18 @@ func _ready() -> void:
 
 func _exit_tree() -> void:
     OS.remove_logger(_errors)
+
+## What `debug.evaluate` reads around an expression. The debugger runs an evaluate on the stopped
+## main thread, so only that thread's errors are the expression's.
+func error_total() -> int:
+    return _errors.total()
+
+func main_thread_errors_after(start: int) -> String:
+    return "\n".join(_errors.since(start, true))
+
+## Godot calls no logger at all while this is on, so a failure leaves no trace to read.
+func errors_go_unreported() -> bool:
+    return ProjectSettings.get_setting("application/run/disable_stderr", false)
 
 ## The editor pings when its debugger session appears, in case the first announcement raced the
 ## session setup; answering a ping with another announcement keeps both sides race-free.

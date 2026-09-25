@@ -4815,6 +4815,12 @@
                         "name": "variablesReference",
                         "kind": "int",
                         "required": true
+                    },
+                    {
+                        "name": "note",
+                        "kind": "text",
+                        "required": false,
+                        "note": "Present on a null the game could not vouch for."
                     }
                 ]
             },
@@ -5107,6 +5113,12 @@
                         "shape": "godotFrame",
                         "required": false,
                         "note": "Absent for a game asked to run without a display."
+                    },
+                    {
+                        "name": "stoppedAt",
+                        "kind": "text",
+                        "required": false,
+                        "note": "\"breakpoint\" when the game halted at an armed breakpoint before its first frame."
                     }
                 ]
             },

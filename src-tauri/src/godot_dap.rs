@@ -1108,6 +1108,8 @@ const DEBUGGEE_RUNNING: u8 = 0;
 const DEBUGGEE_IN_A_FRAME: u8 = 1;
 /// Halted by a pause, which stops the game between frames and leaves none to read.
 const DEBUGGEE_PAUSED: u8 = 2;
+/// Halted at a breakpoint: in a frame, and where someone asked it to stop.
+const DEBUGGEE_AT_A_BREAKPOINT: u8 = 3;
 
 /// No request is waiting to start a run. Request sequence numbers start at 1, so zero is free.
 const NO_BOUNDARY: u64 = 0;
@@ -1122,6 +1124,11 @@ pub fn debuggee_is_stopped() -> bool {
 /// and Godot echoes an empty `exception` behind it — see [`StoppedDetails::is_a_pauses_echo`].
 pub fn debuggee_is_paused() -> bool {
     DEBUGGEE_STATE.load(Ordering::Relaxed) == DEBUGGEE_PAUSED
+}
+
+/// Whether the halt is a breakpoint rather than an error, a step or a pause.
+pub fn debuggee_is_at_a_breakpoint() -> bool {
+    DEBUGGEE_STATE.load(Ordering::Relaxed) == DEBUGGEE_AT_A_BREAKPOINT
 }
 
 /// Records that the debuggee is running again.
@@ -1147,6 +1154,8 @@ fn how_the_debuggee_halted(body: Option<&Value>) -> u8 {
         .unwrap_or_default();
     if reason == "paused" || (reason == "exception" && text.is_empty()) {
         DEBUGGEE_PAUSED
+    } else if reason == "breakpoint" {
+        DEBUGGEE_AT_A_BREAKPOINT
     } else {
         DEBUGGEE_IN_A_FRAME
     }
@@ -1325,11 +1334,13 @@ fn write_message(writer: &mut TcpStream, message: &Value) -> Result<(), DapError
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     /// A pause and its empty exception echo leave no frame; every other stop is inside one.
     #[test]
     fn a_pause_and_its_echo_are_told_apart_from_a_stop_in_a_frame() {
-        use super::{DEBUGGEE_IN_A_FRAME, DEBUGGEE_PAUSED, how_the_debuggee_halted};
+        use super::{
+            DEBUGGEE_AT_A_BREAKPOINT, DEBUGGEE_IN_A_FRAME, DEBUGGEE_PAUSED, how_the_debuggee_halted,
+        };
         let halted = |body: serde_json::Value| how_the_debuggee_halted(Some(&body));
         assert_eq!(
             halted(serde_json::json!({"reason": "paused"})),
@@ -1345,7 +1356,7 @@ mod tests {
         );
         assert_eq!(
             halted(serde_json::json!({"reason": "breakpoint"})),
-            DEBUGGEE_IN_A_FRAME
+            DEBUGGEE_AT_A_BREAKPOINT
         );
         assert_eq!(
             halted(serde_json::json!({"reason": "step"})),
@@ -1360,7 +1371,7 @@ mod tests {
     use std::sync::mpsc::Receiver as MpscReceiver;
 
     /// What the fake adapter does with one incoming request.
-    enum FakeAction {
+    pub(crate) enum FakeAction {
         /// Answers `success: true` with the given body.
         Result(Value),
         /// Answers `success: false` with the given message and a DAP error object.
@@ -1373,15 +1384,15 @@ mod tests {
         ResultThen(Value, Vec<Value>),
     }
 
-    struct FakeServer {
-        address: SocketAddr,
+    pub(crate) struct FakeServer {
+        pub(crate) address: SocketAddr,
         received: MpscReceiver<Value>,
         join: JoinHandle<()>,
     }
 
     /// Runs a loopback DAP server that records every request and answers through `handler`. The
     /// handler also receives the writer so it can push events and out-of-order responses.
-    fn start_fake_server<F>(mut handler: F) -> FakeServer
+    pub(crate) fn start_fake_server<F>(mut handler: F) -> FakeServer
     where
         F: FnMut(&Value, &mut TcpStream) -> FakeAction + Send + 'static,
     {
@@ -1458,7 +1469,12 @@ mod tests {
 
     /// A handler that answers initialize with Godot's real capability shape and everything else
     /// with an empty body.
-    fn handshake_handler(_message: &Value, _writer: &mut TcpStream) -> FakeAction {
+    /// Pushes one event the way the adapter would, for a test outside this module.
+    pub(crate) fn push_event(writer: &mut TcpStream, event: &Value) {
+        write_message(writer, event).expect("push an event");
+    }
+
+    pub(crate) fn handshake_handler(_message: &Value, _writer: &mut TcpStream) -> FakeAction {
         FakeAction::Result(json!({}))
     }
 

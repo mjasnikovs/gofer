@@ -1505,6 +1505,40 @@ fn every_operation_no_turn_has_ever_used_still_answers() {
         "extends Node\n\nconst ART := preload(\"res://art/probe.png\")\n",
     )
     .expect("write a script that preloads the texture");
+    // Review of a6aef2e: a shader include was never looked for, and a scene naming the texture
+    // with its uid was listed although the uid still finds it.
+    std::fs::write(
+        session.worktree.join("art/common.gdshaderinc"),
+        "// shared\n",
+    )
+    .expect("write a shader include");
+    std::fs::create_dir_all(session.worktree.join("shaders")).expect("create shaders");
+    std::fs::write(
+        session.worktree.join("shaders/uses.gdshader"),
+        "shader_type canvas_item;\n#include \"res://art/common.gdshaderinc\"\n",
+    )
+    .expect("write a shader that includes it");
+    let import = std::fs::read_to_string(session.worktree.join("art/probe.png.import"))
+        .expect("the drawn texture was imported");
+    let uid = import
+        .lines()
+        .find_map(|line| line.strip_prefix("uid=\""))
+        .and_then(|rest| rest.strip_suffix('"'))
+        .expect("the import names a uid")
+        .to_owned();
+    std::fs::create_dir_all(session.worktree.join("scenes")).expect("create scenes");
+    std::fs::write(
+        session.worktree.join("scenes/pic.tscn"),
+        format!(
+            "[gd_scene load_steps=2 format=3]\n\n[ext_resource type=\"Texture2D\" uid=\"{uid}\" path=\"res://art/probe.png\" id=\"1\"]\n\n[node name=\"Pic\" type=\"Sprite2D\"]\ntexture = ExtResource(\"1\")\n"
+        ),
+    )
+    .expect("write a scene that names the texture by uid");
+    call(
+        "godot_resource",
+        json!({"ops": [{"op": "rescan", "paths": ["res://art/common.gdshaderinc", "res://shaders/uses.gdshader", "res://scenes/pic.tscn"]}]}),
+    )
+    .expect("register the new files");
     let approving = crate::godot_journey_acceptance::approve_when_asked();
     let renamed = call(
         "godot_resource",
@@ -1512,10 +1546,30 @@ fn every_operation_no_turn_has_ever_used_still_answers() {
     )
     .expect("move a directory a script still names");
     approving.join().expect("the approval responder");
+    call(
+        "godot_scene",
+        json!({"ops": [{"op": "open", "path": "scenes/pic.tscn"}]}),
+    )
+    .expect("open the scene that names the texture by uid");
+    let opened = call(
+        "godot_node",
+        json!({"ops": [{"op": "inspect", "node": "Pic", "properties": ["texture"]}]}),
+    );
+    assert_eq!(
+        opened
+            .as_ref()
+            .map(
+                |answer| answer["ops"][0]["result"]["properties"][0]["value"]["value"]["path"]
+                    .clone()
+            )
+            .unwrap_or_default(),
+        json!("res://artwork/probe.png"),
+        "the uid finds the moved texture: {opened:?}"
+    );
     assert_eq!(
         renamed["ops"][0]["result"]["stillReferencedBy"],
-        json!(["scripts/uses_probe.gd"]),
-        "a move names what still points at the old path: {renamed}"
+        json!(["scripts/uses_probe.gd", "shaders/uses.gdshader"]),
+        "a move names what still points at the old path, and only what no uid rescues: {renamed}\nthe scene after it: {opened:?}"
     );
 
     let approving = crate::godot_journey_acceptance::approve_when_asked();
@@ -2701,4 +2755,177 @@ fn a_breakpoint_nothing_can_stop_on_is_not_armed() {
 
     let _ = call(json!({"ops": [{"op": "terminate"}]}));
     let _ = call(json!({"ops": [{"op": "disconnect", "terminateDebuggee": true}]}));
+}
+
+/// Review of a6aef2e: a break before the first frame failed the launch as `runtime_broke`, and a
+/// breakpoint the model armed in `_process` is exactly such a break. The game stopped where it
+/// was asked to, and the run that got it there must not be told it failed.
+#[test]
+fn a_run_that_stops_at_an_armed_breakpoint_is_not_a_failed_launch() {
+    let session = start_session();
+    let app = mock_app();
+    let data = TempDir::new().expect("temporary application data");
+    let storage = crate::storage::ProjectStorage::open(data.path(), &session.worktree)
+        .expect("open project storage");
+    app.manage(crate::storage::StorageSlot::new(Ok(storage)));
+    let call = |tool: &str, params: Value| {
+        ai_tools::dispatch(
+            app.handle(),
+            ai_tools::ToolRequest {
+                tool: tool.to_owned(),
+                params,
+            },
+        )
+    };
+    call(
+        "godot_debug",
+        json!({"ops": [{"op": "set_breakpoints", "path": PROBE_PATH, "lines": [BREAK_LINE]}]}),
+    )
+    .expect("arm a breakpoint in _process");
+
+    let ran = call("godot_runtime", json!({"ops": [{"op": "run"}]}));
+
+    let state = call("godot_runtime", json!({"ops": [{"op": "get_state"}]}));
+    let _ = call(
+        "godot_debug",
+        json!({"ops": [{"op": "set_breakpoints", "path": PROBE_PATH, "lines": []}]}),
+    );
+    let _ = call("godot_runtime", json!({"ops": [{"op": "stop"}]}));
+    let ran = ran.unwrap_or_else(|failure| {
+        panic!(
+            "a run halted at the breakpoint it was armed with was answered as a failure: {} {}\nstate: {state:?}",
+            failure.code, failure.message
+        )
+    });
+    assert_eq!(ran["ops"][0]["result"]["running"], true, "{ran}");
+}
+
+/// The router, bound to one session, as a closure over one call.
+fn a_router_on(
+    session: &godot_editor_harness::Session,
+) -> (tauri::App<tauri::test::MockRuntime>, TempDir) {
+    let app = mock_app();
+    let data = TempDir::new().expect("temporary application data");
+    let storage = crate::storage::ProjectStorage::open(data.path(), &session.worktree)
+        .expect("open project storage");
+    app.manage(crate::storage::StorageSlot::new(Ok(storage)));
+    (app, data)
+}
+
+fn routed(
+    app: &tauri::App<tauri::test::MockRuntime>,
+    tool: &str,
+    params: Value,
+) -> Result<Value, ai_tools::ToolFailure> {
+    ai_tools::dispatch(
+        app.handle(),
+        ai_tools::ToolRequest {
+            tool: tool.to_owned(),
+            params,
+        },
+    )
+}
+
+fn stopped_at(app: &tauri::App<tauri::test::MockRuntime>, path: &str, line: i64) {
+    routed(
+        app,
+        "godot_debug",
+        json!({"ops": [{"op": "launch", "breakpoints": [{"path": path, "lines": [line]}]}]}),
+    )
+    .expect("the debugger launches the probe");
+    let stopped = routed(
+        app,
+        "godot_debug",
+        json!({"ops": [{"op": "await_stop", "timeoutMs": 60000}]}),
+    )
+    .expect("the breakpoint fires");
+    assert_eq!(
+        stopped["ops"][0]["result"]["stopped"]["reason"], "breakpoint",
+        "{stopped}"
+    );
+}
+
+fn evaluated(
+    app: &tauri::App<tauri::test::MockRuntime>,
+    expression: &str,
+) -> Result<Value, ai_tools::ToolFailure> {
+    routed(
+        app,
+        "godot_debug",
+        json!({"ops": [{"op": "evaluate", "expression": expression}]}),
+    )
+}
+
+fn let_the_probe_go(app: &tauri::App<tauri::test::MockRuntime>) {
+    let _ = routed(app, "godot_debug", json!({"ops": [{"op": "terminate"}]}));
+    let _ = routed(
+        app,
+        "godot_debug",
+        json!({"ops": [{"op": "disconnect", "terminateDebuggee": true}]}),
+    );
+}
+
+/// Review of a6aef2e: with the game's stderr off the marker never arrives, so every null waited
+/// out the request deadline and an unparsable expression was still answered as a null.
+#[test]
+fn an_evaluate_is_judged_without_the_games_stderr() {
+    let session = start_session();
+    let (app, _data) = a_router_on(&session);
+    routed(
+        &app,
+        "godot_project",
+        json!({"ops": [{"op": "set_setting", "name": "application/run/disable_stderr", "value": {"type": "bool", "value": true}}]}),
+    )
+    .expect("turn the game's stderr off");
+    stopped_at(&app, PROBE_PATH, BREAK_LINE);
+
+    let started = std::time::Instant::now();
+    let null = evaluated(&app, "null");
+    let took = started.elapsed();
+    let unparsable = evaluated(&app, "&\"probe\"");
+    let_the_probe_go(&app);
+
+    let null = null.unwrap_or_else(|failure| {
+        panic!("a real null failed: {} {}", failure.code, failure.message)
+    });
+    assert_eq!(null["ops"][0]["result"]["result"], "<null>", "{null}");
+    assert!(
+        took < crate::godot_dap::DEFAULT_REQUEST_TIMEOUT,
+        "a real null waited {took:?}, the whole request deadline"
+    );
+    // Measured on 4.7.2: with stderr off Godot calls no logger either, so nothing in the game can
+    // tell this apart from a null. The answer has to say that rather than pass for a value.
+    let unparsable = unparsable.expect("an evaluate is answered");
+    assert!(
+        unparsable["ops"][0]["result"]["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("disable_stderr")),
+        "a null the game cannot vouch for says so: {unparsable}"
+    );
+}
+
+/// The probe, with a worker thread that keeps printing errors while the main thread is stopped.
+const NAGGING_PROBE_SCRIPT: &str = "extends Node2D\n\nvar counter := 0\nvar _worker := Thread.new()\n\n@onready var label: Label = $Label\n\nfunc _ready() -> void:\n\t_worker.start(_nag)\n\nfunc _nag() -> void:\n\twhile true:\n\t\tpush_error(\"worker nag\")\n\t\tOS.delay_msec(5)\n\nfunc _process(_delta: float) -> void:\n\tcounter += 1\n";
+const NAGGING_BREAK_LINE: i64 = 17;
+
+/// Review of a6aef2e: every error line between the call and the marker counted as the
+/// expression's, including those of another thread the breakpoint does not stop.
+#[test]
+fn an_evaluate_is_not_blamed_for_another_threads_errors() {
+    let session = start_session();
+    std::fs::write(session.worktree.join(PROBE_PATH), NAGGING_PROBE_SCRIPT)
+        .expect("write the nagging probe");
+    let (app, _data) = a_router_on(&session);
+    stopped_at(&app, PROBE_PATH, NAGGING_BREAK_LINE);
+
+    let null = evaluated(&app, "null");
+    let_the_probe_go(&app);
+
+    let null = null.unwrap_or_else(|failure| {
+        panic!(
+            "a real null was blamed: {} {}",
+            failure.code, failure.message
+        )
+    });
+    assert_eq!(null["ops"][0]["result"]["result"], "<null>", "{null}");
 }

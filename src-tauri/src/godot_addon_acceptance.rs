@@ -3243,3 +3243,45 @@ fn a_rescan_of_a_directory_imports_the_assets_in_it() {
         assert_eq!(cut["grid"], json!([8, 2]), "{cut}");
     }
 }
+
+/// Review of a6aef2e: a directory expanded into its files skipped what `.gdignore` keeps out of
+/// the project, and skipped the cap that turns a batch too large to import one by one into a walk.
+#[test]
+fn a_rescan_of_a_directory_keeps_to_the_project_and_its_cap() {
+    const ATLAS: &[u8] = include_bytes!("../../fixtures/live-project/assets/tiles.png");
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = fixture_worktree(&directory);
+    let ledger = directory.path().join("ledger.json");
+    let session = Session::start_on_worktree(worktree.clone(), ledger, Some(directory));
+
+    std::fs::create_dir_all(worktree.join("art/raw")).expect("create an ignored directory");
+    std::fs::write(worktree.join("art/raw/.gdignore"), "").expect("ignore it");
+    std::fs::write(worktree.join("art/raw/source.png"), ATLAS).expect("write an ignored image");
+    std::fs::write(worktree.join("art/kept.png"), ATLAS).expect("write a kept image");
+    session.call("resource.rescan", json!({"paths": ["res://art"]}));
+    assert!(
+        worktree.join("art/kept.png.import").exists(),
+        "the kept image is imported"
+    );
+    assert!(
+        !worktree.join("art/raw/source.png.import").exists(),
+        "an image under .gdignore was imported"
+    );
+
+    std::fs::create_dir_all(worktree.join("many")).expect("create a large directory");
+    for index in 0..300 {
+        std::fs::write(worktree.join(format!("many/{index}.png")), ATLAS).expect("write an image");
+    }
+    let many = session.call("resource.rescan", json!({"paths": ["res://many"]}));
+    let listed = many["files"].as_array().map_or(0, Vec::len);
+    assert!(
+        listed <= 256,
+        "one directory answered {listed} entries, past the cap a batch is held to"
+    );
+    for index in [0, 299] {
+        assert!(
+            worktree.join(format!("many/{index}.png.import")).exists(),
+            "the walk a large directory becomes still imports it"
+        );
+    }
+}

@@ -512,17 +512,30 @@ fn belongs_to_the_current_game(entry: &LogEntry) -> bool {
         .any(|marker| entry.message.contains(marker))
 }
 
+/// Only for what the editor printed before this game started: what the game itself printed is
+/// about the code it runs, whatever was saved since. A file that is gone is changed too.
 fn is_about_a_file_changed_since(entry: &LogEntry) -> bool {
+    let launched = game_launch_cursor();
+    if launched != 0 && entry.sequence > launched {
+        return false;
+    }
     let Some(info) = current_info() else {
         return false;
     };
-    let Some(path) = the_res_path_in(&entry.message)
-        .or_else(|| the_line_after(entry.sequence).and_then(|under| the_res_path_in(&under)))
+    // A parse error names what it failed on, such as a missing preload; the frame under it names
+    // the script that holds it.
+    let Some(path) = the_line_after(entry.sequence)
+        .filter(|under| under.trim_start().starts_with("at:"))
+        .and_then(|under| the_res_path_in(&under))
+        .or_else(|| the_res_path_in(&entry.message))
     else {
         return false;
     };
-    std::fs::metadata(std::path::Path::new(&info.worktree).join(path))
-        .and_then(|metadata| metadata.modified())
+    let Ok(metadata) = std::fs::metadata(std::path::Path::new(&info.worktree).join(path)) else {
+        return true;
+    };
+    metadata
+        .modified()
         .ok()
         .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
         .is_some_and(|modified| modified.as_millis() > u128::from(entry.timestamp))
@@ -653,7 +666,7 @@ mod tests {
     use super::*;
     use crate::godot_session::{
         ExternalEditor, LogSource, MAX_LOG_PAGE, REQUIRED_ENGINE_VERSION, SESSION_TEST_LOCK,
-        SessionInfo, append_log, backdate_logs, bind, clear_logs, note_a_game_launch,
+        SessionInfo, append_log, backdate_logs, bind, clear_logs,
     };
     use serde_json::json;
 
@@ -1688,6 +1701,18 @@ mod tests {
         );
     }
 
+    /// A game starting, as the log sees one: its banner, after the editor's.
+    fn note_a_game_launch() {
+        append_log(
+            LogSource::Editor,
+            "Godot Engine v4.7.2.stable.official.ed1daf0bf\n",
+        );
+        append_log(
+            LogSource::Editor,
+            "Godot Engine v4.7.2.stable.official.ed1daf0bf\n",
+        );
+    }
+
     /// A worktree holding one script, last written `age` ago, bound as the session's.
     fn a_session_on_a_script_written(age: std::time::Duration) -> tempfile::TempDir {
         let worktree = tempfile::TempDir::new().expect("temporary worktree");
@@ -1823,6 +1848,125 @@ mod tests {
         assert!(
             !carried.message.contains("did not compile"),
             "a runtime error was called a compile failure: {}",
+            carried.message
+        );
+    }
+
+    const EDITOR_BANNER: (LogSource, &str) = (
+        LogSource::Editor,
+        "Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org",
+    );
+
+    /// Review of a6aef2e: only the router's runtime.run marked a launch, so a game started from
+    /// the Game view or with Play in Godot still carried the errors of the game before it. Every
+    /// game prints the engine banner as its first line, whoever started it.
+    #[test]
+    fn a_game_nobody_routed_still_starts_a_new_window() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[
+            EDITOR_BANNER,
+            (
+                LogSource::EditorError,
+                "ERROR: Index p_x = 256 is out of bounds (width = 256).",
+            ),
+            EDITOR_BANNER,
+            (LogSource::EditorError, "ERROR: Node not found: \"Light\"."),
+        ]);
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_timeout",
+            "The game did not answer in time",
+        ));
+
+        assert!(
+            carried.message.contains("Node not found"),
+            "{}",
+            carried.message
+        );
+        assert!(
+            !carried.message.contains("p_x"),
+            "the game before this one was carried: {}",
+            carried.message
+        );
+    }
+
+    /// Review of a6aef2e: a runtime.run the addon refused still moved the window, and the game
+    /// that was running all along lost the error that explains it.
+    #[test]
+    fn a_launch_that_never_started_a_game_keeps_the_running_games_errors() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[
+            EDITOR_BANNER,
+            EDITOR_BANNER,
+            (LogSource::EditorError, "ERROR: Node not found: \"Light\"."),
+        ]);
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_timeout",
+            "The game did not answer in time",
+        ));
+
+        assert!(
+            carried.message.contains("Node not found"),
+            "the running game's error was dropped by a launch that never happened: {}",
+            carried.message
+        );
+    }
+
+    /// Review of a6aef2e: a parse error in a script since deleted passed the launch window and
+    /// was never "changed since", so every later failure said "did not compile" about it.
+    #[test]
+    fn a_parse_error_about_a_script_since_deleted_is_not_carried() {
+        let _test = session_test_lock();
+        let worktree = tempfile::TempDir::new().expect("temporary worktree");
+        bind(Some(std::sync::Arc::new(ExternalEditor::at(
+            0,
+            0,
+            worktree.path(),
+        ))));
+        given_the_session_printed(&PARSE_ERROR_IN_PROBE);
+        note_a_game_launch();
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_not_running",
+            "The game stopped before it could answer",
+        ));
+
+        bind(None);
+        assert!(
+            !carried.message.contains("did not compile"),
+            "a script that is gone was blamed: {}",
+            carried.message
+        );
+    }
+
+    /// Review of a6aef2e: saving a script while its game runs dropped the runtime error the game
+    /// had just printed about it, which is the error that ended it.
+    #[test]
+    fn a_runtime_error_is_kept_when_its_script_is_saved_afterwards() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[]);
+        note_a_game_launch();
+        append_log(
+            LogSource::EditorError,
+            "SCRIPT ERROR: Invalid access to property or key 'energy' on a base object of type 'null instance'.\n",
+        );
+        append_log(
+            LogSource::EditorError,
+            "          at: _ready (res://scripts/probe.gd:4)\n",
+        );
+        backdate_logs(60 * 1000);
+        let _worktree = a_session_on_a_script_written(std::time::Duration::ZERO);
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_not_running",
+            "The game stopped before it could answer",
+        ));
+
+        bind(None);
+        assert!(
+            carried.message.contains("Invalid access"),
+            "the error that ended the game was dropped: {}",
             carried.message
         );
     }

@@ -1110,16 +1110,21 @@ fn run_one<R: Runtime>(
 }
 
 /// The project files that still spell `res://` + `moved`, as the file itself or a directory above
-/// a file. A move rewrites none of them, and a `preload` of the old path no longer compiles.
-fn files_naming(root: &std::path::Path, moved: &str) -> Vec<String> {
+/// a file. A move rewrites none of them, and a `preload` of the old path no longer compiles. An
+/// `ext_resource` whose uid the moved file still carries is left out: Godot finds it by that uid.
+fn files_naming(root: &std::path::Path, moved: &str, now_at: &str) -> Vec<String> {
     let old = format!(
         "res://{}",
         moved.trim_start_matches("res://").trim_end_matches('/')
     );
-    let names = |text: &str| {
-        text.match_indices(&old).any(|(at, _)| {
+    let carried = uids_under(root, now_at.trim_start_matches("res://"));
+    let rescued = |line: &str| {
+        line.starts_with("[ext_resource") && uid_in(line).is_some_and(|uid| carried.contains(uid))
+    };
+    let names = |line: &str| {
+        line.match_indices(&old).any(|(at, _)| {
             matches!(
-                text[at + old.len()..].chars().next(),
+                line[at + old.len()..].chars().next(),
                 Some('/' | '"' | '\'')
             )
         })
@@ -1128,15 +1133,79 @@ fn files_naming(root: &std::path::Path, moved: &str) -> Vec<String> {
         .into_keys()
         .filter(|path| !is_goferns_own(path))
         .filter(|path| {
-            ["gd", "tscn", "tres", "godot"].contains(
+            [
+                "gd",
+                "cs",
+                "tscn",
+                "tres",
+                "godot",
+                "cfg",
+                "gdshader",
+                "gdshaderinc",
+            ]
+            .contains(
                 &std::path::Path::new(path)
                     .extension()
                     .and_then(|e| e.to_str())
                     .unwrap_or(""),
             )
         })
-        .filter(|path| std::fs::read_to_string(root.join(path)).is_ok_and(|text| names(&text)))
+        .filter(|path| {
+            std::fs::read_to_string(root.join(path))
+                .is_ok_and(|text| text.lines().any(|line| names(line) && !rescued(line)))
+        })
         .collect()
+}
+
+/// The first `uid="…"` a line carries.
+fn uid_in(line: &str) -> Option<&str> {
+    let rest = &line[line.find("uid=\"")? + "uid=\"".len()..];
+    Some(&rest[..rest.find('"')?])
+}
+
+/// Every uid the files under `relative` answer to: an asset's in its `.import`, a script's in its
+/// `.uid`, a scene's or resource's in its own header.
+fn uids_under(root: &std::path::Path, relative: &str) -> std::collections::HashSet<String> {
+    let relative = relative.trim_end_matches('/');
+    let mut uids = std::collections::HashSet::new();
+    for path in files::scan(root).into_keys() {
+        if path != relative && !path.starts_with(&format!("{relative}/")) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(root.join(&path)) else {
+            continue;
+        };
+        let uid = if path.ends_with(".uid") {
+            Some(text.trim())
+        } else if path.ends_with(".import") || path.ends_with(".tscn") || path.ends_with(".tres") {
+            text.lines().find_map(uid_in)
+        } else {
+            None
+        };
+        uids.extend(
+            uid.filter(|uid| uid.starts_with("uid://"))
+                .map(str::to_owned),
+        );
+    }
+    uids
+}
+
+/// A game that halts before its first frame fails the launch, but a halt at a breakpoint the
+/// caller armed is the run doing what it was asked. Only the adapter knows which it was, and its
+/// stop arrives on its own socket, after the editor's answer.
+fn a_launch_stopped_where_it_was_asked_to(command: &str) -> Option<Value> {
+    if !matches!(command, "runtime.run" | "runtime.restart")
+        || crate::debug::armed_breakpoints().is_empty()
+    {
+        return None;
+    }
+    let deadline = std::time::Instant::now() + crate::godot_dap::SETTLE_TIMEOUT;
+    // The adapter's reader sets this flag; the event itself is await_stop's to take.
+    while !crate::godot_dap::debuggee_is_stopped() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    crate::godot_dap::debuggee_is_at_a_breakpoint()
+        .then(|| json!({"running": true, "stoppedAt": "breakpoint"}))
 }
 
 /// The routing itself, apart from the ledger that watches it.
@@ -1152,9 +1221,6 @@ fn route_one<R: Runtime>(
             a_path_that_climbs_out(operation, &params)?;
             if domain.name == "godot_runtime" {
                 crate::session_diagnosis::a_game_the_debugger_has_halted(op)?;
-            }
-            if matches!(command, "runtime.run" | "runtime.restart") {
-                crate::godot_session::note_a_game_launch();
             }
             let save_to = matches!(
                 command,
@@ -1192,6 +1258,12 @@ fn route_one<R: Runtime>(
             {
                 crate::script::reparse_open_documents();
             }
+            let answered = match answered {
+                Err(failure) if failure.code == "runtime_broke" && op != "stop" => {
+                    a_launch_stopped_where_it_was_asked_to(command).ok_or(failure)
+                }
+                answered => answered,
+            };
             if domain.name == "godot_runtime" {
                 // The adapter's own terminated event says the same, on another socket, later.
                 if answered.is_ok() && op == "stop" {
@@ -1484,7 +1556,7 @@ fn resource_domain<R: Runtime>(
             let workspace = crate::active_workspace(app)?;
             let also_moved = workspace.move_path(&request.from, &request.to)?;
             tell_the_editor_the_worktree_moved(app);
-            let still_referenced_by = files_naming(workspace.root(), &request.from);
+            let still_referenced_by = files_naming(workspace.root(), &request.from, &request.to);
             Ok(json!({
                 "from": request.from,
                 "to": request.to,
