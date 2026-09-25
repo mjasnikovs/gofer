@@ -12,7 +12,7 @@
 use crate::ai_tools::ToolFailure;
 use crate::godot_session::{
     LogEntry, LogQuery, LogSeverity, SessionState, current_info, current_state, editor_has_exited,
-    newest_logs, now_millis, read_logs,
+    game_launch_cursor, newest_logs, now_millis, read_logs,
 };
 use std::sync::LazyLock;
 
@@ -388,7 +388,9 @@ fn the_games_own_scripts_did_not_compile(facts: &SessionFacts) -> Option<String>
     // The editor's language server spells the same failure `ERROR: LSP: Failed to parse script:`
     // — a warning the project treats as an error reached a live turn that way, and only that way.
     if !facts.errors.iter().any(|line| {
-        line.starts_with("SCRIPT ERROR:") || line.starts_with("ERROR: LSP: Failed to parse script")
+        line.starts_with("SCRIPT ERROR: Parse Error:")
+            || line.starts_with("SCRIPT ERROR: Compile Error:")
+            || line.starts_with("ERROR: LSP: Failed to parse script")
     }) {
         return None;
     }
@@ -481,7 +483,9 @@ fn last_session_errors(wanted: usize) -> Vec<String> {
     )
     .into_iter()
     .filter(|entry| {
-        !is_the_engines_own_epilogue(&entry.message)
+        belongs_to_the_current_game(entry)
+            && !is_about_a_file_changed_since(entry)
+            && !is_the_engines_own_epilogue(&entry.message)
             && !is_the_editor_talking_to_itself(&entry.message)
             && !is_a_thumbnail_the_headless_editor_cannot_draw(entry)
     })
@@ -492,6 +496,44 @@ fn last_session_errors(wanted: usize) -> Vec<String> {
     .into_iter()
     .rev()
     .collect()
+}
+
+/// A game that fails to load prints nothing of its own: the editor printed why beforehand, so a
+/// load failure from before the launch still counts and anything else does not.
+fn belongs_to_the_current_game(entry: &LogEntry) -> bool {
+    entry.sequence > game_launch_cursor()
+        || [
+            "Parse Error:",
+            "Compile Error:",
+            "Failed to load script",
+            "LSP: Failed to parse",
+        ]
+        .iter()
+        .any(|marker| entry.message.contains(marker))
+}
+
+fn is_about_a_file_changed_since(entry: &LogEntry) -> bool {
+    let Some(info) = current_info() else {
+        return false;
+    };
+    let Some(path) = the_res_path_in(&entry.message)
+        .or_else(|| the_line_after(entry.sequence).and_then(|under| the_res_path_in(&under)))
+    else {
+        return false;
+    };
+    std::fs::metadata(std::path::Path::new(&info.worktree).join(path))
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .is_some_and(|modified| modified.as_millis() > u128::from(entry.timestamp))
+}
+
+/// The project path a line names, as `res://scripts/a.gd` in a message or `(res://scripts/a.gd:4)`
+/// in the frame under it.
+fn the_res_path_in(line: &str) -> Option<String> {
+    let rest = &line[line.find("res://")? + "res://".len()..];
+    let end = rest.find([':', '"', ')', '\'']).unwrap_or(rest.len());
+    Some(rest[..end].to_owned()).filter(|path| !path.is_empty())
 }
 
 /// A line the engine prints while taking itself apart, rather than about the project.
@@ -611,7 +653,7 @@ mod tests {
     use super::*;
     use crate::godot_session::{
         ExternalEditor, LogSource, MAX_LOG_PAGE, REQUIRED_ENGINE_VERSION, SESSION_TEST_LOCK,
-        SessionInfo, append_log, backdate_logs, bind, clear_logs,
+        SessionInfo, append_log, backdate_logs, bind, clear_logs, note_a_game_launch,
     };
     use serde_json::json;
 
@@ -1643,6 +1685,145 @@ mod tests {
         assert_eq!(
             carried.message,
             "A value must be a tagged object with a type and a value"
+        );
+    }
+
+    /// A worktree holding one script, last written `age` ago, bound as the session's.
+    fn a_session_on_a_script_written(age: std::time::Duration) -> tempfile::TempDir {
+        let worktree = tempfile::TempDir::new().expect("temporary worktree");
+        std::fs::create_dir_all(worktree.path().join("scripts")).expect("scripts directory");
+        let script = worktree.path().join("scripts/probe.gd");
+        std::fs::write(&script, "extends Node\n").expect("write the script");
+        std::fs::File::options()
+            .write(true)
+            .open(&script)
+            .and_then(|file| file.set_modified(std::time::SystemTime::now() - age))
+            .expect("age the script");
+        bind(Some(std::sync::Arc::new(ExternalEditor::at(
+            0,
+            0,
+            worktree.path(),
+        ))));
+        worktree
+    }
+
+    const PARSE_ERROR_IN_PROBE: [(LogSource, &str); 2] = [
+        (
+            LogSource::EditorError,
+            "SCRIPT ERROR: Parse Error: Function \"PoolVector2Array()\" not found in base self.",
+        ),
+        (
+            LogSource::EditorError,
+            "          at: GDScript::reload (res://scripts/probe.gd:4)",
+        ),
+    ];
+
+    /// city, 2026-09-17 11:35: the index errors of a game run fourteen minutes earlier went out
+    /// under the run that failed on a missing node.
+    #[test]
+    fn an_error_from_an_earlier_game_is_not_carried_for_this_one() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[(
+            LogSource::EditorError,
+            "ERROR: Index p_x = 256 is out of bounds (width = 256).",
+        )]);
+        note_a_game_launch();
+        append_log(
+            LogSource::EditorError,
+            "ERROR: Node not found: \"Light\" (relative to \"/root/LampTest\").\n",
+        );
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_timeout",
+            "The game did not answer in time",
+        ));
+
+        assert!(
+            carried.message.contains("Node not found"),
+            "{}",
+            carried.message
+        );
+        assert!(
+            !carried.message.contains("p_x"),
+            "an earlier game's error was carried: {}",
+            carried.message
+        );
+    }
+
+    /// The editor prints a parse error and the game it then runs prints nothing of its own, so a
+    /// parse error from before the launch still explains it while the script is unchanged.
+    #[test]
+    fn a_parse_error_printed_before_the_run_still_explains_it() {
+        let _test = session_test_lock();
+        let _worktree = a_session_on_a_script_written(std::time::Duration::from_secs(60));
+        given_the_session_printed(&PARSE_ERROR_IN_PROBE);
+        note_a_game_launch();
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_slow_start",
+            "The game is running and its helper has not answered yet",
+        ));
+
+        bind(None);
+        assert!(
+            carried.message.contains("did not compile"),
+            "{}",
+            carried.message
+        );
+        assert!(
+            carried.message.contains("PoolVector2Array"),
+            "{}",
+            carried.message
+        );
+    }
+
+    /// city, 2026-09-17 10:09: parse errors about a version of the script already saved over,
+    /// with clean diagnostics, were carried as the reason its run failed.
+    #[test]
+    fn a_parse_error_about_a_script_saved_since_is_not_carried() {
+        let _test = session_test_lock();
+        given_the_session_printed(&PARSE_ERROR_IN_PROBE);
+        backdate_logs(60 * 1000);
+        let _worktree = a_session_on_a_script_written(std::time::Duration::ZERO);
+        note_a_game_launch();
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_not_running",
+            "The game stopped before it could answer",
+        ));
+
+        bind(None);
+        assert!(
+            !carried.message.contains("did not compile")
+                && !carried.message.contains("PoolVector2Array"),
+            "a parse error the script was saved over was carried: {}",
+            carried.message
+        );
+    }
+
+    /// Godot prefixes a runtime error with `SCRIPT ERROR:` too.
+    #[test]
+    fn a_runtime_script_error_is_not_called_a_compile_failure() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[(
+            LogSource::EditorError,
+            "SCRIPT ERROR: Invalid access to property or key 'energy' on a base object of type 'null instance'.",
+        )]);
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_not_running",
+            "The game stopped before it could answer",
+        ));
+
+        assert!(
+            carried.message.contains("Invalid access"),
+            "{}",
+            carried.message
+        );
+        assert!(
+            !carried.message.contains("did not compile"),
+            "a runtime error was called a compile failure: {}",
+            carried.message
         );
     }
 }

@@ -24,7 +24,7 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -477,6 +477,41 @@ fn what_a_timed_out_evaluate_usually_means(expression: &str, failure: DapError) 
     failure
 }
 
+static EVALUATE_MARKS: AtomicU64 = AtomicU64::new(0);
+
+/// Godot answers `<null>` alike for a real null, an expression it cannot parse and a call that
+/// failed; only the errors the stopped game printed while evaluating tell them apart.
+fn refusing_a_null_the_game_failed_to_compute(
+    client: &DapClient,
+    expression: &str,
+    frame_id: Option<i64>,
+    before: u64,
+) -> Result<(), DapError> {
+    let mark = format!(
+        "{}{}",
+        godot_session::LOG_MARK_PREFIX,
+        EVALUATE_MARKS.fetch_add(1, Ordering::Relaxed)
+    );
+    // printerr shares stderr with the engine's errors, so its line arriving means theirs have.
+    client.evaluate(&format!("printerr(\"{mark}\")"), frame_id)?;
+    let errors =
+        godot_session::errors_before_mark(before, &mark, crate::godot_dap::DEFAULT_REQUEST_TIMEOUT)
+            .unwrap_or_default();
+    if errors.is_empty() {
+        return Ok(());
+    }
+    let printed: Vec<&str> = errors.iter().map(|entry| entry.message.as_str()).collect();
+    Err(DapError::new(
+        "evaluate_failed",
+        format!(
+            "Godot could not evaluate `{expression}` and answered null in its place. The game \
+             printed: {} Evaluate parses Godot's Expression syntax, which is narrower than \
+             GDScript: a StringName literal like &\"name\" does not parse, use \"name\".",
+            printed.join(" ")
+        ),
+    ))
+}
+
 /// Refuses an evaluate that has no frame to run in, before the adapter spends five seconds not
 /// answering it.
 ///
@@ -691,11 +726,14 @@ fn answer(request: DebugRequest) -> Result<DebugResponse, DapError> {
                 crate::godot_dap::debuggee_is_stopped(),
                 crate::godot_dap::debuggee_is_paused(),
             )?;
-            Ok(DebugResponse::Evaluate {
-                result: client.evaluate(&expression, frame_id).map_err(|failure| {
-                    what_a_timed_out_evaluate_usually_means(&expression, failure)
-                })?,
-            })
+            let before = godot_session::log_cursor();
+            let result = client
+                .evaluate(&expression, frame_id)
+                .map_err(|failure| what_a_timed_out_evaluate_usually_means(&expression, failure))?;
+            if result.result == "<null>" && result.variables_reference == 0 {
+                refusing_a_null_the_game_failed_to_compute(&client, &expression, frame_id, before)?;
+            }
+            Ok(DebugResponse::Evaluate { result })
         }
         DebugRequest::Continue { thread_id } => Ok(DebugResponse::Continued {
             all_threads: client.continue_execution(thread_id.unwrap_or(MAIN_THREAD_ID))?,
@@ -852,6 +890,7 @@ fn launch(
     breakpoints: Vec<SourceBreakpoints>,
 ) -> Result<DebugResponse, DapError> {
     ensure_scene_open()?;
+    godot_session::note_a_game_launch();
     let launching = client.start_launch(workspace.root(), scene, &play_args)?;
 
     let mut verified = Vec::new();
@@ -913,11 +952,31 @@ fn set_breakpoints(
 ) -> Result<Vec<VerifiedBreakpoint>, DapError> {
     let absolute = resolve(workspace, path)?;
     let relative = relative_path(workspace, &absolute).unwrap_or_else(|| path.to_owned());
+    if !lines.is_empty() && !absolute.is_file() {
+        return Err(DapError::new(
+            "not_found",
+            format!("{relative} does not exist, so no breakpoint can be set in it."),
+        ));
+    }
     let text = std::fs::read_to_string(&absolute).unwrap_or_default();
-    let moved = without_a_line_twice(lines.iter().map(|line| Moved::of(&text, *line)));
+    let count = i64::try_from(text.lines().count()).unwrap_or(i64::MAX);
+    // Godot verifies a line the file does not have, and never stops there.
+    let (inside, outside): (Vec<i64>, Vec<i64>) =
+        lines.iter().partition(|line| (1..=count).contains(*line));
+    let moved = without_a_line_twice(inside.iter().map(|line| Moved::of(&text, *line)));
     let asked: Vec<i64> = moved.iter().map(|one| one.line).collect();
     let taken = client.set_breakpoints(&absolute, &asked)?;
     note_the_armed_breakpoints(&relative, &asked);
+    let outside = outside.into_iter().map(|line| VerifiedBreakpoint {
+        path: relative.clone(),
+        line: Some(line),
+        verified: false,
+        message: Some(if line < 1 {
+            format!("Line {line} is not a line: lines count from 1.")
+        } else {
+            format!("Line {line} is past the end of {relative}, which has {count} lines.")
+        }),
+    });
     Ok(taken
         .into_iter()
         .zip(moved)
@@ -929,6 +988,7 @@ fn set_breakpoints(
                 message: breakpoint.message.or_else(|| moved.note()),
             },
         )
+        .chain(outside)
         .collect())
 }
 

@@ -47,6 +47,50 @@ const MAX_WAIT_FRAMES := 600
 ## Every `Performance.Monitor` constant is accepted; these three are what "how is it running" asks.
 const DEFAULT_MONITORS: Array[String] = ["TIME_FPS", "MEMORY_STATIC", "OBJECT_NODE_COUNT"]
 
+## Bounds what a game that errors every frame keeps in memory; an answer carries far fewer.
+const MAX_KEPT_ERRORS := 64
+
+## Every engine error the game prints, so an op can answer with the ones its own frames caused.
+class ErrorCatcher extends Logger:
+    var _lock := Mutex.new()
+    var _kept: Array[String] = []
+    var _total := 0
+
+    func _log_error(
+        _function: String,
+        _file: String,
+        _line: int,
+        code: String,
+        rationale: String,
+        _editor_notify: bool,
+        _error_type: int,
+        _script_backtraces: Array[ScriptBacktrace]
+    ) -> void:
+        _lock.lock()
+        _kept.append(code if rationale.is_empty() else rationale)
+        if _kept.size() > MAX_KEPT_ERRORS:
+            _kept.pop_front()
+        _total += 1
+        _lock.unlock()
+
+    func total() -> int:
+        _lock.lock()
+        var counted := _total
+        _lock.unlock()
+        return counted
+
+    ## The distinct errors printed since `total()` read `start`, oldest first.
+    func since(start: int) -> Array[String]:
+        _lock.lock()
+        var fresh := _kept.slice(maxi(0, _kept.size() - (_total - start)))
+        _lock.unlock()
+        var distinct: Array[String] = []
+        for error in fresh:
+            if not distinct.has(error):
+                distinct.append(error)
+        return distinct
+
+var _errors := ErrorCatcher.new()
 var _tree_nodes_seen: int = 0
 var _tree_truncated: bool = false
 ## The bounds of the walk in progress, taken from the call and held at the engine's own caps.
@@ -59,7 +103,11 @@ func _ready() -> void:
     if not EngineDebugger.is_active():
         return
     EngineDebugger.register_message_capture("gofer", _on_editor_message)
+    OS.add_logger(_errors)
     _announce_ready()
+
+func _exit_tree() -> void:
+    OS.remove_logger(_errors)
 
 ## The editor pings when its debugger session appears, in case the first announcement raced the
 ## session setup; answering a ping with another announcement keeps both sides race-free.
@@ -369,7 +417,10 @@ func _op_set(params: Dictionary) -> Dictionary:
     var decoded := Protocol.decode(params.get("value", null))
     if not decoded["ok"]:
         return _failure("unsupported_value", decoded["message"])
-    node.set(property, decoded["value"])
+    var fitted := Params.fit_to_property(node, property, decoded["value"])
+    if not fitted["ok"]:
+        return _failure("unsupported_value", "%s.%s: %s" % [path, property, fitted["message"]])
+    node.set(property, fitted["value"])
     return _succeed({
         "path": str(node.get_path()),
         "property": property,
@@ -398,6 +449,7 @@ func _op_input(params: Dictionary) -> Dictionary:
     var events: Array = decoded["events"]
     if events.is_empty():
         return _failure("invalid_params", "runtime.input requires at least one event")
+    var errors_before := _errors.total()
     # One event per physics frame. A press and its release parsed in the same instant were never
     # held for any physics step: a script polling is_action_pressed there read false every time,
     # and a live turn rewrote a working jump around it.
@@ -408,6 +460,9 @@ func _op_input(params: Dictionary) -> Dictionary:
     await get_tree().process_frame
     await RenderingServer.frame_post_draw
     var result := _succeed({"applied": events.size()})
+    var errors := _errors.since(errors_before)
+    if not errors.is_empty():
+        result["errors"] = errors
     var frame := _capture_frame()
     if frame.get("ok", false):
         result["frame"] = frame["frame"]

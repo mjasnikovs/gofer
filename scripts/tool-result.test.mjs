@@ -218,6 +218,34 @@ test('says so when the same call keeps meeting the same refusal', async () => {
     assert.deepEqual(await withoutRepeatingARefusal(working).execute('id', {}), {content: []})
 })
 
+// swarm, 2026-09-25: runtime.capture was refused twice, debug.disconnect then succeeded, and the
+// third capture was told nothing had changed, without the refusal it had actually met.
+test('a call that succeeds in between starts the count again, and the refusal is still read', async () => {
+    const heard = new Map()
+    const refusal = 'runtime_timeout: The game did not answer in time'
+    const capture = withoutRepeatingARefusal(
+        {name: 'godot', execute: () => Promise.reject(new Error(refusal))},
+        heard
+    )
+    const disconnect = withoutRepeatingARefusal(
+        {name: 'bash', execute: () => Promise.resolve({content: []})},
+        heard
+    )
+    const params = {ops: [{op: 'runtime.capture'}]}
+    const said = []
+    const refused = () => capture.execute('id', params).catch(error => said.push(error.message))
+    await refused()
+    await refused()
+    await disconnect.execute('id', {command: 'true'})
+    await refused()
+    await refused()
+    await refused()
+    assert.deepEqual(said.slice(0, 4), [refusal, refusal, refusal, refusal])
+    assert.match(said[4], /refused this exact call 3 times/u)
+    assert.ok(said[4].includes(refusal), said[4])
+    assert.doesNotMatch(said[4], /nothing about the project changed/u)
+})
+
 test('the two decorators stack in either order', async () => {
     const answering = {
         name: 'read',

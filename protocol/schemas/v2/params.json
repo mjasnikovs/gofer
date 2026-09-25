@@ -3197,6 +3197,15 @@
                         },
                         "required": true,
                         "note": "The sidecars that went with it — its `.uid`, an asset's `.import` — under their new names."
+                    },
+                    {
+                        "name": "stillReferencedBy",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "text"
+                        },
+                        "required": true,
+                        "note": "Project files that still name the old path. A move rewrites none of them."
                     }
                 ]
             },
@@ -5420,6 +5429,14 @@
                         "name": "frame",
                         "kind": "shape",
                         "shape": "godotFrame",
+                        "required": false
+                    },
+                    {
+                        "name": "errors",
+                        "kind": "listOf",
+                        "of": {
+                            "kind": "text"
+                        },
                         "required": false
                     }
                 ]

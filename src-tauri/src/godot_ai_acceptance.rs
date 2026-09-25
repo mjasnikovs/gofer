@@ -1498,10 +1498,30 @@ fn every_operation_no_turn_has_ever_used_still_answers() {
     );
     assert!(session.worktree.join("scripts/broken_moved.gd").exists());
 
+    // swarm, 2026-09-03: eight asset folders moved with `moved: true`, and six scripts that
+    // preloaded the old paths stopped compiling.
+    std::fs::write(
+        session.worktree.join("scripts/uses_probe.gd"),
+        "extends Node\n\nconst ART := preload(\"res://art/probe.png\")\n",
+    )
+    .expect("write a script that preloads the texture");
+    let approving = crate::godot_journey_acceptance::approve_when_asked();
+    let renamed = call(
+        "godot_resource",
+        json!({"ops": [{"op": "move", "from": "art", "to": "artwork"}]}),
+    )
+    .expect("move a directory a script still names");
+    approving.join().expect("the approval responder");
+    assert_eq!(
+        renamed["ops"][0]["result"]["stillReferencedBy"],
+        json!(["scripts/uses_probe.gd"]),
+        "a move names what still points at the old path: {renamed}"
+    );
+
     let approving = crate::godot_journey_acceptance::approve_when_asked();
     let deleted = call(
         "godot_resource",
-        json!({"ops": [{"op": "delete", "path": "art/hitbox.tres"}]}),
+        json!({"ops": [{"op": "delete", "path": "artwork/hitbox.tres"}]}),
     )
     .expect("delete a file inside the worktree");
     assert_eq!(deleted["ops"][0]["result"]["deleted"], true, "{deleted}");
@@ -1514,7 +1534,7 @@ fn every_operation_no_turn_has_ever_used_still_answers() {
         1,
         "deleting a file is gated, so the delete must have been approved rather than waved through"
     );
-    assert!(!session.worktree.join("art/hitbox.tres").exists());
+    assert!(!session.worktree.join("artwork/hitbox.tres").exists());
 
     // Enabling the plugin that is already enabled: the one call this command answers without
     // severing the session that carries it, and the editor's own `changed: false` is the proof it
@@ -1926,6 +1946,19 @@ fn every_runtime_operation_no_turn_has_ever_used_still_answers() {
     )
     .expect_err("a property the node does not have is named");
     assert_eq!(missing.code, "property_not_found", "{}", missing.message);
+    // `Object.set` turned a String meant for a Vector2 into (0, 0) and answered with it.
+    let mistyped = call(
+        "godot_runtime",
+        json!({"ops": [{
+            "op": "set_property",
+            "path": "/root/AiFixture",
+            "property": "position",
+            "value": {"type": "String", "value": "abc"},
+        }]}),
+    )
+    .expect_err("a value of the wrong type is refused, not zeroed");
+    assert_eq!(mistyped.code, "unsupported_value", "{}", mistyped.message);
+    assert!(mistyped.message.contains("Vector2"), "{}", mistyped.message);
 
     // Review finding: a capture was eighty kilobytes of base64 that nothing in a terminal could
     // look at; asked to, the router writes the PNG into the project and answers with the path.
@@ -2616,4 +2649,56 @@ fn a_wait_the_debugger_interrupts_is_answered_at_the_break() {
         started.elapsed()
     );
     let _ = call("godot_debug", json!({"ops": [{"op": "terminate"}]}));
+}
+
+/// A breakpoint nothing can stop on is not reported as armed.
+///
+/// Godot answers a missing script with no breakpoints and a line past the end with
+/// `verified: true`. The router recorded both as armed, and the wait after them sent the model to
+/// drive the game with input.
+#[test]
+fn a_breakpoint_nothing_can_stop_on_is_not_armed() {
+    let session = start_session();
+    let app = mock_app();
+    let data = TempDir::new().expect("temporary application data");
+    let storage = crate::storage::ProjectStorage::open(data.path(), &session.worktree)
+        .expect("open project storage");
+    app.manage(crate::storage::StorageSlot::new(Ok(storage)));
+    let call = |params: Value| {
+        ai_tools::dispatch(
+            app.handle(),
+            ai_tools::ToolRequest {
+                tool: "godot_debug".to_owned(),
+                params,
+            },
+        )
+    };
+    call(json!({"ops": [{"op": "launch", "playArgs": ["--headless"]}]}))
+        .expect("the debugger launches the probe");
+
+    let missing =
+        call(json!({"ops": [{"op": "set_breakpoints", "path": "scripts/nope.gd", "lines": [4]}]}))
+            .expect_err("a breakpoint in a script that does not exist is refused");
+    assert_eq!(missing.code, "not_found", "{}", missing.message);
+
+    let past =
+        call(json!({"ops": [{"op": "set_breakpoints", "path": PROBE_PATH, "lines": [999]}]}))
+            .expect("a line past the end is answered");
+    let result = &past["ops"][0]["result"];
+    assert_eq!(result["breakpoints"][0]["verified"], false, "{past}");
+    assert!(
+        result["breakpoints"][0]["message"]
+            .as_str()
+            .is_some_and(|note| note.contains("past the end")),
+        "{past}"
+    );
+    assert!(
+        !result["armed"].as_array().is_some_and(|armed| armed
+            .iter()
+            .any(|line| line.as_str().is_some_and(|line| line.ends_with(":999")))),
+        "a line past the end is not armed: {past}"
+    );
+
+    let _ = call(json!({"ops": [{"op": "terminate"}]}));
+    let _ = call(json!({"ops": [{"op": "disconnect", "terminateDebuggee": true}]}));
 }

@@ -1174,6 +1174,11 @@ func _on_runtime_debugger_session_breaked(session_id: int) -> void:
         "runtime_broke",
         "The game stopped at an error while starting and is paused in the debugger; read the error in the session output, fix what it names, and run again - runtime.run restarts a halted game by itself, no stop is needed first",
     )
+    _fail_pending(
+        ["run_frame"],
+        "runtime_broke",
+        "The game halted in the debugger before it drew its first frame, at an error or at a breakpoint; debug.stack_trace says where. If it is an error, it is in the session output - fix what it names and run again; runtime.run restarts a halted game by itself",
+    )
 
 ## The debugger has resumed the game. It can answer again, and a game that is only being watched
 ## sends nothing on its own, so this is the clearing that does not wait for the game to speak.
@@ -1935,7 +1940,7 @@ func _resource_rescan(params: Dictionary) -> Dictionary:
     var requested := Params.rescan_paths_param(params)
     if requested.has("_gofer_error"):
         return requested
-    var paths: Array = requested["value"]
+    var paths: Array = _files_under(requested["value"])
     return {"_gofer_pending_scan": {
         "paths": paths,
         "walked": false,
@@ -1944,6 +1949,22 @@ func _resource_rescan(params: Dictionary) -> Dictionary:
         "deadline": Time.get_ticks_msec() + RESOURCE_SCAN_TIMEOUT_MS,
     }}
 
+
+## Each directory named, as the files in it. `reimport_files` takes a directory for a file it cannot
+## find, and answers nothing.
+func _files_under(paths: Array) -> Array:
+    var files: Array = []
+    for path: String in paths:
+        if not DirAccess.dir_exists_absolute(path):
+            files.append(path)
+            continue
+        for name in DirAccess.get_files_at(path):
+            if name.get_extension() not in ["import", "uid"]:
+                files.append(path.path_join(name))
+        for child in DirAccess.get_directories_at(path):
+            if not child.begins_with("."):
+                files.append_array(_files_under([path.path_join(child)]))
+    return files
 
 ## Whether this file is beyond what `update_file` can reach, so only a project walk will register it.
 ##

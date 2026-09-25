@@ -1812,3 +1812,96 @@ fn a_headless_run_is_answered_without_a_frame() {
     assert_frame(&windowed["frame"]);
     session.call("runtime.stop", json!({}));
 }
+
+/// A probe that looks up a node that is not there each time it is clicked, as a swarm panel did.
+const ERRORING_ON_CLICK_PROBE_SCRIPT: &str = "extends Node2D\n\nconst INJECTED_DEVICE := 7777\n\nfunc _input(event: InputEvent) -> void:\n\tif event.device == INJECTED_DEVICE and event is InputEventKey and event.pressed:\n\t\tget_node(\"../Missing/World\")\n";
+
+/// swarm, 2026-09-06: three clicks each made the game log `Node not found`, and each answered
+/// `applied: 2` with a frame, so the model kept clicking.
+#[test]
+fn an_input_the_game_errors_on_carries_the_error() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = godot_editor_harness::fixture_worktree(&directory);
+    std::fs::create_dir_all(worktree.join("scripts")).expect("create scripts directory");
+    std::fs::write(
+        worktree.join("scripts/runtime_probe.gd"),
+        ERRORING_ON_CLICK_PROBE_SCRIPT,
+    )
+    .expect("write the probe script");
+    std::fs::write(worktree.join("main.tscn"), SHORT_LIVED_PROBE_SCENE).expect("write the scene");
+    let ledger = directory.path().join("ledger.json");
+    let session = Session::start_on_worktree(worktree, ledger, Some(directory));
+    session
+        .try_call_within("runtime.run", json!({}), LAUNCH_TIMEOUT_MS)
+        .unwrap_or_else(|error| {
+            panic!(
+                "runtime.run failed: {error}\n--- editor output ---\n{}",
+                session.output()
+            )
+        });
+
+    let pressed = session.call(
+        "runtime.input",
+        json!({"events": [
+            {"kind": "key", "key": "E", "pressed": true, "device": INJECTED_DEVICE},
+            {"kind": "key", "key": "E", "pressed": false, "device": INJECTED_DEVICE},
+        ]}),
+    );
+
+    assert_eq!(pressed["applied"], 2, "{pressed}");
+    let errors = pressed["errors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the game's error must travel with the answer: {pressed}"));
+    assert!(
+        errors.iter().any(|error| error
+            .as_str()
+            .is_some_and(|text| text.contains("Missing/World"))),
+        "{pressed}"
+    );
+
+    let quiet = session.call(
+        "runtime.input",
+        json!({"events": [{"kind": "mouse_motion", "position": [4, 4], "relative": [1, 1]}]}),
+    );
+    assert!(
+        quiet.get("errors").is_none(),
+        "an input nothing failed on names no error: {quiet}"
+    );
+}
+
+/// A main scene that fails in `_ready`, which runs after the helper has announced itself.
+const FAILING_READY_PROBE_SCRIPT: &str = "extends Node2D\n\nfunc _ready() -> void:\n\tvar missing: Node = null\n\tmissing.queue_free()\n";
+
+/// A game that breaks at a runtime error right after its helper loads ends the launch as broken.
+///
+/// The break failed a launch still waiting for the helper but not one waiting for its first frame,
+/// and the halted game's capture then answered it: `running: true`, a frame, and `broke: true`.
+#[test]
+fn a_game_that_breaks_after_its_helper_loads_ends_the_launch() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = godot_editor_harness::fixture_worktree(&directory);
+    std::fs::create_dir_all(worktree.join("scripts")).expect("create scripts directory");
+    std::fs::write(
+        worktree.join("scripts/runtime_probe.gd"),
+        FAILING_READY_PROBE_SCRIPT,
+    )
+    .expect("write the probe script");
+    std::fs::write(worktree.join("main.tscn"), SHORT_LIVED_PROBE_SCENE).expect("write the scene");
+    let ledger = directory.path().join("ledger.json");
+    let session = Session::start_on_worktree(worktree, ledger, Some(directory));
+
+    let started = Instant::now();
+    let error = session
+        .try_call_within("runtime.run", json!({}), LAUNCH_TIMEOUT_MS)
+        .expect_err("a game stopped at an error must not answer as launched");
+    assert!(
+        error.starts_with("runtime_broke"),
+        "a game halted at an error must say so: {error}\n--- editor output ---\n{}",
+        session.output()
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "the failure took {:?}, which is the deadline rather than the break",
+        started.elapsed()
+    );
+}

@@ -79,24 +79,26 @@ export function sameWhateverTheOrder(value) {
     )
 }
 
-export function withoutRepeatingARefusal(tool) {
-    const heard = new Map()
+// `heard` is shared by every tool of a turn, so a success anywhere starts every count again.
+export function withoutRepeatingARefusal(tool, heard = new Map()) {
     return withExecute(tool, async (execute, id, params, signal, onUpdate, context) => {
         try {
-            return await execute(id, params, signal, onUpdate, context)
+            const answer = await execute(id, params, signal, onUpdate, context)
+            heard.clear()
+            return answer
         } catch (error) {
             if (signal?.aborted || error?.name === 'AbortError') throw error
             const said = error instanceof Error ? error.message : String(error)
-            const key = `${sameWhateverTheOrder(params)}\u0000${said}`
+            const key = `${tool.name}\u0000${sameWhateverTheOrder(params)}\u0000${said}`
             const seen = (heard.get(key) ?? 0) + 1
             heard.set(key, seen)
             if (seen <= REFUSALS_BEFORE_SAYING_SO) throw error
             throw new Error(
                 `${tool.name} has now refused this exact call ${String(seen)} times, with the `
-                    + 'same answer every time, and nothing about the project changed between '
-                    + 'them. A further one will be refused identically. Whatever is wrong is '
-                    + 'in the call itself: build it again from nothing rather than sending the '
-                    + 'one you have, or reach the same result another way.'
+                    + 'same answer every time, and no call succeeded between them. A further one '
+                    + 'will be refused identically. Whatever is wrong is in the call itself: build '
+                    + 'it again from nothing rather than sending the one you have, or reach the '
+                    + `same result another way. The answer each time was:\n${said}`
             )
         }
     })

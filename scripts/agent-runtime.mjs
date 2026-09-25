@@ -42,11 +42,12 @@ function bindTool(tool, context) {
 export function decorateTools({env, tools, model, guard, extras = []}) {
     const context = {env}
     const sees = modelReadsImages(model)
+    const heard = new Map()
     return tools
         .map(tool => bindTool(tool, context))
         .map(tool => (guard ? guard(tool) : tool))
         .map(tool => (sees ? tool : withoutPictures(tool)))
-        .map(withoutRepeatingARefusal)
+        .map(tool => withoutRepeatingARefusal(tool, heard))
         .map(tool => extras.reduce((wrapped, decorate) => decorate(wrapped), tool))
 }
 

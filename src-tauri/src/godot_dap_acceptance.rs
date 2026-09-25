@@ -199,6 +199,17 @@ fn the_editor_runs_breaks_steps_and_terminates() {
         .evaluate("1 + 2", Some(frames[0].id))
         .expect("evaluate");
     assert_eq!(evaluation.result, "3");
+    let null = client
+        .evaluate("null", Some(frames[0].id))
+        .expect("evaluate null");
+    let unparsable = client
+        .evaluate("&\"probe\"", Some(frames[0].id))
+        .expect("the adapter answers an expression it cannot parse");
+    assert_eq!(
+        unparsable, null,
+        "the adapter now tells a parse failure from a null; the router can read that instead of \
+         the game's output"
+    );
 
     let outcome = client.step_out(&events, MAIN_THREAD_ID).expect("step out");
     let StepOutcome::SteppedOut { .. } = outcome else {

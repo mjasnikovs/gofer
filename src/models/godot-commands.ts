@@ -7,7 +7,7 @@ export type GodotCommandSpec<Params extends GodotParams, Result extends GodotRes
     result: Result
 }>
 
-// GENERATED-BEGIN command-names sha256:156ddb68924db622
+// GENERATED-BEGIN command-names sha256:90727c9aa4bb0a45
 export type GodotCommandName =
     | 'session.get_state'
     | 'session.cancel'
@@ -697,7 +697,11 @@ export interface GodotCommandMap {
                 device?: number | undefined
             }>[]
         }>,
-        Readonly<{applied: number; frame?: GodotFrame | undefined}>
+        Readonly<{
+            applied: number
+            frame?: GodotFrame | undefined
+            errors?: readonly string[] | undefined
+        }>
     >
     readonly 'runtime.capture': GodotCommandSpec<
         Readonly<{source?: 'game' | 'editor' | undefined; saveTo?: string | undefined}>,

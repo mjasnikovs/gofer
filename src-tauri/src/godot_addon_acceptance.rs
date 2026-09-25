@@ -3207,3 +3207,39 @@ fn the_text_and_settings_outside_ascii_come_back_the_way_they_went_in() {
     );
     assert_eq!(setting["value"]["value"], "Münzjäger", "{setting}");
 }
+
+/// A rescan that names a directory imports what is in it.
+///
+/// A directory went to `reimport_files` as if it were a file: the engine logged `Can't find file
+/// during file reimport`, nothing was imported, and the call answered `scanned: true`. swarm and
+/// spawn both rescanned an asset folder that way and were then told the textures do not exist.
+#[test]
+fn a_rescan_of_a_directory_imports_the_assets_in_it() {
+    const ATLAS: &[u8] = include_bytes!("../../fixtures/live-project/assets/tiles.png");
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = fixture_worktree(&directory);
+    std::fs::create_dir_all(worktree.join("known")).expect("create a directory the editor walks");
+    std::fs::write(worktree.join("known/notes.txt"), "known\n").expect("write a placeholder");
+    let ledger = directory.path().join("ledger.json");
+    let session = Session::start_on_worktree(worktree.clone(), ledger, Some(directory));
+
+    std::fs::write(worktree.join("known/walked.png"), ATLAS)
+        .expect("write into the known directory");
+    std::fs::create_dir_all(worktree.join("fresh")).expect("create a directory after startup");
+    std::fs::write(worktree.join("fresh/new.png"), ATLAS).expect("write into the fresh directory");
+
+    for (folder, texture) in [
+        ("res://known", "res://known/walked.png"),
+        ("res://fresh", "res://fresh/new.png"),
+    ] {
+        session.call("resource.rescan", json!({"paths": [folder]}));
+        let cut = session
+            .try_call(
+                "resource.create_tileset",
+                json!({"path": format!("{folder}/cut.tres"), "texture": texture, "tileWidth": 16, "tileHeight": 16}),
+                None,
+            )
+            .unwrap_or_else(|error| panic!("rescanning {folder} left {texture} unloadable: {error}"));
+        assert_eq!(cut["grid"], json!([8, 2]), "{cut}");
+    }
+}

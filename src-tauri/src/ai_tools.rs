@@ -1109,6 +1109,36 @@ fn run_one<R: Runtime>(
     answered
 }
 
+/// The project files that still spell `res://` + `moved`, as the file itself or a directory above
+/// a file. A move rewrites none of them, and a `preload` of the old path no longer compiles.
+fn files_naming(root: &std::path::Path, moved: &str) -> Vec<String> {
+    let old = format!(
+        "res://{}",
+        moved.trim_start_matches("res://").trim_end_matches('/')
+    );
+    let names = |text: &str| {
+        text.match_indices(&old).any(|(at, _)| {
+            matches!(
+                text[at + old.len()..].chars().next(),
+                Some('/' | '"' | '\'')
+            )
+        })
+    };
+    files::scan(root)
+        .into_keys()
+        .filter(|path| !is_goferns_own(path))
+        .filter(|path| {
+            ["gd", "tscn", "tres", "godot"].contains(
+                &std::path::Path::new(path)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or(""),
+            )
+        })
+        .filter(|path| std::fs::read_to_string(root.join(path)).is_ok_and(|text| names(&text)))
+        .collect()
+}
+
 /// The routing itself, apart from the ledger that watches it.
 fn route_one<R: Runtime>(
     app: &AppHandle<R>,
@@ -1122,6 +1152,9 @@ fn route_one<R: Runtime>(
             a_path_that_climbs_out(operation, &params)?;
             if domain.name == "godot_runtime" {
                 crate::session_diagnosis::a_game_the_debugger_has_halted(op)?;
+            }
+            if matches!(command, "runtime.run" | "runtime.restart") {
+                crate::godot_session::note_a_game_launch();
             }
             let save_to = matches!(
                 command,
@@ -1451,9 +1484,14 @@ fn resource_domain<R: Runtime>(
             let workspace = crate::active_workspace(app)?;
             let also_moved = workspace.move_path(&request.from, &request.to)?;
             tell_the_editor_the_worktree_moved(app);
-            Ok(
-                json!({"from": request.from, "to": request.to, "moved": true, "alsoMoved": also_moved}),
-            )
+            let still_referenced_by = files_naming(workspace.root(), &request.from);
+            Ok(json!({
+                "from": request.from,
+                "to": request.to,
+                "moved": true,
+                "alsoMoved": also_moved,
+                "stillReferencedBy": still_referenced_by,
+            }))
         }
         "delete" => {
             let request: files::DeletePathRequest = from_params(params)?;

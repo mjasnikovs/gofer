@@ -756,6 +756,27 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
     );
     assert_eq!(evaluated["result"], "2", "{evaluated}");
 
+    // A live turn sent six of these, was answered `<null>` six times, and went on believing it
+    // had spawned units. The adapter answers a real null the same way, so only the game's own
+    // Expression error can tell them apart.
+    let unparsable = journey.error(
+        "godot_debug",
+        "evaluate",
+        json!({"expression": "get_tree().get_first_node_in_group(&\"world\")", "frameId": frame_id}),
+    );
+    assert_eq!(unparsable.code, "evaluate_failed", "{}", unparsable.message);
+    assert!(
+        unparsable.message.contains("Expected expression"),
+        "the model needs the engine's reason, got: {}",
+        unparsable.message
+    );
+    let null = journey.call(
+        "godot_debug",
+        "evaluate",
+        json!({"expression": "null", "frameId": frame_id}),
+    );
+    assert_eq!(null["result"], "<null>", "{null}");
+
     let stepped = journey.call("godot_debug", "step_out", json!({}));
     assert_eq!(stepped["outcome"]["kind"], "steppedOut", "{stepped}");
     assert_eq!(
