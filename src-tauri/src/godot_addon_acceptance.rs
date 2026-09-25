@@ -13,13 +13,13 @@
 //! process-free; `npm run test:godot` enables it after the Node journeys have proven the binary.
 
 use crate::godot_editor_harness::{
-    PNG_BASE64_PREFIX, Session, Transports, child_names, fixture_worktree,
+    PNG_BASE64_PREFIX, RETRY_EVERY, Session, Transports, child_names, fixture_worktree, retry_until,
 };
 use crate::godot_rpc::{CallRequest, HEARTBEAT_INTERVAL_MS};
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tempfile::TempDir;
 
 /// The fixture project padded with enough resources that the editor's first import scan is still
@@ -3206,6 +3206,160 @@ fn the_text_and_settings_outside_ascii_come_back_the_way_they_went_in() {
         json!({"name": "application/config/name"}),
     );
     assert_eq!(setting["value"]["value"], "Münzjäger", "{setting}");
+}
+
+/// Stands in for the window manager. A headless editor never regains focus, and regaining focus is
+/// the only moment Godot looks for files changed behind its back. Each new value of the setting is
+/// one focus-in, delivered the way the engine delivers a real one.
+const FOCUS_PROBE_PLUGIN: &str = "@tool\nextends EditorPlugin\n\nconst TRIGGER := \"gofer_acceptance/regain_focus\"\n\nvar _seen := 0\n\nfunc _enter_tree() -> void:\n\tvar settings := EditorInterface.get_editor_settings()\n\tsettings.set_setting(TRIGGER, _seen)\n\tsettings.settings_changed.connect(_on_settings_changed)\n\nfunc _on_settings_changed() -> void:\n\tvar asked: int = EditorInterface.get_editor_settings().get_setting(TRIGGER)\n\tif asked == _seen:\n\t\treturn\n\t_seen = asked\n\tget_tree().notification(MainLoop.NOTIFICATION_APPLICATION_FOCUS_IN)\n";
+
+const EXTERNAL_CHANGE_TITLE: &str = "Files have been modified outside Godot";
+
+/// The fixture project with the focus probe enabled, and an editor config of its own: the probe's
+/// setting must not land in the developer's real one.
+fn start_focus_probed_session(directory: TempDir, config_home: &TempDir) -> (Session, PathBuf) {
+    let worktree = fixture_worktree(&directory);
+    let probe = worktree.join("addons/focus_probe");
+    std::fs::create_dir_all(&probe).expect("create the focus probe addon");
+    std::fs::write(
+        probe.join("plugin.cfg"),
+        "[plugin]\n\nname=\"Focus probe\"\ndescription=\"\"\nauthor=\"\"\nversion=\"1\"\nscript=\"plugin.gd\"\n",
+    )
+    .expect("write the focus probe manifest");
+    std::fs::write(probe.join("plugin.gd"), FOCUS_PROBE_PLUGIN).expect("write the focus probe");
+    let project = worktree.join("project.godot");
+    let mut settings = std::fs::read_to_string(&project).expect("read the fixture project");
+    settings.push_str(
+        "\n[editor_plugins]\n\nenabled=PackedStringArray(\"res://addons/focus_probe/plugin.cfg\")\n",
+    );
+    std::fs::write(&project, settings).expect("enable the focus probe");
+    let ledger = directory.path().join("ledger.json");
+    let transports = Transports {
+        editor_config_home: Some(config_home.path().to_path_buf()),
+        ..Transports::default()
+    };
+    let session =
+        Session::start_on_worktree_with(worktree.clone(), ledger, Some(directory), transports);
+    (session, worktree)
+}
+
+fn regain_focus(session: &Session, count: i64) {
+    session.call(
+        "editor.set_setting",
+        json!({"name": "gofer_acceptance/regain_focus", "value": {"type": "int", "value": count}}),
+    );
+}
+
+/// Writes a file the way a checkout does: behind the editor, and newer than the editor last saw it.
+/// Godot compares whole seconds, so a write inside the second the editor last touched the file
+/// would look unchanged to it.
+fn write_behind_the_editor(path: &Path, content: &str) {
+    let seen = std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .expect("read the modified time the editor saw");
+    std::fs::write(path, content).expect("write behind the editor");
+    let newer = SystemTime::now().max(seen + Duration::from_secs(1));
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_modified(newer))
+        .expect("move the modified time past what the editor saw");
+}
+
+/// What a `git stash pop` or a branch switch does to a live editor: the project settings and the
+/// open scene both change on disk, and the next time the developer looks at the editor it stops
+/// and asks whether to reload them. Nothing told the model the editor was asking, so the question
+/// sat over the developer's desktop until they answered it by hand. Both files are ones the editor
+/// holds no unsaved changes to, so the disk is the only version there is and reloading loses
+/// nothing.
+#[test]
+fn a_checkout_behind_the_editor_is_reloaded_rather_than_asked_about() {
+    let directory = TempDir::new().expect("temporary directory");
+    let config_home = TempDir::new().expect("temporary editor config home");
+    let (session, worktree) = start_focus_probed_session(directory, &config_home);
+
+    let project = worktree.join("project.godot");
+    let mut settings = std::fs::read_to_string(&project).expect("read the staged project");
+    settings.push_str("\n[gofer_probe]\n\nmarker=\"written behind the editor\"\n");
+    write_behind_the_editor(&project, &settings);
+    write_behind_the_editor(
+        &worktree.join("main.tscn"),
+        "[gd_scene format=3]\n\n[node name=\"ProtocolFixture\" type=\"Node\"]\n\n[node name=\"FromDisk\" type=\"Node\" parent=\".\"]\n",
+    );
+    regain_focus(&session, 1);
+
+    retry_until(
+        "the editor never took the checkout it was shown",
+        || session.output(),
+        RETRY_EVERY,
+        || {
+            let state = session.call("session.get_state", json!({}));
+            let marker = session.try_call(
+                "project.get_setting",
+                json!({"name": "gofer_probe/marker"}),
+                None,
+            );
+            let tree = session.call("scene.get_tree", json!({}));
+            let reloaded = state["dialog"].is_null()
+                && marker
+                    .is_ok_and(|setting| setting["value"]["value"] == "written behind the editor")
+                && child_names(&tree) == vec!["FromDisk".to_owned()];
+            if reloaded {
+                return Ok(());
+            }
+            Err(format!("dialog: {} tree: {tree}", state["dialog"]))
+        },
+    );
+    let on_disk = std::fs::read_to_string(&project).expect("read the project back");
+    assert!(
+        on_disk.contains("written behind the editor"),
+        "reloading must keep what the checkout wrote, not save the editor's copy over it:\n{on_disk}"
+    );
+}
+
+/// The one case with no safe answer: the editor holds unsaved changes to a scene the disk changed
+/// too. Reloading throws the editor's away and ignoring throws the disk's away, so the question
+/// stays for the person who made one of them.
+#[test]
+fn a_scene_changed_on_both_sides_is_left_for_the_person() {
+    let directory = TempDir::new().expect("temporary directory");
+    let config_home = TempDir::new().expect("temporary editor config home");
+    let (mut session, worktree) = start_focus_probed_session(directory, &config_home);
+
+    session.mutate(
+        "node.create",
+        json!({"parent": "/ProtocolFixture", "name": "InTheEditor", "type": "Node"}),
+    );
+    let unsaved = session.call("session.get_unsaved_scenes", json!({}));
+    assert_eq!(
+        unsaved["scenes"],
+        json!(["res://main.tscn"]),
+        "the precondition is an editor holding unsaved changes to the open scene"
+    );
+    write_behind_the_editor(
+        &worktree.join("main.tscn"),
+        "[gd_scene format=3]\n\n[node name=\"ProtocolFixture\" type=\"Node\"]\n\n[node name=\"FromDisk\" type=\"Node\" parent=\".\"]\n",
+    );
+    regain_focus(&session, 1);
+
+    retry_until(
+        "the editor never asked about a scene changed on both sides",
+        || session.output(),
+        RETRY_EVERY,
+        || {
+            let state = session.call("session.get_state", json!({}));
+            if state["dialog"]["title"] == EXTERNAL_CHANGE_TITLE {
+                return Ok(());
+            }
+            Err(state.to_string())
+        },
+    );
+    let tree = session.call("scene.get_tree", json!({}));
+    assert_eq!(
+        child_names(&tree),
+        vec!["InTheEditor".to_owned()],
+        "the editor's unsaved version must still be the one open while the question stands"
+    );
 }
 
 /// A rescan that names a directory imports what is in it.

@@ -445,6 +445,7 @@ func _process(_delta: float) -> void:
 
     _track_play_state()
     _track_edited_scene()
+    _reload_what_changed_on_disk()
     _track_dialog()
 
     var available := _peer.get_available_bytes()
@@ -890,6 +891,37 @@ func _track_dialog() -> void:
         return
     _reported_dialog = reported
     _send_event("session.dialog", {"dialog": asking})
+
+## Answers "Files have been modified outside Godot" with Reload from disk.
+##
+## In Gofer the disk is the true copy: a checkout, a stash or the model's own shell wrote it. The
+## editor asks only when its window regains focus, and no call fails while it asks, so the model
+## never learns of it and the question waits on the developer.
+func _reload_what_changed_on_disk() -> void:
+    var dialog := _topmost_dialog()
+    if dialog == null or dialog.title != _editor_text("Files have been modified outside Godot"):
+        return
+    if _changed_on_both_sides(dialog):
+        return
+    dialog.get_ok_button().emit_signal("pressed")
+
+## Whether a file the dialog lists is also a scene the editor holds unsaved changes to. Either
+## answer then throws one side's work away, so that question stays with the person.
+func _changed_on_both_sides(dialog: AcceptDialog) -> bool:
+    var unsaved: Array[String] = []
+    for path in EditorInterface.get_unsaved_scenes():
+        unsaved.append(path.get_file())
+    for tree in dialog.find_children("*", "Tree", true, false):
+        var item := (tree as Tree).get_root().get_first_child()
+        while item != null:
+            if unsaved.has(item.get_text(0)):
+                return true
+            item = item.get_next()
+    return false
+
+## The editor's own wording for a phrase, in whatever language the developer runs it in.
+func _editor_text(english: String) -> String:
+    return str(TranslationServer.get_or_add_domain("godot.editor").translate(english))
 
 ## Routes one `runtime.*` request. Some commands the editor answers immediately; the rest are
 ## deferred — the response leaves when the game answers, the launch completes, or the deadline
