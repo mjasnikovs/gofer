@@ -2,7 +2,7 @@ extends Node2D
 
 @onready var scoreboard: Scoreboard = get_parent()
 
-var ticks := 0
+var ticks: int = 0
 
 
 func _process(_delta: float) -> void:

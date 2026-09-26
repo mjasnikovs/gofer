@@ -1,11 +1,11 @@
 extends Node2D
 
 
-const SPEED := 120.0
+const SPEED: float = 120.0
 
 
 func _process(delta: float) -> void:
-	var axis := 0.0
+	var axis: float = 0.0
 	if Input.is_action_pressed("move_left"):
 		axis -= 1.0
 	if Input.is_action_pressed("move_right"):

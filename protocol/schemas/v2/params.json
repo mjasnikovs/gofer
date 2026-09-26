@@ -1835,7 +1835,7 @@
         {
             "tool": "godot_node",
             "op": "connect_signal",
-            "summary": "Connects a node's signal to a method, as an editor connection the scene keeps.",
+            "summary": "Connects a node's signal to a method, as an editor connection the scene keeps. The code style never uses one: a script connects its own signals in _ready, with a lambda.",
             "params": [
                 {
                     "name": "node",

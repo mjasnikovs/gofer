@@ -1,17 +1,17 @@
 extends Node2D
 
-const TICK_MESSAGE := "live tick"
+const TICK_MESSAGE: String = "live tick"
 
 @export var tick_interval: float = 1.0
 
-var total_ticks := 0
+var total_ticks: int = 0
 
 @onready var timer: Timer = $Ticker/Timer
 
 
 func _ready() -> void:
 	timer.wait_time = tick_interval
-	timer.timeout.connect(_on_timeout)
+	var _error: int = timer.timeout.connect(_on_timeout)
 	print("Gofer live test scene ready")
 
 

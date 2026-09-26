@@ -139,8 +139,9 @@ const WARNING_IGNORE_ANNOTATION: &str = "@warning_ignore";
 const WARNING_IGNORE_START: &str = "@warning_ignore_start(";
 const WARNING_IGNORE_LINE: &str = "@warning_ignore(";
 
-/// gdUnit4's naming for a test suite, and the only file a suppression is allowed in.
+/// gdUnit4's naming and folder for a test suite, the only file a suppression is allowed in.
 const TEST_SUITE_SUFFIX: &str = "_test.gd";
+const TEST_SUITE_DIRECTORY: &str = "test/";
 
 /// What a gdUnit4 suite may relax for the whole file. Its fluent asserts return values nobody
 /// keeps, and its `await`s are on calls declared as plain returns. Measured on 4.7.2: no suite
@@ -149,12 +150,7 @@ const TEST_SUITE_FILE_WIDE: [&str; 2] = ["return_value_discarded", "redundant_aw
 
 /// What a suite may relax on one line: a fuzzer parameter, which gdUnit4 re-reads from source and
 /// cannot build when typed, and a `verify` whose argument matcher is not the parameter's type.
-const TEST_SUITE_ONE_LINE: [&str; 4] = [
-    "return_value_discarded",
-    "redundant_await",
-    "inferred_declaration",
-    "unsafe_method_access",
-];
+const TEST_SUITE_ONE_LINE: [&str; 2] = ["inferred_declaration", "unsafe_method_access"];
 
 /// Godot's warning level for "refuse to parse the script".
 const WARNING_IS_AN_ERROR: i64 = 2;
@@ -322,47 +318,77 @@ fn proposed_files(params: &Value) -> Vec<(String, String)> {
         .collect()
 }
 
+fn is_test_suite(path: &str) -> bool {
+    let path = path.trim_start_matches("res://");
+    path.ends_with(TEST_SUITE_SUFFIX)
+        && (path.starts_with(TEST_SUITE_DIRECTORY)
+            || path.contains(&format!("/{TEST_SUITE_DIRECTORY}")))
+}
+
+/// Every annotation on a line that the compiler would read as one.
+///
+/// An annotation inside a comment or a string literal is inert, and refusing one would be a
+/// refusal the compiler disagrees with: `godot-code-style`'s own self-test searches its scripts
+/// for the text `"@warning_ignore"`.
+fn annotations(line: &str) -> Vec<&str> {
+    let mut found = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (at, character) in line.char_indices() {
+        if let Some(open) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == open {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '"' | '\'' => quote = Some(character),
+            '#' => break,
+            '@' if line[at..].starts_with(WARNING_IGNORE_ANNOTATION) => {
+                found.push(line[at..].trim_end());
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
 /// The first warning a file suppresses that it may not, or the annotation itself when it names
 /// none.
-///
-/// Read per line and only ahead of the first `#`, because an annotation inside a comment is inert
-/// and refusing one would be a refusal the compiler disagrees with.
 fn suppressed_warning(path: &str, text: &str) -> Option<String> {
-    let test_suite = path.ends_with(TEST_SUITE_SUFFIX);
-    text.lines()
-        .map(|line| line.split('#').next().unwrap_or_default())
-        .filter_map(|code| {
-            code.find(WARNING_IGNORE_ANNOTATION)
-                .map(|at| code[at..].trim_end())
-        })
-        .find_map(|annotation| {
-            let allowed: &[&str] = if !test_suite {
-                &[]
-            } else if annotation.starts_with(WARNING_IGNORE_START) {
-                &TEST_SUITE_FILE_WIDE
-            } else if annotation.starts_with(WARNING_IGNORE_LINE) {
-                &TEST_SUITE_ONE_LINE
-            } else {
-                &[]
-            };
-            let named: Vec<&str> = annotation
-                .split_once('(')
-                .and_then(|(_, rest)| rest.split_once(')'))
-                .map(|(names, _)| {
-                    names
-                        .split(',')
-                        .map(|name| name.trim().trim_matches('"'))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if named.is_empty() {
-                return Some(annotation.to_owned());
-            }
-            named
-                .into_iter()
-                .find(|name| !allowed.contains(name))
-                .map(str::to_owned)
-        })
+    let test_suite = is_test_suite(path);
+    text.lines().flat_map(annotations).find_map(|annotation| {
+        let allowed: &[&str] = if !test_suite {
+            &[]
+        } else if annotation.starts_with(WARNING_IGNORE_START) {
+            &TEST_SUITE_FILE_WIDE
+        } else if annotation.starts_with(WARNING_IGNORE_LINE) {
+            &TEST_SUITE_ONE_LINE
+        } else {
+            &[]
+        };
+        let named: Vec<&str> = annotation
+            .split_once('(')
+            .and_then(|(_, rest)| rest.split_once(')'))
+            .map(|(names, _)| {
+                names
+                    .split(',')
+                    .map(|name| name.trim().trim_matches('"'))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if named.is_empty() {
+            return Some(annotation.to_owned());
+        }
+        named
+            .into_iter()
+            .find(|name| !allowed.contains(name))
+            .map(str::to_owned)
+    })
 }
 
 #[cfg(test)]
@@ -700,8 +726,13 @@ mod tests {
                 "@warning_ignore(\"unsafe_property_access\")",
                 "unsafe_property_access",
             ),
+            ("@warning_ignore(\"redundant_await\")", "redundant_await"),
             (
-                "@warning_ignore(\"redundant_await\", \"unsafe_cast\")",
+                "@warning_ignore(\"return_value_discarded\")",
+                "return_value_discarded",
+            ),
+            (
+                "@warning_ignore(\"inferred_declaration\", \"unsafe_cast\")",
                 "unsafe_cast",
             ),
             (
@@ -714,6 +745,30 @@ mod tests {
                 "{annotation}"
             );
         }
+    }
+
+    /// The allowance is gdUnit4's, so it holds only where gdUnit4 looks: `test/`.
+    #[test]
+    fn a_test_suite_outside_the_test_folder_gets_no_allowance() {
+        let annotation = "@warning_ignore_start(\"redundant_await\")\n";
+        assert!(saved_at("res://test/player_test.gd", annotation).is_none());
+        assert!(saved_at("res://test/enemy/spider_test.gd", annotation).is_none());
+        assert!(saved_at("res://scripts/player_test.gd", annotation).is_some());
+        assert!(saved_at("res://latest/player_test.gd", annotation).is_some());
+    }
+
+    /// A string is not an annotation. `godot-code-style`'s self-test holds exactly this line.
+    #[test]
+    fn an_annotation_named_inside_a_string_is_saved() {
+        let line = "\tcheck(!text.contains(\"@warning_ignore\"), \"no warning suppression: \" + file_name)\n";
+        assert_eq!(saved_at("res://tests/verify.gd", line), None);
+        assert!(
+            saved_at(
+                "res://x.gd",
+                "var s: String = \"\\\"\"\n@warning_ignore(\"unsafe_cast\")\n"
+            )
+            .is_some()
+        );
     }
 
     /// An edit is judged by the path of the file it lands in, so one call cannot carry a test

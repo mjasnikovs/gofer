@@ -1,9 +1,9 @@
 extends Node2D
 
 
-const SPEED := 120.0
+const SPEED: float = 120.0
 
-var direction := 0.0
+var direction: float = 0.0
 
 
 func _process(delta: float) -> void:
@@ -13,7 +13,7 @@ func _process(delta: float) -> void:
 
 
 func _direction_for(left: bool, right: bool) -> float:
-	var axis := 0.0
+	var axis: float = 0.0
 	if left:
 		axis += 1.0
 	if right:

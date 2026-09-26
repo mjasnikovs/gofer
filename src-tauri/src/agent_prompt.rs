@@ -75,6 +75,8 @@ Editing the project:
 - A property holding a resource takes {"type": "Resource", "value": {"path": "res://..."}}; a bare string is refused
 - A 2D collision shape has a tool: resource.create_shape writes it and imports it, and art has one: resource.create_texture draws a PNG and imports it, which is how a project with no art gets some. A resource with neither has none — write the .tres yourself, as `[gd_resource type="BoxMesh" format=3]`, a blank line, `[resource]`, then `size = Vector3(2, 2, 2)`
 - Build a 2D level from tiles — resource.create_tileset, then node.set_cells on a TileMapLayer; a hundred ColorRects is not a level, and a TileSet written as text opens with no tiles in it
+- Reach a node through a typed @export that _ready asserts, never through $Path, %Name or get_node
+- Run script.format on a script's text before you save it: gdformat's layout is the project's layout
 - Connect a signal in _ready with an inline lambda and keep what connect returns, as `var _error: int = body_entered.connect(func(body: Node2D) -> void: ...)`; never with node.connect_signal and never to an _on_* method. Put a node in a group with node.add_to_group
 - node.inspect reads a node's groups, signals and connections
 
@@ -117,7 +119,7 @@ pub fn default_prompt(tools: &[ToolDomain], strict_typing: bool) -> String {
 ///
 /// Its Variant clause once said "cast". An `as` cast of a Variant fails `unsafe_cast`, which the
 /// same rule sets to Error, so the line now says what `godot-code-style` says.
-const STRICT_TYPING_LINE: &str = "- This project treats GDScript warnings as errors, so untyped code does not parse: give every var, const, parameter and return an explicit type, never :=, and read a Variant into a typed local before you use it, because an as cast of one is an error too";
+const STRICT_TYPING_LINE: &str = "- This project treats GDScript warnings as errors, so untyped code does not parse: give every var, const, parameter and return an explicit type, never := (a gdUnit4 fuzzer parameter is the one exception), and read a Variant into a typed local before you use it, because an as cast of one is an error too";
 
 /// The one line of the prompt the user does not own: which engine this build is pinned to.
 ///

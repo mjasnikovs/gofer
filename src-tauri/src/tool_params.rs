@@ -851,7 +851,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Path, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:250bf76557ca36a1
+// GENERATED-BEGIN operations sha256:3b5b0f5901bc4686
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -1161,7 +1161,7 @@ pub const GODOT_NODE_OPERATIONS: &[Operation] = &[
     op(
         "godot_node",
         "connect_signal",
-        "Connects a node's signal to a method, as an editor connection the scene keeps.",
+        "Connects a node's signal to a method, as an editor connection the scene keeps. The code style never uses one: a script connects its own signals in _ready, with a lambda.",
         Answers::Addon("node.connect_signal"),
         &[
             need("node", Text),

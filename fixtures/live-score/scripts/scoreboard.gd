@@ -2,10 +2,10 @@ class_name Scoreboard
 extends Node2D
 
 
-const SCOREBOARD_PATH := "user://scoreboard.cfg"
+const SCOREBOARD_PATH: String = "user://scoreboard.cfg"
 
-var score := 0
-var high_score := 0
+var score: int = 0
+var high_score: int = 0
 var scoreboard: Array[int] = []
 
 @onready var score_label: Label = $ScoreLabel

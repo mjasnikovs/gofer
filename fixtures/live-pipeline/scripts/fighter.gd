@@ -5,8 +5,8 @@ extends Node2D
 @export var resistance: float = 0.2
 @export var minimum_damage: int = 1
 
-var health := 100
-var ticks := 0
+var health: int = 100
+var ticks: int = 0
 
 
 func _process(_delta: float) -> void:
@@ -18,9 +18,9 @@ func _process(_delta: float) -> void:
 
 
 func take_damage(raw: int) -> void:
-	var after_armour := _apply_armour(raw)
-	var after_resistance := _apply_resistance(after_armour)
-	var final_damage := _floor_damage(after_resistance)
+	var after_armour: float = _apply_armour(raw)
+	var after_resistance: float = _apply_resistance(after_armour)
+	var final_damage: int = _floor_damage(after_resistance)
 	health -= final_damage
 
 

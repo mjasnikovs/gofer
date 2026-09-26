@@ -44,10 +44,17 @@
             "task": "Put the Player in a group called actors and the Label in a group called ui. Then take the Label out of ui again and delete it entirely. Save and confirm what groups the Player has now."
         },
         {
-            "id": "signal-wiring",
-            "fixture": "live-project",
-            "ops": ["node.connect_signal", "node.disconnect_signal", "scene.save", "node.inspect"],
-            "task": "Connect the Timer's timeout signal to a method called _on_ticker_timeout on Main as a scene connection, save, and show me the connection. Then disconnect it again and save."
+            "id": "signal-migrate-to-lambda",
+            "fixture": "live-clutter",
+            "ops": [
+                "node.inspect",
+                "node.disconnect_signal",
+                "scene.save",
+                "script.open",
+                "script.edit",
+                "script.diagnostics"
+            ],
+            "task": "The main scene connects the Ticker's timeout to _on_tick as an editor connection. Remove that connection from the scene and save it, then connect the same signal in main.gd's _ready with an inline lambda that keeps what connect returns. Show me that the scene holds no connection any more and that main.gd has no diagnostics."
         },
         {
             "id": "change-type",
@@ -136,10 +143,10 @@
             "task": "In scripts/player.gd add an exported variable jump_force of type float defaulting to 300.0, and a function jump() that prints the jump force. Make sure the file has no diagnostics afterwards and is formatted the way gdformat wants it."
         },
         {
-            "id": "script-save-whole",
+            "id": "script-save-whole-lambda",
             "fixture": "live-project",
             "ops": ["script.save", "script.diagnostics", "script.open", "script.close"],
-            "task": "Write a new script at res://scripts/coin.gd that extends Area2D, has an exported int value defaulting to 1, and prints \"collected\" in a _on_body_entered handler. Check it has no diagnostics, then close it."
+            "task": "Write a new script at res://scripts/coin.gd that extends Area2D, has an exported int value defaulting to 1, and prints \"collected\" when a body enters, connected in _ready with an inline lambda. Check it has no diagnostics, then close it."
         },
         {
             "id": "symbols-and-hover",
@@ -199,7 +206,7 @@
             "task": "Find the editor settings about the text editor's indentation, read the indent type, set it to spaces, and read it back."
         },
         {
-            "id": "autoload",
+            "id": "autoload-typed",
             "fixture": "live-project",
             "ops": [
                 "script.save",
@@ -207,7 +214,7 @@
                 "project.list_autoloads",
                 "project.remove_autoload"
             ],
-            "task": "Create a script res://scripts/game_state.gd extending Node with a var score := 0, register it as an autoload named GameState, list the autoloads to confirm, then remove it again and confirm the list is empty."
+            "task": "Create a script res://scripts/game_state.gd extending Node with a var score: int = 0, register it as an autoload named GameState, list the autoloads to confirm, then remove it again and confirm the list is empty."
         },
         {
             "id": "input-actions",
@@ -568,11 +575,10 @@
             "task": "Make the player a platformer character. Cut assets/tiles.png (16x16 tiles, 8 across, 2 down; the top-left tile is ground) into a TileSet where the ground tile is solid, paint a floor of ground from x=0 to x=39 at y=14 on a TileMapLayer, turn the Player into a CharacterBody2D with a 16x24 rectangle collision shape placed on top of the floor, give it gravity and a jump on the Space key (a new input action named jump), save, run the game, wait until it has landed, press Space, and prove with two position reads that it went up and came back down."
         },
         {
-            "id": "signal-score",
+            "id": "signal-score-lambda",
             "fixture": "live-project",
             "ops": [
                 "node.create_nodes",
-                "node.connect_signal",
                 "script.edit",
                 "script.save",
                 "scene.save",
@@ -582,7 +588,7 @@
                 "logs.read",
                 "runtime.stop"
             ],
-            "task": "Add a Score label at the top left of the main scene and a script on Main that keeps an integer score. Every time the Timer ticks, the score goes up by 5 and the label shows it. Wire the Timer's timeout to the handler as a scene connection rather than in code. Run the game for about three seconds and prove from the label's text that the score rose."
+            "task": "Add a Score label at the top left of the main scene and a script on Main that keeps an integer score. Every time the Timer ticks, the score goes up by 5 and the label shows it. Connect the Timer's timeout in _ready with an inline lambda that keeps what connect returns. Run the game for about three seconds and prove from the label's text that the score rose."
         },
         {
             "id": "hud-and-pause",
