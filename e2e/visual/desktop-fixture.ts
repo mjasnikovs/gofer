@@ -461,6 +461,12 @@ export async function installDesktop(
                             defaultPrompt:
                                 'You are Gofer, a capable local coding agent. Work autonomously toward the user’s goal.'
                         }
+                    if (command === 'read_card_template' || command === 'save_card_template')
+                        return {
+                            template: 'GOAL\n\nCONSTRAINTS\n\nKNOWN-UNKNOWNS\n\nSTEPS\n\nVERIFY\n',
+                            defaultTemplate:
+                                'GOAL\n\nCONSTRAINTS\n\nKNOWN-UNKNOWNS\n\nSTEPS\n\nVERIFY\n'
+                        }
                     if (command === 'get_rag_cache_status')
                         return currentState === 'first-run' || currentState === 'error' ?
                                 {path: '/fixture/cache', sizeBytes: 0, state: 'not-installed'}
