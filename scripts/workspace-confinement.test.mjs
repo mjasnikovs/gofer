@@ -801,6 +801,22 @@ test('a searching tool that names nothing at all searches the whole workspace', 
         assert.deepEqual(await tool.execute('1', {pattern: 'x', path}), {pattern: 'x', path: '.'})
 })
 
+test('a search over a list of paths confines each one', async context => {
+    const current = await workspace()
+    context.after(current.remove)
+    const tool = confineTool(fakeTool('grep'), current.path)
+
+    for (const path of [['scripts', 'res://scenes'], '["scripts", "scenes"]'])
+        assert.deepEqual(await tool.execute('1', {pattern: 'x', path}), {
+            pattern: 'x',
+            path: ['scripts', 'scenes']
+        })
+    await assert.rejects(
+        tool.execute('2', {pattern: 'x', path: ['scripts', '../outside']}),
+        /outside the workspace/u
+    )
+})
+
 test('a refused search is told it was a search, and which tool answers one', async context => {
     const current = await workspace()
     context.after(current.remove)

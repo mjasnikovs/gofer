@@ -13,6 +13,7 @@ import {
     sep
 } from 'node:path'
 
+import {pathsOf} from './ai-grep.mjs'
 import {nearMiss, refusedAnchorIndex} from './anchor-near-miss.mjs'
 import {refuseFrozenShellWrite, refuseFrozenWrite} from './frozen-paths.mjs'
 
@@ -126,6 +127,13 @@ function searchedPath(toolName, path) {
         return SEARCHING_TOOLS.includes(toolName) ? '.' : named
     }
     return named
+}
+
+/// grep takes a list of paths as well as one, and each is confined on its own.
+function searchedPaths(toolName, path) {
+    if (!SEARCHING_TOOLS.includes(toolName)) return searchedPath(toolName, path)
+    const paths = pathsOf(path).map(one => searchedPath(toolName, one))
+    return paths.length === 1 ? paths[0] : paths
 }
 
 function refuseEditorOwnedWrite(toolName, path) {
@@ -456,9 +464,10 @@ export function confineTool(
                 refuseFrozenShellWrite(params.command, frozen)
                 return tool.execute(id, withADeadline(params), signal, onUpdate, context)
             }
-            const resolved = {...params, path: searchedPath(tool.name, params.path)}
-            const named = await validateToolPath(workspacePath, scratchPath, resolved.path)
-            if (named !== undefined) {
+            const resolved = {...params, path: searchedPaths(tool.name, params.path)}
+            for (const path of [resolved.path].flat()) {
+                const named = await validateToolPath(workspacePath, scratchPath, path)
+                if (named === undefined) continue
                 refuseEditorOwnedWrite(tool.name, named)
                 refuseFrozenWrite(tool.name, named, frozen)
             }
