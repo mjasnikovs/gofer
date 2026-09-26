@@ -148,9 +148,41 @@ const TEST_SUITE_DIRECTORY: &str = "test/";
 /// loads without them, and none needs anything else file-wide.
 const TEST_SUITE_FILE_WIDE: [&str; 2] = ["return_value_discarded", "redundant_await"];
 
-/// What a suite may relax on one line: a fuzzer parameter, which gdUnit4 re-reads from source and
-/// cannot build when typed, and a `verify` whose argument matcher is not the parameter's type.
-const TEST_SUITE_ONE_LINE: [&str; 2] = ["inferred_declaration", "unsafe_method_access"];
+/// What a suite may relax on one line, and only on the line that needs it: a fuzzer parameter,
+/// which gdUnit4 re-reads from source and cannot build when typed, and a `verify` whose argument
+/// matcher is not the parameter's type.
+fn one_line_allowance_fits(warning: &str, statement: &str) -> bool {
+    match warning {
+        "inferred_declaration" => {
+            statement.starts_with("func test_") && statement.contains("fuzzer")
+        }
+        "unsafe_method_access" => statement.contains("verify(") && statement.contains("any_"),
+        _ => false,
+    }
+}
+
+/// The statement a one-line annotation applies to: the next line with code on it, and for a
+/// `func` the whole signature, which gdformat may have wrapped.
+fn annotated_statement(lines: &[&str], annotation_line: usize) -> String {
+    let mut code = lines[annotation_line + 1..]
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty() && !line.starts_with('#'));
+    let Some(first) = code.next() else {
+        return String::new();
+    };
+    let mut statement = first.to_owned();
+    if first.starts_with("func ") {
+        for line in code {
+            if statement.ends_with(':') {
+                break;
+            }
+            statement.push(' ');
+            statement.push_str(line);
+        }
+    }
+    statement
+}
 
 /// Godot's warning level for "refuse to parse the script".
 const WARNING_IS_AN_ERROR: i64 = 2;
@@ -361,16 +393,13 @@ fn annotations(line: &str) -> Vec<&str> {
 /// none.
 fn suppressed_warning(path: &str, text: &str) -> Option<String> {
     let test_suite = is_test_suite(path);
-    text.lines().flat_map(annotations).find_map(|annotation| {
-        let allowed: &[&str] = if !test_suite {
-            &[]
-        } else if annotation.starts_with(WARNING_IGNORE_START) {
-            &TEST_SUITE_FILE_WIDE
-        } else if annotation.starts_with(WARNING_IGNORE_LINE) {
-            &TEST_SUITE_ONE_LINE
-        } else {
-            &[]
-        };
+    let lines: Vec<&str> = text.lines().collect();
+    let found = lines.iter().enumerate().flat_map(|(at, line)| {
+        annotations(line)
+            .into_iter()
+            .map(move |annotation| (at, annotation))
+    });
+    for (at, annotation) in found {
         let named: Vec<&str> = annotation
             .split_once('(')
             .and_then(|(_, rest)| rest.split_once(')'))
@@ -384,11 +413,20 @@ fn suppressed_warning(path: &str, text: &str) -> Option<String> {
         if named.is_empty() {
             return Some(annotation.to_owned());
         }
-        named
-            .into_iter()
-            .find(|name| !allowed.contains(name))
-            .map(str::to_owned)
-    })
+        let allowed = |name: &str| {
+            test_suite
+                && if annotation.starts_with(WARNING_IGNORE_START) {
+                    TEST_SUITE_FILE_WIDE.contains(&name)
+                } else {
+                    annotation.starts_with(WARNING_IGNORE_LINE)
+                        && one_line_allowance_fits(name, &annotated_statement(&lines, at))
+                }
+        };
+        if let Some(refused) = named.into_iter().find(|name| !allowed(name)) {
+            return Some(refused.to_owned());
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -733,7 +771,7 @@ mod tests {
             ),
             (
                 "@warning_ignore(\"inferred_declaration\", \"unsafe_cast\")",
-                "unsafe_cast",
+                "inferred_declaration",
             ),
             (
                 "@warning_ignore_restore(\"redundant_await\")",
@@ -744,6 +782,30 @@ mod tests {
                 suite(annotation).is_some_and(|message| message.contains(&format!("`{refused}`"))),
                 "{annotation}"
             );
+        }
+    }
+
+    /// A one-line allowance holds only on the line gdUnit4 needs it for.
+    #[test]
+    fn a_one_line_allowance_covers_only_its_own_kind_of_line() {
+        let suite = |text: &str| saved_at("res://test/inventory_test.gd", text);
+        assert_eq!(
+            suite(
+                "@warning_ignore(\"inferred_declaration\")\n\
+                 func test_any_name_fits(\n\
+                 \tfuzzer := Fuzzers.rand_str(1, 12), fuzzer_iterations: int = 50\n\
+                 ) -> void:\n"
+            ),
+            None,
+            "a signature gdformat wrapped is still the fuzzer's"
+        );
+        for text in [
+            "@warning_ignore(\"inferred_declaration\")\nvar total := 0\n",
+            "@warning_ignore(\"inferred_declaration\")\nfunc test_plain() -> void:\n",
+            "\t@warning_ignore(\"unsafe_method_access\")\n\tmock_weapon.fire(NEAR)\n",
+            "\t@warning_ignore(\"unsafe_method_access\")\n",
+        ] {
+            assert!(suite(text).is_some(), "{text}");
         }
     }
 
