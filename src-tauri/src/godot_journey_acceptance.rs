@@ -29,7 +29,7 @@ use crate::approvals;
 use crate::godot_editor_harness::{
     PNG_BASE64_PREFIX, RETRY_EVERY, child_names, copy_tree, retry_within,
 };
-use crate::godot_lsp_acceptance::{MATH_UTILS, SCORE_KEEPER, position_of};
+use crate::godot_lsp_acceptance::{MATH_UTILS, position_of};
 use crate::godot_session::{self, LogQuery};
 use crate::storage::ProjectStorage;
 use serde_json::{Value, json};
@@ -64,6 +64,9 @@ const PROBE_PATH: &str = "scripts/journey_probe.gd";
 const BROKEN_PATH: &str = "scripts/broken.gd";
 const MATH_PATH: &str = "scripts/math_utils.gd";
 const KEEPER_PATH: &str = "scripts/score_keeper.gd";
+/// The LSP suite's keeper, typed, because a journey session enforces every warning the code style
+/// names and `:=` is one of them.
+const TYPED_SCORE_KEEPER: &str = "extends Node\n\nvar total: int = 0\n\n\nfunc award(bonus: int) -> void:\n\ttotal = MathUtils.add_score(total, bonus)\n";
 
 /// The device id this journey stamps on the input it injects, and the only device the probe
 /// counts. The game window is real and focusable, so without this the developer's own keyboard
@@ -83,7 +86,7 @@ const INJECTED_DEVICE: i64 = 7777;
 /// `InputEvent`, is `unsafe_property_access` and the editor refuses to parse the file. It went
 /// unnoticed while the rules were only applied on an edge nothing reliably reached: the fixture was
 /// written in a style the product forbids, and the suite proving the product could not see it.
-const PROBE_SCRIPT: &str = "extends Node2D\n\nvar presses := 0\nvar counter := 0\nvar last_source := \"none\"\n\n@onready var label: Label = $Label\n\nfunc _ready() -> void:\n\t_refresh()\n\nfunc _process(_delta: float) -> void:\n\t_tick(1)\n\nfunc _tick(amount: int) -> void:\n\tcounter += amount\n\nconst INJECTED_DEVICE := 7777\n\nfunc _input(event: InputEvent) -> void:\n\tif event.device != INJECTED_DEVICE:\n\t\treturn\n\tvar key := event as InputEventKey\n\tif key != null and key.pressed and not key.echo:\n\t\t_record(\"key\")\n\nfunc _record(source: String) -> void:\n\tpresses += 1\n\tlast_source = source\n\t_refresh()\n\nfunc _refresh() -> void:\n\tlabel.text = \"presses: %d (%s)\" % [presses, last_source]\n";
+const PROBE_SCRIPT: &str = "extends Node2D\n\nvar presses: int = 0\nvar counter: int = 0\nvar last_source: String = \"none\"\n\n@onready var label: Label = $Label\n\nfunc _ready() -> void:\n\t_refresh()\n\nfunc _process(_delta: float) -> void:\n\t_tick(1)\n\nfunc _tick(amount: int) -> void:\n\tcounter += amount\n\nconst INJECTED_DEVICE: int = 7777\n\nfunc _input(event: InputEvent) -> void:\n\tif event.device != INJECTED_DEVICE:\n\t\treturn\n\tvar key: InputEventKey = event as InputEventKey\n\tif key != null and key.pressed and not key.echo:\n\t\t_record(\"key\")\n\nfunc _record(source: String) -> void:\n\tpresses += 1\n\tlast_source = source\n\t_refresh()\n\nfunc _refresh() -> void:\n\tlabel.text = \"presses: %d (%s)\" % [presses, last_source]\n";
 /// 1-based, matching the editor UI and Monaco's gutter: `counter += amount` inside `_tick`.
 const BREAK_LINE: i64 = 16;
 const PROBE_SCENE: &str = "[gd_scene load_steps=2 format=3]\n\n[ext_resource type=\"Script\" path=\"res://scripts/journey_probe.gd\" id=\"1_probe\"]\n\n[node name=\"JourneyProbe\" type=\"Node2D\"]\nscript = ExtResource(\"1_probe\")\n\n[node name=\"Label\" type=\"Label\" parent=\".\"]\noffset_right = 320.0\noffset_bottom = 40.0\n";
@@ -222,7 +225,7 @@ fn committed_workspace(root: &Path) -> PathBuf {
     write(&workspace, PROBE_PATH, PROBE_SCRIPT);
     write(&workspace, BROKEN_PATH, BROKEN_SCRIPT);
     write(&workspace, MATH_PATH, MATH_UTILS);
-    write(&workspace, KEEPER_PATH, SCORE_KEEPER);
+    write(&workspace, KEEPER_PATH, TYPED_SCORE_KEEPER);
     write(&workspace, SCENE_FILE, PROBE_SCENE);
 
     git(&workspace, &["init", "--quiet", "--initial-branch", "main"]);
@@ -663,7 +666,7 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
 
     journey.open_script(MATH_PATH);
     journey.open_script(KEEPER_PATH);
-    let usage = position_of(SCORE_KEEPER, "add_score");
+    let usage = position_of(TYPED_SCORE_KEEPER, "add_score");
     let position = json!({"line": usage.line, "character": usage.character});
     let references = journey.call(
         "godot_script",
@@ -1060,11 +1063,11 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
 /// effects were discarded with `let _ =`. `enforce_godot_policy` had exactly one caller: that edge.
 ///
 /// This journey subscribes to nothing at all, which is the case that used to apply no rules
-/// whatever. The five warnings are project settings, so they are read back out of the worktree's
+/// whatever. The enforced warnings are project settings, so they are read back out of the worktree's
 /// own `project.godot` through the addon rather than trusted from Gofer's bookkeeping.
 #[test]
 fn a_session_nobody_subscribed_to_still_gets_the_rules_the_user_chose() {
-    use crate::godot_policy::{GAME_EMBED_MODE, STRICT_TYPING_WARNINGS};
+    use crate::godot_policy::{ENFORCED_WARNINGS, GAME_EMBED_MODE};
 
     let journey = Journey::start();
     journey.new_task();
@@ -1086,7 +1089,7 @@ fn a_session_nobody_subscribed_to_still_gets_the_rules_the_user_chose() {
 
     if let Err(last) = settle(
         "get_setting",
-        STRICT_TYPING_WARNINGS[0],
+        ENFORCED_WARNINGS[0].setting,
         json!({"type": "int", "value": 2}),
     ) {
         panic!(
@@ -1096,7 +1099,7 @@ fn a_session_nobody_subscribed_to_still_gets_the_rules_the_user_chose() {
         );
     }
 
-    for warning in STRICT_TYPING_WARNINGS {
+    for warning in ENFORCED_WARNINGS.map(|warning| warning.setting) {
         assert_eq!(
             journey.call("godot_project", "get_setting", json!({"name": warning}))["value"],
             json!({"type": "int", "value": 2}),
@@ -1172,7 +1175,7 @@ fn a_handler_added_through_script_edit_is_connectable_after_the_scene_is_reopene
         "edit",
         json!({"files": [{"path": PROBE_PATH, "edits": [{
             "oldText": "func _tick(amount: int) -> void:\n\tcounter += amount\n",
-            "newText": "const BULLET_SCENE := preload(\"res://bullet.tscn\")\n\n\nfunc _tick(amount: int) -> void:\n\tcounter += amount\n\n\nfunc _on_fire_timeout() -> void:\n\tget_parent().add_child(BULLET_SCENE.instantiate())\n",
+            "newText": "const BULLET_SCENE: PackedScene = preload(\"res://bullet.tscn\")\n\n\nfunc _tick(amount: int) -> void:\n\tcounter += amount\n\n\nfunc _on_fire_timeout() -> void:\n\tget_parent().add_child(BULLET_SCENE.instantiate())\n",
         }]}]}),
     );
     // The language server reports nothing for a preload of a file that is not there; the editor's

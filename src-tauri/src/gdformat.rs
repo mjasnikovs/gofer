@@ -45,6 +45,9 @@ const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const FORMAT_TIMEOUT: Duration = Duration::from_secs(30);
 const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// Matches `godot-code-style`'s `.gdformatrc`. Passed on the command line so a project's own
+/// config, or its absence, cannot move it.
+const LINE_LENGTH_ARGUMENT: &str = "--line-length=120";
 /// How long the exited child's pipes get to deliver their last bytes. Exceeding it means a
 /// stream never closed — a truncated read, never a silently empty result.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -226,7 +229,7 @@ pub fn format_source(
     let output = run(
         spawner,
         binary.as_os_str(),
-        &[OsString::from("-")],
+        &[OsString::from(LINE_LENGTH_ARGUMENT), OsString::from("-")],
         Some(source.as_bytes().to_vec()),
         FORMAT_TIMEOUT,
         DRAIN_TIMEOUT,
@@ -472,6 +475,7 @@ mod tests {
     struct FakeSpawner {
         child: Mutex<Option<FakeChild>>,
         spawn_error: Option<io::ErrorKind>,
+        arguments: Mutex<Vec<OsString>>,
     }
 
     impl ProcessSpawner for FakeSpawner {
@@ -486,9 +490,10 @@ mod tests {
         fn spawn(
             &self,
             _program: &OsStr,
-            _arguments: &[OsString],
+            arguments: &[OsString],
             _piped_stdin: bool,
         ) -> io::Result<Box<dyn ChildProcess>> {
+            *self.arguments.lock().expect("arguments lock") = arguments.to_vec();
             if let Some(kind) = self.spawn_error {
                 return Err(io::Error::new(kind, "spawn refused by the test double"));
             }
@@ -605,6 +610,7 @@ mod tests {
         let spawner = FakeSpawner {
             child: Mutex::new(Some(fake)),
             spawn_error: None,
+            arguments: Mutex::default(),
         };
         verify_version(&spawner, &binary()).expect("pinned version must verify");
     }
@@ -615,6 +621,7 @@ mod tests {
         let spawner = FakeSpawner {
             child: Mutex::new(Some(fake)),
             spawn_error: None,
+            arguments: Mutex::default(),
         };
         let error = verify_version(&spawner, &binary()).expect_err("wrong version must fail");
         assert_eq!(error.code, "formatter_unavailable");
@@ -633,6 +640,7 @@ mod tests {
             let spawner = FakeSpawner {
                 child: Mutex::new(Some(fake)),
                 spawn_error: None,
+                arguments: Mutex::default(),
             };
             let error = verify_version(&spawner, &binary()).expect_err("bad banner must fail");
             assert_eq!(error.code, "formatter_unavailable");
@@ -645,6 +653,7 @@ mod tests {
         let spawner = FakeSpawner {
             child: Mutex::new(Some(fake)),
             spawn_error: None,
+            arguments: Mutex::default(),
         };
         let error = verify_version(&spawner, &binary()).expect_err("failing probe must fail");
         assert_eq!(error.code, "formatter_unavailable");
@@ -658,10 +667,15 @@ mod tests {
         let spawner = FakeSpawner {
             child: Mutex::new(Some(fake)),
             spawn_error: None,
+            arguments: Mutex::default(),
         };
         let response = format_source(&spawner, &binary(), source).expect("format");
         assert!(response.changed);
         assert_eq!(response.formatted, formatted);
+        assert_eq!(
+            *spawner.arguments.lock().expect("arguments lock"),
+            [OsString::from("--line-length=120"), OsString::from("-")]
+        );
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while std::time::Instant::now() < deadline
             && written.lock().expect("written lock").len() < source.len()
@@ -683,6 +697,7 @@ mod tests {
         let spawner = FakeSpawner {
             child: Mutex::new(Some(fake)),
             spawn_error: None,
+            arguments: Mutex::default(),
         };
         let response = format_source(&spawner, &binary(), source).expect("format");
         assert_eq!(response.formatted, source);
@@ -696,6 +711,7 @@ mod tests {
         let spawner = FakeSpawner {
             child: Mutex::new(Some(fake)),
             spawn_error: None,
+            arguments: Mutex::default(),
         };
         let response = format_source(&spawner, &binary(), source).expect("format");
         assert!(!response.changed);
@@ -709,6 +725,7 @@ mod tests {
         let spawner = FakeSpawner {
             child: Mutex::new(Some(fake)),
             spawn_error: None,
+            arguments: Mutex::default(),
         };
         let error = format_source(&spawner, &binary(), "func broken(:\n")
             .expect_err("invalid syntax must fail");
@@ -733,6 +750,7 @@ mod tests {
         let spawner = FakeSpawner {
             child: Mutex::new(Some(fake)),
             spawn_error: None,
+            arguments: Mutex::default(),
         };
         let error = format_source(&spawner, &binary(), "pass\n").expect_err("bad output must fail");
         assert_eq!(error.code, "invalid_output");
@@ -745,6 +763,7 @@ mod tests {
         let spawner = FakeSpawner {
             child: Mutex::new(Some(fake)),
             spawn_error: None,
+            arguments: Mutex::default(),
         };
         let error =
             format_source(&spawner, &binary(), "pass\n").expect_err("oversized output must fail");
@@ -764,6 +783,7 @@ mod tests {
         let spawner = FakeSpawner {
             child: Mutex::new(Some(fake)),
             spawn_error: None,
+            arguments: Mutex::default(),
         };
         let started = Instant::now();
         let error = run(
@@ -786,6 +806,7 @@ mod tests {
         let spawner = FakeSpawner {
             child: Mutex::new(Some(fake)),
             spawn_error: None,
+            arguments: Mutex::default(),
         };
         let error = format_source(&spawner, &binary(), "func f():\n\tpass\n")
             .expect_err("empty output must never become a buffer-wiping diff");
@@ -795,6 +816,7 @@ mod tests {
         let spawner = FakeSpawner {
             child: Mutex::new(Some(fake)),
             spawn_error: None,
+            arguments: Mutex::default(),
         };
         let response = format_source(&spawner, &binary(), "").expect("empty source formats");
         assert!(!response.changed);
@@ -814,6 +836,7 @@ mod tests {
         let spawner = FakeSpawner {
             child: Mutex::new(Some(fake)),
             spawn_error: None,
+            arguments: Mutex::default(),
         };
         let error = run(
             &spawner,
@@ -844,6 +867,7 @@ mod tests {
         let spawner = FakeSpawner {
             child: Mutex::new(None),
             spawn_error: Some(io::ErrorKind::PermissionDenied),
+            arguments: Mutex::default(),
         };
         let error =
             format_source(&spawner, &binary(), "pass\n").expect_err("spawn failure must fail");

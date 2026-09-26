@@ -3,14 +3,13 @@
 //! Two rules, both verified against Godot 4.7.2 rather than assumed:
 //!
 //! * **Strict typing.** `debug/gdscript/warnings/*` warnings are tri-state — 0 Ignore, 1 Warn,
-//!   2 Error — and five of them are what "no dynamic GDScript" means. `untyped_declaration` catches
-//!   a `var` with no type; the four `unsafe_*` ones catch the Variant-typed access that stays legal
-//!   even when every declaration is typed. All five ship as Ignore. Godot excludes `res://addons`
+//!   2 Error. The rule sets the 23 that the `godot-code-style` skill sets, so a script Gofer writes
+//!   and a script that style writes are held to the same compiler. Godot excludes `res://addons`
 //!   from warnings by default, via `debug/gdscript/warnings/directory_rules`, so Gofer's own addon
 //!   is not caught by a rule Gofer turned on.
 //!
 //! * **Embedded game window.** `run/window_placement/game_embed_mode` is an *editor* setting, so it
-//!   is machine-wide and outside Git, unlike the five above. It reads -1 Disabled, 0 Use Per-Project
+//!   is machine-wide and outside Git, unlike the warnings above. It reads -1 Disabled, 0 Use Per-Project
 //!   Configuration, 1 Embed Game, 2 Make Game Workspace Floating. 1 is the only one that keeps the
 //!   game inside the editor; 2 embeds it and then floats the whole workspace back out. On Linux
 //!   the setting is only half of the rule: Godot embeds through a compositor it hosts itself, it
@@ -39,23 +38,59 @@ use crate::settings::GodotSettings;
 use crate::tool_params::Writes;
 use serde_json::{Value, json};
 
-/// The five GDScript warnings that together mean "statically typed, no Variant access".
-///
-/// Held in one list because they are turned on and off together: four of them without the first
-/// still let an untyped `var` through, and the first without the other four still lets
-/// `node.speed = 1` through on a `Node`.
-pub(crate) const STRICT_TYPING_WARNINGS: [&str; 5] = [
-    "debug/gdscript/warnings/untyped_declaration",
-    "debug/gdscript/warnings/unsafe_property_access",
-    "debug/gdscript/warnings/unsafe_method_access",
-    "debug/gdscript/warnings/unsafe_cast",
-    "debug/gdscript/warnings/unsafe_call_argument",
+/// One GDScript warning the rule raises to Error, and the level Godot ships it at.
+pub(crate) struct EnforcedWarning {
+    pub(crate) setting: &'static str,
+    /// What turning the rule off leaves behind. Measured on 4.7.2: six of these ship as Ignore and
+    /// the rest as Warn, so a reset is checked against this rather than against 0.
+    #[cfg_attr(
+        not(all(test, feature = "godot-acceptance")),
+        expect(
+            dead_code,
+            reason = "only the acceptance suite reads a reset back from the engine"
+        )
+    )]
+    pub(crate) shipped_level: i64,
+}
+
+const fn warning(setting: &'static str, shipped_level: i64) -> EnforcedWarning {
+    EnforcedWarning {
+        setting,
+        shipped_level,
+    }
+}
+
+/// Every warning `godot-code-style` sets to Error, turned on and off together.
+pub(crate) const ENFORCED_WARNINGS: [EnforcedWarning; 23] = [
+    warning("debug/gdscript/warnings/untyped_declaration", 0),
+    warning("debug/gdscript/warnings/inferred_declaration", 0),
+    warning("debug/gdscript/warnings/unsafe_property_access", 0),
+    warning("debug/gdscript/warnings/unsafe_method_access", 0),
+    warning("debug/gdscript/warnings/unsafe_cast", 0),
+    warning("debug/gdscript/warnings/unsafe_call_argument", 0),
+    warning("debug/gdscript/warnings/unsafe_void_return", 1),
+    warning("debug/gdscript/warnings/unused_variable", 1),
+    warning("debug/gdscript/warnings/unused_parameter", 1),
+    warning("debug/gdscript/warnings/unused_signal", 1),
+    warning("debug/gdscript/warnings/shadowed_variable", 1),
+    warning("debug/gdscript/warnings/standalone_expression", 1),
+    warning("debug/gdscript/warnings/return_value_discarded", 0),
+    warning("debug/gdscript/warnings/static_called_on_instance", 1),
+    warning("debug/gdscript/warnings/redundant_await", 1),
+    warning("debug/gdscript/warnings/assert_always_true", 1),
+    warning("debug/gdscript/warnings/assert_always_false", 1),
+    warning("debug/gdscript/warnings/integer_division", 1),
+    warning("debug/gdscript/warnings/narrowing_conversion", 1),
+    warning("debug/gdscript/warnings/int_as_enum_without_cast", 1),
+    warning("debug/gdscript/warnings/confusable_identifier", 1),
+    warning("debug/gdscript/warnings/confusable_local_declaration", 1),
+    warning("debug/gdscript/warnings/confusable_local_usage", 1),
 ];
 
 /// The prefix every GDScript warning setting shares, and what the refusal is keyed on.
 ///
-/// Wider than [`STRICT_TYPING_WARNINGS`] because three of its neighbours switch all five off
-/// without naming any of them. Verified against 4.7.2 rather than assumed: with
+/// Wider than [`ENFORCED_WARNINGS`] because three of its neighbours switch them all off without
+/// naming any of them. Verified against 4.7.2 rather than assumed: with
 /// `untyped_declaration` at 2, `var x = 1` is a parse error and the script does not load; with
 /// `debug/gdscript/warnings/enable` set to `false`, or with `directory_rules` holding
 /// `{"res://": 0}`, the setting stays at 2 and the same script loads and runs.
@@ -68,6 +103,25 @@ pub(crate) const WARNING_SETTING_PREFIX: &str = "debug/gdscript/warnings/";
 /// first thing the live run proposed. A `#` comment that merely mentions one does nothing, so a
 /// comment is not what this looks at.
 const WARNING_IGNORE_ANNOTATION: &str = "@warning_ignore";
+const WARNING_IGNORE_START: &str = "@warning_ignore_start(";
+const WARNING_IGNORE_LINE: &str = "@warning_ignore(";
+
+/// gdUnit4's naming for a test suite, and the only file a suppression is allowed in.
+const TEST_SUITE_SUFFIX: &str = "_test.gd";
+
+/// What a gdUnit4 suite may relax for the whole file. Its fluent asserts return values nobody
+/// keeps, and its `await`s are on calls declared as plain returns. Measured on 4.7.2: no suite
+/// loads without them, and none needs anything else file-wide.
+const TEST_SUITE_FILE_WIDE: [&str; 2] = ["return_value_discarded", "redundant_await"];
+
+/// What a suite may relax on one line: a fuzzer parameter, which gdUnit4 re-reads from source and
+/// cannot build when typed, and a `verify` whose argument matcher is not the parameter's type.
+const TEST_SUITE_ONE_LINE: [&str; 4] = [
+    "return_value_discarded",
+    "redundant_await",
+    "inferred_declaration",
+    "unsafe_method_access",
+];
 
 /// Godot's warning level for "refuse to parse the script".
 const WARNING_IS_AN_ERROR: i64 = 2;
@@ -96,20 +150,20 @@ pub(crate) struct PolicyCall {
 /// was on could never be undone: unticking the box would leave the project erroring on untyped code
 /// with nothing in Gofer's UI still claiming to ask for it.
 pub(crate) fn policy_calls(settings: &GodotSettings) -> Vec<PolicyCall> {
-    let mut calls = Vec::with_capacity(STRICT_TYPING_WARNINGS.len() + 1);
-    for warning in STRICT_TYPING_WARNINGS {
+    let mut calls = Vec::with_capacity(ENFORCED_WARNINGS.len() + 1);
+    for warning in &ENFORCED_WARNINGS {
         calls.push(if settings.strict_typing {
             PolicyCall {
                 command: "project.set_setting",
                 params: json!({
-                    "name": warning,
+                    "name": warning.setting,
                     "value": {"type": "int", "value": WARNING_IS_AN_ERROR},
                 }),
             }
         } else {
             PolicyCall {
                 command: "project.reset_setting",
-                params: json!({ "name": warning }),
+                params: json!({ "name": warning.setting }),
             }
         });
     }
@@ -161,8 +215,9 @@ pub(crate) fn enforcement_refusal(
                  Do NOT weaken, disable or scope out a warning to make a parse error go away. \
                  Every `{WARNING_SETTING_PREFIX}` write is refused, `enable` and \
                  `directory_rules` included.\n\
-                 Fix the code: declare the type, or cast the access to the type you expect. Look \
-                 the type up with docs_search.search — do not guess it.\n\
+                 Fix the code: declare the type, and read a Variant into a typed local — an `as` \
+                 cast of one is an error too. Look the type up with docs_search.search — do not \
+                 guess it.\n\
                  Only the user can turn this rule off."
             ))
         }
@@ -173,82 +228,107 @@ pub(crate) fn enforcement_refusal(
                  Only the user can turn this rule off."
             ))
         }
-        Writes::ScriptText if settings.strict_typing => {
-            let proposed = params
-                .get("text")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .or_else(|| whole_files(params))
-                .unwrap_or_else(|| introduced_text(params));
-            suppressed_warning(&proposed).map(|warning| {
+        Writes::ScriptText if settings.strict_typing => proposed_files(params)
+            .iter()
+            .find_map(|(path, text)| suppressed_warning(path, text))
+            .map(|warning| {
                 format!(
                     "REFUSED: this script suppresses `{warning}` with a \
                      {WARNING_IGNORE_ANNOTATION} annotation. Strict GDScript typing is \
                      enforced.\n\
                      Do NOT annotate around the rule. The annotation hides the code from the \
                      warning, it does not fix it.\n\
-                     Fix the code: declare the type, or cast the access to the type you expect, \
-                     then write it again. Look the type up with docs_search.search — do not guess \
-                     it.\n\
+                     Fix the code: declare the type, and read a Variant into a typed local — an \
+                     `as` cast of one is an error too — then write it again. Look the type up with \
+                     docs_search.search — do not guess it.\n\
                      Only the user can turn this rule off."
                 )
-            })
-        }
+            }),
         _ => None,
     }
 }
 
-/// Every whole file a call puts on disk, or `None` for a call that proposes none.
+/// Every file a call puts on disk, as its path and the text this caller wrote into it.
 ///
-/// `apply_rename` is the only one: its entries carry `updatedText`, which is the file as it will be
-/// written, exactly the way `save` carries `text`. So the whole file is what it proposes and the
-/// whole file is what is read — including an annotation the rename did not introduce, for the same
-/// reason a `save` of that file is refused over one. An `edit` has no such field and falls through
-/// to the text it introduces.
-fn whole_files(params: &Value) -> Option<String> {
-    let files = params.get("files")?.as_array()?;
-    let bodies: Vec<&str> = files
-        .iter()
-        .filter_map(|file| file.get("updatedText").and_then(Value::as_str))
-        .collect();
-    if bodies.is_empty() {
-        return None;
+/// `save` and `apply_rename` carry the whole file — `text`, and `updatedText` per entry — so the
+/// whole file is what is read, including an annotation the rename did not introduce, for the same
+/// reason a `save` of that file is refused over one. An `edit` carries only its `newText`: `oldText`
+/// is quoted from the file, and the file's other lines are not on offer here at all.
+fn proposed_files(params: &Value) -> Vec<(String, String)> {
+    let path_of = |value: &Value| {
+        value
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    if let Some(text) = params.get("text").and_then(Value::as_str) {
+        return vec![(path_of(params), text.to_owned())];
     }
-    Some(bodies.join("\n"))
-}
-
-/// Every `newText` an edit proposes, joined into one body to read for annotations. Nothing else in
-/// the call is text this caller wrote: `oldText` is quoted from the file, and the file's other
-/// lines are not on offer here at all.
-fn introduced_text(params: &Value) -> String {
-    params
+    let files = params
         .get("files")
         .and_then(Value::as_array)
-        .map(|files| {
-            files
-                .iter()
-                .filter_map(|file| file.get("edits").and_then(Value::as_array))
-                .flatten()
-                .filter_map(|edit| edit.get("newText").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("\n")
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    files
+        .iter()
+        .map(|file| {
+            let text = match file.get("updatedText").and_then(Value::as_str) {
+                Some(whole) => whole.to_owned(),
+                None => file
+                    .get("edits")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|edit| edit.get("newText").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            };
+            (path_of(file), text)
         })
-        .unwrap_or_default()
+        .collect()
 }
 
-/// The first enforced warning a source file suppresses by annotation, by its short name.
+/// The first warning a file suppresses that it may not, or the annotation itself when it names
+/// none.
 ///
 /// Read per line and only ahead of the first `#`, because an annotation inside a comment is inert
 /// and refusing one would be a refusal the compiler disagrees with.
-fn suppressed_warning(text: &str) -> Option<&'static str> {
+fn suppressed_warning(path: &str, text: &str) -> Option<String> {
+    let test_suite = path.ends_with(TEST_SUITE_SUFFIX);
     text.lines()
         .map(|line| line.split('#').next().unwrap_or_default())
-        .filter(|code| code.contains(WARNING_IGNORE_ANNOTATION))
-        .find_map(|code| {
-            STRICT_TYPING_WARNINGS
-                .iter()
-                .filter_map(|warning| warning.strip_prefix(WARNING_SETTING_PREFIX))
-                .find(|short| code.contains(short))
+        .filter_map(|code| {
+            code.find(WARNING_IGNORE_ANNOTATION)
+                .map(|at| code[at..].trim_end())
+        })
+        .find_map(|annotation| {
+            let allowed: &[&str] = if !test_suite {
+                &[]
+            } else if annotation.starts_with(WARNING_IGNORE_START) {
+                &TEST_SUITE_FILE_WIDE
+            } else if annotation.starts_with(WARNING_IGNORE_LINE) {
+                &TEST_SUITE_ONE_LINE
+            } else {
+                &[]
+            };
+            let named: Vec<&str> = annotation
+                .split_once('(')
+                .and_then(|(_, rest)| rest.split_once(')'))
+                .map(|(names, _)| {
+                    names
+                        .split(',')
+                        .map(|name| name.trim().trim_matches('"'))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if named.is_empty() {
+                return Some(annotation.to_owned());
+            }
+            named
+                .into_iter()
+                .find(|name| !allowed.contains(name))
+                .map(str::to_owned)
         })
 }
 
@@ -273,9 +353,9 @@ mod tests {
     }
 
     #[test]
-    fn strict_typing_errors_on_every_one_of_the_five_warnings() {
+    fn strict_typing_errors_on_every_enforced_warning() {
         let calls = policy_calls(&enforcing());
-        for warning in STRICT_TYPING_WARNINGS {
+        for warning in ENFORCED_WARNINGS.map(|warning| warning.setting) {
             let call = calls
                 .iter()
                 .find(|call| call.params["name"] == warning)
@@ -317,7 +397,7 @@ mod tests {
     #[test]
     fn turning_the_rules_off_undoes_them() {
         let calls = policy_calls(&relaxed());
-        for warning in STRICT_TYPING_WARNINGS {
+        for warning in ENFORCED_WARNINGS.map(|warning| warning.setting) {
             let call = calls
                 .iter()
                 .find(|call| call.params["name"] == warning)
@@ -342,7 +422,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(named(enforcing()), named(relaxed()));
-        assert_eq!(named(enforcing()).len(), STRICT_TYPING_WARNINGS.len() + 1);
+        assert_eq!(named(enforcing()).len(), ENFORCED_WARNINGS.len() + 1);
     }
 
     fn project_call(op: &str, name: &str) -> (&'static str, String, Value) {
@@ -361,8 +441,8 @@ mod tests {
     /// The direct move, and the one a live run made: meet the parse error, find the warning, write
     /// it back down to 0.
     #[test]
-    fn the_five_warnings_cannot_be_written_or_reset_while_the_rule_is_on() {
-        for warning in STRICT_TYPING_WARNINGS {
+    fn an_enforced_warning_cannot_be_written_or_reset_while_the_rule_is_on() {
+        for warning in ENFORCED_WARNINGS.map(|warning| warning.setting) {
             for op in ["set_setting", "reset_setting"] {
                 let call = project_call(op, warning);
                 let message = refusal(&enforcing(), &call).expect("the warning is enforced");
@@ -373,11 +453,11 @@ mod tests {
         }
     }
 
-    /// Neither of these is one of the five, and either one switches all five off. Both were run
+    /// Neither of these is an enforced warning, and either one switches them all off. Both were run
     /// against Godot 4.7.2 with `untyped_declaration` at 2: `var x = 1` errors, and with either of
     /// these written the same script loads.
     #[test]
-    fn the_settings_that_switch_the_five_off_without_naming_them_are_refused_too() {
+    fn the_settings_that_switch_the_rule_off_without_naming_a_warning_are_refused_too() {
         for name in [
             "debug/gdscript/warnings/enable",
             "debug/gdscript/warnings/directory_rules",
@@ -403,7 +483,7 @@ mod tests {
         assert_eq!(
             refusal(
                 &enforcing(),
-                &project_call("get_setting", STRICT_TYPING_WARNINGS[0])
+                &project_call("get_setting", ENFORCED_WARNINGS[0].setting)
             ),
             None,
             "reading a setting is not undoing it"
@@ -524,25 +604,106 @@ mod tests {
         );
     }
 
-    /// Two false refusals worth not making. A warning outside the five is Godot's own to silence,
-    /// and an annotation inside a comment is inert — the compiler ignores it, so refusing it would
-    /// be a refusal the compiler disagrees with.
+    fn saved_at(path: &str, text: &str) -> Option<String> {
+        refusal(
+            &enforcing(),
+            &(
+                "godot_script",
+                "save".to_owned(),
+                json!({"path": path, "text": text}),
+            ),
+        )
+    }
+
+    /// The style suppresses nothing, so even a warning outside the enforced list is refused, and
+    /// an annotation that names no warning at all names itself.
     #[test]
-    fn an_unenforced_warning_and_a_commented_annotation_are_saved() {
-        let saved = |text: &str| {
-            refusal(
-                &enforcing(),
-                &(
-                    "godot_script",
-                    "save".to_owned(),
-                    json!({"path": "res://player.gd", "text": text}),
-                ),
-            )
+    fn game_code_suppresses_no_warning_at_all() {
+        let refused = |text: &str, warning: &str| {
+            saved_at("res://player.gd", text)
+                .is_some_and(|message| message.contains(&format!("`{warning}`")))
         };
+        assert!(refused(
+            "@warning_ignore(\"unreachable_code\")\nvar x: int = 1\n",
+            "unreachable_code"
+        ));
+        assert!(
+            refused(
+                "@warning_ignore_start(\"return_value_discarded\")\n",
+                "return_value_discarded"
+            ),
+            "what a test suite may relax, game code may not"
+        );
+        assert!(saved_at("res://player.gd", "@warning_ignore_start\nvar x: int = 1\n").is_some());
+    }
+
+    /// A gdUnit4 suite gets exactly what it cannot load without, and nothing more: two warnings
+    /// file-wide, two more on one line.
+    #[test]
+    fn a_test_suite_may_relax_only_what_gdunit4_needs() {
+        let suite = |text: &str| saved_at("res://test/player_test.gd", text);
         assert_eq!(
-            saved("@warning_ignore(\"unused_variable\")\nvar x: int = 1\n"),
+            suite(
+                "extends GdUnitTestSuite\n\
+                 @warning_ignore_start(\"return_value_discarded\")\n\
+                 @warning_ignore_start(\"redundant_await\")\n\
+                 @warning_ignore(\"inferred_declaration\")\n\
+                 func test_x(fuzzer := Fuzzers.rand_str(1, 12)) -> void:\n\
+                 \t@warning_ignore(\"unsafe_method_access\")\n\
+                 \tverify(weapon, 2).fire(any_vector2())\n"
+            ),
             None
         );
+        for (annotation, refused) in [
+            (
+                "@warning_ignore_start(\"unsafe_method_access\")",
+                "unsafe_method_access",
+            ),
+            (
+                "@warning_ignore_start(\"inferred_declaration\")",
+                "inferred_declaration",
+            ),
+            (
+                "@warning_ignore(\"unsafe_property_access\")",
+                "unsafe_property_access",
+            ),
+            (
+                "@warning_ignore(\"redundant_await\", \"unsafe_cast\")",
+                "unsafe_cast",
+            ),
+            (
+                "@warning_ignore_restore(\"redundant_await\")",
+                "redundant_await",
+            ),
+        ] {
+            assert!(
+                suite(annotation).is_some_and(|message| message.contains(&format!("`{refused}`"))),
+                "{annotation}"
+            );
+        }
+    }
+
+    /// An edit is judged by the path of the file it lands in, so one call cannot carry a test
+    /// suite's allowance into a game script.
+    #[test]
+    fn an_edit_carries_the_allowance_of_its_own_file_only() {
+        let edit = json!({"files": [
+            {"path": "res://test/player_test.gd", "edits": [
+                {"oldText": "extends GdUnitTestSuite", "newText": "extends GdUnitTestSuite\n@warning_ignore_start(\"redundant_await\")"}
+            ]},
+            {"path": "res://player.gd", "edits": [
+                {"oldText": "func a():", "newText": "@warning_ignore(\"redundant_await\")\nfunc a():"}
+            ]},
+        ]});
+        let call = ("godot_script", "edit".to_owned(), edit);
+        assert!(refusal(&enforcing(), &call).is_some());
+    }
+
+    /// An annotation inside a comment is inert — the compiler ignores it, so refusing it would be a
+    /// refusal the compiler disagrees with.
+    #[test]
+    fn a_commented_annotation_is_saved() {
+        let saved = |text: &str| saved_at("res://player.gd", text);
         assert_eq!(
             saved("# @warning_ignore(\"unsafe_cast\") would be cheating\nvar x: int = 1\n"),
             None

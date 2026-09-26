@@ -895,9 +895,9 @@ pub(crate) fn open_main_scene_if_none() -> Result<(), RpcError> {
 
 /// Holds the live editor to the Godot rules the user chose.
 ///
-/// Every call is made, in order, even after one fails: the five typing warnings and the embed mode
+/// Every call is made, in order, even after one fails: the enforced warnings and the embed mode
 /// are independent settings, and a project that refuses one has no reason to be left without the
-/// other four. The first failure is what comes back, so a caller that reports it reports a real
+/// rest. The first failure is what comes back, so a caller that reports it reports a real
 /// one rather than the last one.
 pub(crate) fn enforce_godot_policy(settings: &GodotSettings) -> Result<(), RpcError> {
     let rpc = godot_session::rpc_session()

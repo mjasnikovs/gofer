@@ -1886,15 +1886,15 @@ fn an_editor_setting_survives_the_editor_it_was_written_in() {
 
 /// The rules the Godot tab enforces are rules a real editor takes, both on and off.
 ///
-/// Six setting names, checked against the engine rather than against this repo's idea of it. A name
+/// Twenty-four setting names, checked against the engine rather than against this repo's idea of it. A name
 /// Godot does not have is answered `setting_not_found`, a value of the wrong kind is answered
 /// `type_mismatch`, and a warning level the engine will not hold is answered by the addon's own
-/// read-back — so a typo in any of the six fails here rather than in an editor that quietly ignored
+/// read-back — so a typo in any of them fails here rather than in an editor that quietly ignored
 /// what Gofer asked for. The off half matters as much as the on half: it is what unticking a box in
 /// the settings dialog has to undo.
 #[test]
 fn the_editor_takes_every_rule_gofer_enforces() {
-    use crate::godot_policy::{GAME_EMBED_MODE, STRICT_TYPING_WARNINGS, policy_calls};
+    use crate::godot_policy::{ENFORCED_WARNINGS, GAME_EMBED_MODE, policy_calls};
     use crate::settings::GodotSettings;
 
     let directory = TempDir::new().expect("temporary directory");
@@ -1928,7 +1928,7 @@ fn the_editor_takes_every_rule_gofer_enforces() {
             headless: false,
         },
     );
-    for warning in STRICT_TYPING_WARNINGS {
+    for warning in ENFORCED_WARNINGS.map(|warning| warning.setting) {
         assert_eq!(
             reads_as(&mut session, warning, "project.get_setting"),
             json!({"type": "int", "value": 2}),
@@ -1951,11 +1951,12 @@ fn the_editor_takes_every_rule_gofer_enforces() {
             headless: false,
         },
     );
-    for warning in STRICT_TYPING_WARNINGS {
+    for warning in &ENFORCED_WARNINGS {
+        let name = warning.setting;
         assert_eq!(
-            reads_as(&mut session, warning, "project.get_setting"),
-            json!({"type": "int", "value": 0}),
-            "{warning} must go back to Ignore\n--- editor output ---\n{}",
+            reads_as(&mut session, name, "project.get_setting"),
+            json!({"type": "int", "value": warning.shipped_level}),
+            "{name} must go back to the level Godot ships\n--- editor output ---\n{}",
             session.output()
         );
     }
