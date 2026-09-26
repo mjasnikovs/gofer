@@ -73,7 +73,7 @@ const MAX_CHAT_ATTACHMENT_BASE64_BYTES: usize = MAX_CHAT_ATTACHMENT_BYTES.div_ce
 const MAX_CHAT_MESSAGES: usize = 200;
 const MAX_CHAT_MESSAGE_BYTES: usize = 256 * 1024;
 const MAX_CHAT_TEXT_BYTES: usize = 4 * 1024 * 1024;
-const MAX_AGENT_MESSAGES_BYTES: usize = 8 * 1024 * 1024;
+const MAX_AGENT_MESSAGES_BYTES: usize = 16 * 1024 * 1024;
 
 /// Admits one provider operation at a time: an AI turn, or a ChatGPT sign-in. Never both.
 ///
@@ -1753,7 +1753,7 @@ fn validate_agent_messages(messages: &Option<serde_json::Value>) -> Result<(), S
         .map_err(|_| "Agent message history is invalid".to_owned())?
         .len();
     if size > MAX_AGENT_MESSAGES_BYTES {
-        return Err("Agent message history cannot exceed 8 MiB".to_owned());
+        return Err("Agent message history cannot exceed 16 MiB".to_owned());
     }
     Ok(())
 }
