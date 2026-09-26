@@ -56,24 +56,64 @@ const PARAMETERS = {
                 + 'commas: *.gd,*.tscn. It narrows a search of the project or a folder; a file '
                 + 'named by path is searched either way.'
         },
-        ignoreCase: {type: 'boolean', description: 'Match regardless of case.'},
+        ignoreCase: {type: 'boolean', description: 'Match regardless of case, as grep -i.'},
         literal: {
             type: 'boolean',
-            description: 'Search for pattern as exact text rather than as a regular expression.'
+            description:
+                'Search for pattern as exact text rather than as a regular expression, as grep -F.'
+        },
+        wordMatch: {
+            type: 'boolean',
+            description:
+                'Match whole words only, as grep -w: failure then no longer matches failures="0".'
+        },
+        lineMatch: {
+            type: 'boolean',
+            description: 'Match only when the whole line is the pattern, as grep -x.'
+        },
+        invert: {
+            type: 'boolean',
+            description: 'Return the lines that do not match, as grep -v.'
         },
         context: {
             type: 'integer',
-            description: 'Lines of surrounding text to show each side of a match. None by default.'
+            description:
+                'Lines of surrounding text to show each side of a match, as grep -C. None by default.'
+        },
+        before: {
+            type: 'integer',
+            description:
+                'Lines to show before each match, as grep -B. Overrides context on that side.'
+        },
+        after: {
+            type: 'integer',
+            description:
+                'Lines to show after each match, as grep -A. Overrides context on that side.'
+        },
+        onlyMatching: {
+            type: 'boolean',
+            description:
+                'Return only the part of each line the pattern matched, one per line, as grep -o.'
         },
         limit: {
             type: 'integer',
             description: `Matches to return before stopping. ${DEFAULT_MATCH_LIMIT} by default.`
         },
+        perFile: {
+            type: 'integer',
+            description:
+                'Matches to take from any one file before moving to the next, as grep -m. Keeps one '
+                + 'busy file from using up the limit.'
+        },
         filesOnly: {
             type: 'boolean',
             description:
-                'Return the paths of the files that match and no lines, to find where something '
-                + 'lives before reading it.'
+                'Return the paths of the files that match and no lines, as grep -l, to find where '
+                + 'something lives before reading it.'
+        },
+        filesWithoutMatch: {
+            type: 'boolean',
+            description: 'Return the paths of the searched files that do not match, as grep -L.'
         },
         countOnly: {
             type: 'boolean',
@@ -117,9 +157,15 @@ export function patternsOf(pattern) {
     return kept
 }
 
-export function matcherFor({pattern, literal, ignoreCase}) {
-    const source = literal ? pattern.replace(/[\\^$.*+?()[\]{}|]/gu, '\\$&') : pattern
+export function matcherFor({pattern, literal, ignoreCase, wordMatch, lineMatch}) {
+    let source = literal ? pattern.replace(/[\\^$.*+?()[\]{}|]/gu, '\\$&') : pattern
     try {
+        // Compiled bare first, so the error names the pattern the model wrote and not the wrapping.
+        new RegExp(source, ignoreCase ? 'i' : '')
+        // Lookarounds rather than \b, which grep -w is not: the pattern itself may start or end on
+        // a non-word character, and backtracking still finds a whole-word match further along.
+        if (wordMatch) source = `(?<!\\w)(?:${source})(?!\\w)`
+        if (lineMatch) source = `^(?:${source})$`
         return new RegExp(source, ignoreCase ? 'i' : '')
     } catch (error) {
         throw new Error(
@@ -157,38 +203,94 @@ function truncatedLine(text) {
     return {text: `${text.slice(0, MAX_LINE_CHARS)}... [truncated]`, cut: true}
 }
 
-/// The rows of one file that match, one block per match, already formatted and capped.
+/// The rows of one file that match, grouped the way grep prints them, already formatted and capped.
 ///
-/// A block, rather than a flat list, is what lets the caller stop on the match the limit names and
-/// still know a further one existed. Context is sliced from the same lines rather than merged:
-/// overlapping context repeats, which is the shape of the output these models already know.
-export function searchText(text, label, matcher, {context = 0, room}) {
+/// Context is merged: a line is shown once however many matches reach it, and lines that are not
+/// adjacent form separate groups. `room` is how many matches may still be counted; `limitHit` says a
+/// further match existed once that room was full, which is what lets the caller stop on the match
+/// the limit names and still say more was there. `perFile` caps this file alone and never counts as
+/// the limit.
+export function searchText(text, label, matcher, options) {
+    const {before = 0, after = 0, room, perFile, invert = false, onlyMatching = false} = options
     const lines = text.split('\n')
-    const blocks = []
-    let cut = false
+    // A file ending in a newline has no empty last line, and grep never shows one.
+    if (lines.at(-1) === '') lines.pop()
+    const cap = Math.min(room, perFile ?? Number.MAX_SAFE_INTEGER)
+    // grep -o prints nothing for an empty match, so a line with only empty matches is not a hit.
+    const global =
+        onlyMatching && !invert ? new RegExp(matcher.source, `${matcher.flags}g`) : undefined
+    const isHit = line =>
+        global ?
+            [...line.matchAll(global)].some(found => found[0] !== '')
+        :   matcher.test(line) !== invert
+    const hits = []
+    let more = false
     for (const [index, line] of lines.entries()) {
-        if (blocks.length >= room) break
-        if (!matcher.test(line)) continue
-        const from = Math.max(0, index - context)
-        const to = Math.min(lines.length - 1, index + context)
-        const block = []
-        for (let at = from; at <= to; at += 1) {
-            const shown = truncatedLine(lines[at])
-            cut ||= shown.cut
-            const separator = at === index ? ':' : '-'
-            block.push(`${label}${separator}${at + 1}${separator} ${shown.text}`)
+        if (!isHit(line)) continue
+        if (hits.length >= cap) {
+            more = true
+            break
         }
-        blocks.push(block)
+        hits.push(index)
     }
-    return {blocks, cut}
+    const groups =
+        onlyMatching && !invert ?
+            onlyMatchingGroups(lines, hits, label, matcher)
+        :   contextGroups(lines, hits, label, {before, after})
+    return {
+        groups: groups.groups,
+        cut: groups.cut,
+        found: hits.length,
+        limitHit: more && cap === room
+    }
 }
 
-function noticesFor({limit, limitReached, bytesReached, cut, oversized, unreadable}) {
+function contextGroups(lines, hits, label, {before, after}) {
+    const shown = new Map()
+    for (const hit of hits) {
+        const from = Math.max(0, hit - before)
+        const to = Math.min(lines.length - 1, hit + after)
+        for (let at = from; at <= to; at += 1) shown.set(at, shown.get(at) || at === hit)
+    }
+    const groups = []
+    let cut = false
+    let previous = -2
+    for (const at of [...shown.keys()].sort((a, b) => a - b)) {
+        if (at !== previous + 1) groups.push([])
+        previous = at
+        const line = truncatedLine(lines[at])
+        cut ||= line.cut
+        const separator = shown.get(at) ? ':' : '-'
+        groups.at(-1).push(`${label}${separator}${at + 1}${separator} ${line.text}`)
+    }
+    return {groups, cut}
+}
+
+function onlyMatchingGroups(lines, hits, label, matcher) {
+    const global = new RegExp(matcher.source, `${matcher.flags}g`)
+    const groups = []
+    let cut = false
+    for (const hit of hits) {
+        const rows = []
+        for (const found of lines[hit].matchAll(global)) {
+            if (found[0] === '') continue
+            const shown = truncatedLine(found[0])
+            cut ||= shown.cut
+            rows.push(`${label}:${hit + 1}: ${shown.text}`)
+        }
+        if (rows.length > 0) groups.push(rows)
+    }
+    return {groups, cut}
+}
+
+function noticesFor({limit, perFile, limitReached, bytesReached, cut, oversized, unreadable}) {
     const notices = []
     if (limitReached) {
-        notices.push(
-            `${limit} matches limit reached. Use limit=${limit * 2} for more, or refine pattern`
-        )
+        const knobs =
+            perFile === undefined ?
+                `limit=${limit * 2}`
+            :   `limit=${limit * 2} and perFile=${perFile * 2}`
+        notices.push(`${limit} matches limit reached. Use ${knobs} for more, or refine pattern`)
     }
     if (bytesReached) notices.push(`${MAX_OUTPUT_BYTES / 1024}.0KB limit reached`)
     if (cut) {
@@ -255,11 +357,17 @@ export function createGrepTool() {
                 pattern,
                 matcher: matcherFor({...given, pattern}),
                 rows: [],
-                found: 0
+                groups: 0,
+                found: 0,
+                limitHit: false
             }))
             const suffixes = suffixesOf(given.glob)
             const limit = Math.max(1, given.limit ?? DEFAULT_MATCH_LIMIT)
+            const perFile = given.perFile === undefined ? undefined : Math.max(1, given.perFile)
             const context = Math.max(0, given.context ?? 0)
+            const before = Math.max(0, given.before ?? context)
+            const after = Math.max(0, given.after ?? context)
+            const pathsOnly = given.filesOnly === true || given.filesWithoutMatch === true
             const root = await unwrap(await env.absolutePath('.', signal), 'find the project root')
             const named = pathsOf(given.path)
 
@@ -274,13 +382,20 @@ export function createGrepTool() {
                 state.bytes += size
                 return true
             }
+            // grep parts groups with `--` only when context is shown, across files as within one.
+            const appendGroup = (search, group) => {
+                const parted = (before > 0 || after > 0) && search.groups > 0
+                if (parted && !append(search, '--')) return false
+                search.groups += 1
+                return group.every(row => append(search, row))
+            }
 
             // A count is not capped: counting every match still answers in one number, and a
             // count that stopped early would be a wrong answer rather than a short one.
             const roomFor = search => {
                 if (given.countOnly) return Number.MAX_SAFE_INTEGER
-                if (given.filesOnly) return 1
-                return limit + 1 - search.found
+                if (pathsOnly) return 1
+                return limit - search.found
             }
 
             const searchFile = async file => {
@@ -294,32 +409,43 @@ export function createGrepTool() {
                 const text = new TextDecoder().decode(bytes.value)
                 for (const search of searches) {
                     if (state.full) return
-                    if (!given.countOnly && search.found > limit) continue
+                    if (search.limitHit && !given.filesWithoutMatch) continue
                     const found = searchText(text, label, search.matcher, {
-                        context,
+                        before,
+                        after,
+                        perFile,
+                        invert: given.invert === true,
+                        onlyMatching: given.onlyMatching === true,
                         room: roomFor(search)
                     })
                     state.cut ||= found.cut
                     if (given.countOnly) {
-                        search.found += found.blocks.length
+                        search.found += found.found
+                        continue
+                    }
+                    if (given.filesWithoutMatch) {
+                        if (found.found === 0) append(search, label)
                         continue
                     }
                     if (given.filesOnly) {
-                        if (found.blocks.length > 0 && append(search, label)) search.found += 1
+                        if (found.found === 0) continue
+                        if (search.found >= limit) search.limitHit = true
+                        else if (append(search, label)) search.found += 1
                         continue
                     }
-                    for (const block of found.blocks) {
-                        search.found += 1
-                        if (search.found > limit) break
-                        for (const row of block) {
-                            if (!append(search, row)) return
-                        }
+                    search.found += found.found
+                    search.limitHit ||= found.limitHit
+                    for (const group of found.groups) {
+                        if (!appendGroup(search, group)) return
                     }
                 }
             }
 
-            const exhausted = () =>
-                state.full || (!given.countOnly && searches.every(search => search.found > limit))
+            const exhausted = () => {
+                if (state.full) return true
+                if (given.countOnly || given.filesWithoutMatch) return false
+                return searches.every(search => search.limitHit)
+            }
 
             const walk = async directory => {
                 const entries = await env.listDir(directory, signal)
@@ -354,7 +480,8 @@ export function createGrepTool() {
 
             const notices = noticesFor({
                 limit,
-                limitReached: !given.countOnly && searches.some(search => search.found > limit),
+                perFile,
+                limitReached: searches.some(search => search.limitHit),
                 bytesReached: state.full,
                 cut: state.cut,
                 oversized: state.oversized,

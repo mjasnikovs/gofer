@@ -132,7 +132,7 @@ test('escapes every regex character when literal is set', async context => {
     assert.equal(await grep({pattern: 'a.b', literal: true}), 'a.txt:1: a.b')
 })
 
-test('shows context each side, with no separator and no merging', async context => {
+test('shows context each side once, merged where two matches share a line', async context => {
     const current = await workspace(async path => {
         await writeFile(join(path, 'a.txt'), 'one\ntwo\nhit\nfour\nhit\nsix\n')
     })
@@ -144,10 +144,190 @@ test('shows context each side, with no separator and no merging', async context 
         'a.txt-2- two',
         'a.txt:3: hit',
         'a.txt-4- four',
-        'a.txt-4- four',
         'a.txt:5: hit',
         'a.txt-6- six'
     ])
+})
+
+test('parts context groups with --, within a file and between files, as grep does', async context => {
+    const current = await workspace(async path => {
+        await writeFile(join(path, 'a.txt'), 'hit\na\nb\nc\nhit\n')
+        await writeFile(join(path, 'b.txt'), 'hit\n')
+    })
+    context.after(current.remove)
+    const grep = grepIn(current.path)
+
+    assert.deepEqual((await grep({pattern: 'hit', context: 1})).split('\n'), [
+        'a.txt:1: hit',
+        'a.txt-2- a',
+        '--',
+        'a.txt-4- c',
+        'a.txt:5: hit',
+        '--',
+        'b.txt:1: hit'
+    ])
+    assert.deepEqual((await grep({pattern: 'hit'})).split('\n'), [
+        'a.txt:1: hit',
+        'a.txt:5: hit',
+        'b.txt:1: hit'
+    ])
+})
+
+test('before and after are separate, and each overrides context on its side', async context => {
+    const current = await workspace(async path => {
+        await writeFile(join(path, 'a.txt'), 'one\ntwo\nhit\nfour\nfive\n')
+    })
+    context.after(current.remove)
+    const grep = grepIn(current.path)
+
+    assert.deepEqual((await grep({pattern: 'hit', after: 2})).split('\n'), [
+        'a.txt:3: hit',
+        'a.txt-4- four',
+        'a.txt-5- five'
+    ])
+    assert.deepEqual((await grep({pattern: 'hit', before: 1})).split('\n'), [
+        'a.txt-2- two',
+        'a.txt:3: hit'
+    ])
+    assert.deepEqual((await grep({pattern: 'hit', context: 2, after: 0})).split('\n'), [
+        'a.txt-1- one',
+        'a.txt-2- two',
+        'a.txt:3: hit'
+    ])
+})
+
+test('a further match inside the last context window is shown as context once the limit is hit', async context => {
+    const current = await workspace(async path => {
+        await writeFile(join(path, 'a.txt'), 'hit\nhit\nhit\n')
+    })
+    context.after(current.remove)
+
+    const text = await grepIn(current.path)({pattern: 'hit', after: 1, limit: 1})
+
+    assert.deepEqual(text.split('\n'), [
+        'a.txt:1: hit',
+        'a.txt-2- hit',
+        '',
+        '[1 matches limit reached. Use limit=2 for more, or refine pattern]'
+    ])
+})
+
+test('wordMatch stops failure from matching failures="0"', async context => {
+    const current = await workspace(async path => {
+        await writeFile(
+            join(path, 'report.xml'),
+            '<testsuite failures="0">\n<failure message="boom"/>\n'
+        )
+    })
+    context.after(current.remove)
+    const grep = grepIn(current.path)
+
+    assert.equal((await grep({pattern: 'failure'})).split('\n').length, 2)
+    assert.equal(
+        await grep({pattern: 'failure', wordMatch: true}),
+        'report.xml:2: <failure message="boom"/>'
+    )
+    assert.equal(
+        await grep({pattern: 'boom"/>', wordMatch: true, literal: true}),
+        'report.xml:2: <failure message="boom"/>'
+    )
+})
+
+test('lineMatch takes the whole line and nothing less', async context => {
+    const current = await workspace(async path => {
+        await writeFile(join(path, 'a.txt'), 'pass\npassed\n pass\n')
+    })
+    context.after(current.remove)
+
+    assert.equal(await grepIn(current.path)({pattern: 'pass', lineMatch: true}), 'a.txt:1: pass')
+})
+
+test('invert returns the lines that do not match, and they count toward the limit', async context => {
+    const current = await workspace(async path => {
+        await writeFile(join(path, 'a.txt'), 'keep\ndrop\nkeep\ndrop\n')
+    })
+    context.after(current.remove)
+    const grep = grepIn(current.path)
+
+    assert.equal(await grep({pattern: 'drop', invert: true}), 'a.txt:1: keep\na.txt:3: keep')
+    assert.match(
+        await grep({pattern: 'drop', invert: true, limit: 1}),
+        /^a.txt:1: keep\n\n\[1 matches limit/u
+    )
+})
+
+test('onlyMatching returns each matched part on its own row', async context => {
+    const current = await workspace(async path => {
+        await writeFile(join(path, 'a.txt'), 'id=12 and id=34\nnone\nid=5\n')
+    })
+    context.after(current.remove)
+
+    const text = await grepIn(current.path)({pattern: 'id=\\d+', onlyMatching: true})
+
+    assert.deepEqual(text.split('\n'), ['a.txt:1: id=12', 'a.txt:1: id=34', 'a.txt:3: id=5'])
+})
+
+test('perFile caps one file without ending the search or claiming the limit', async context => {
+    const current = await workspace(async path => {
+        await writeFile(join(path, 'a.txt'), 'hit\nhit\nhit\n')
+        await writeFile(join(path, 'b.txt'), 'hit\n')
+    })
+    context.after(current.remove)
+
+    assert.equal(
+        await grepIn(current.path)({pattern: 'hit', perFile: 1}),
+        'a.txt:1: hit\nb.txt:1: hit'
+    )
+})
+
+test('filesOnly stops at the limit and says so', async context => {
+    const current = await workspace(async path => {
+        for (const name of ['a', 'b', 'c', 'd']) await writeFile(join(path, `${name}.txt`), 'hit\n')
+    })
+    context.after(current.remove)
+
+    const text = await grepIn(current.path)({pattern: 'hit', filesOnly: true, limit: 2})
+
+    assert.deepEqual(text.split('\n'), [
+        'a.txt',
+        'b.txt',
+        '',
+        '[2 matches limit reached. Use limit=4 for more, or refine pattern]'
+    ])
+})
+
+test('a limit hit under perFile names both knobs', async context => {
+    const current = await workspace(async path => {
+        await writeFile(join(path, 'a.txt'), 'hit\nhit\nhit\n')
+        await writeFile(join(path, 'b.txt'), 'hit\nhit\nhit\n')
+    })
+    context.after(current.remove)
+
+    const text = await grepIn(current.path)({pattern: 'hit', limit: 4, perFile: 2})
+
+    assert.match(text, /Use limit=8 and perFile=4 for more/u)
+})
+
+test('an empty match is not a hit under onlyMatching', async context => {
+    const current = await workspace(async path => {
+        await writeFile(join(path, 'a.txt'), 'none\nnone\nxx here\n')
+    })
+    context.after(current.remove)
+
+    assert.equal(
+        await grepIn(current.path)({pattern: 'x*', onlyMatching: true, limit: 2}),
+        'a.txt:3: xx'
+    )
+})
+
+test('filesWithoutMatch names the searched files the pattern is absent from', async context => {
+    const current = await workspace(project)
+    context.after(current.remove)
+
+    assert.equal(
+        await grepIn(current.path)({pattern: 'health -= 1', filesWithoutMatch: true}),
+        'scenes/main.tscn\nscripts/enemy.gd'
+    )
 })
 
 test('returns paths alone when filesOnly is set', async context => {
