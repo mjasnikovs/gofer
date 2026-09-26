@@ -145,24 +145,43 @@ const TEST_SUITE_DIRECTORY: &str = "test/";
 
 /// What a gdUnit4 suite may relax for the whole file. Its fluent asserts return values nobody
 /// keeps, and its `await`s are on calls declared as plain returns. Measured on 4.7.2: no suite
-/// loads without them, and none needs anything else file-wide.
+/// loads without the first, none that awaits loads without the second, and none needs
+/// anything else file-wide.
 const TEST_SUITE_FILE_WIDE: [&str; 2] = ["return_value_discarded", "redundant_await"];
 
 /// What a suite may relax on one line, and only on the line that needs it: a fuzzer parameter,
 /// which gdUnit4 re-reads from source and cannot build when typed, and a `verify` whose argument
-/// matcher is not the parameter's type.
+/// matcher — `any()` or one of the `any_*` family — is not the parameter's type.
 fn one_line_allowance_fits(warning: &str, statement: &str) -> bool {
     match warning {
         "inferred_declaration" => {
-            statement.starts_with("func test_") && statement.contains("fuzzer")
+            statement.starts_with("func test_") && statement.contains(":= Fuzzers.")
         }
-        "unsafe_method_access" => statement.contains("verify(") && statement.contains("any_"),
+        "unsafe_method_access" => statement.contains("verify(") && calls_a_matcher(statement),
         _ => false,
     }
 }
 
-/// The statement a one-line annotation applies to: the next line with code on it, and for a
-/// `func` the whole signature, which gdformat may have wrapped.
+fn calls_a_matcher(statement: &str) -> bool {
+    let is_name = |character: char| character.is_alphanumeric() || character == '_';
+    statement.match_indices("any").any(|(at, _)| {
+        let preceded = statement[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|before| is_name(before) || before == '.');
+        let rest = &statement[at + "any".len()..];
+        let suffix_end = rest
+            .find(|after: char| !is_name(after))
+            .unwrap_or(rest.len());
+        let suffix = &rest[..suffix_end];
+        !preceded
+            && (suffix.is_empty() || suffix.starts_with('_'))
+            && rest[suffix_end..].starts_with('(')
+    })
+}
+
+/// The statement a one-line annotation applies to: the next line with code on it, joined with the
+/// lines gdformat wrapped it onto until its brackets close.
 fn annotated_statement(lines: &[&str], annotation_line: usize) -> String {
     let mut code = lines[annotation_line + 1..]
         .iter()
@@ -172,16 +191,43 @@ fn annotated_statement(lines: &[&str], annotation_line: usize) -> String {
         return String::new();
     };
     let mut statement = first.to_owned();
-    if first.starts_with("func ") {
-        for line in code {
-            if statement.ends_with(':') {
-                break;
-            }
-            statement.push(' ');
-            statement.push_str(line);
+    let mut depth = bracket_depth(first);
+    for line in code {
+        if depth <= 0 {
+            break;
         }
+        statement.push(' ');
+        statement.push_str(line);
+        depth += bracket_depth(line);
     }
     statement
+}
+
+/// How many more brackets a line opens than it closes, outside strings and comments.
+fn bracket_depth(line: &str) -> i64 {
+    let mut depth = 0;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for character in line.chars() {
+        if let Some(open) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == open {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '"' | '\'' => quote = Some(character),
+            '#' => break,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    depth
 }
 
 /// Godot's warning level for "refuse to parse the script".
@@ -350,11 +396,15 @@ fn proposed_files(params: &Value) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Only `res://test/<name>_test.gd`, the one place the gdUnit4 skill puts a suite. The scheme is
+/// optional because a call Rust answers has had it stripped before the policy reads the path.
 fn is_test_suite(path: &str) -> bool {
-    let path = path.trim_start_matches("res://");
-    path.ends_with(TEST_SUITE_SUFFIX)
-        && (path.starts_with(TEST_SUITE_DIRECTORY)
-            || path.contains(&format!("/{TEST_SUITE_DIRECTORY}")))
+    let path = path.strip_prefix("res://").unwrap_or(path);
+    path.strip_prefix(TEST_SUITE_DIRECTORY).is_some_and(|name| {
+        !name.contains('/')
+            && name.len() > TEST_SUITE_SUFFIX.len()
+            && name.ends_with(TEST_SUITE_SUFFIX)
+    })
 }
 
 /// Every annotation on a line that the compiler would read as one.
@@ -809,14 +859,55 @@ mod tests {
         }
     }
 
-    /// The allowance is gdUnit4's, so it holds only where gdUnit4 looks: `test/`.
+    /// A `verify` takes the allowance when a matcher stands in for an argument: `any()` or any of
+    /// the `any_*` family, on one line or wrapped by gdformat.
+    #[test]
+    fn a_verify_with_a_matcher_may_relax_unsafe_method_access() {
+        let verified = |statement: &str| {
+            saved_at(
+                "res://test/weapon_test.gd",
+                &format!("\t@warning_ignore(\"unsafe_method_access\")\n{statement}"),
+            )
+        };
+        for fits in [
+            "\tverify(weapon, 2).fire(any())\n",
+            "\tverify(weapon, 2).fire(any_vector2())\n",
+            "\tverify(inventory).add(any_string(), any_int())\n",
+            "\tverify(weapon, 2).fire(\n\t\tany_vector2()\n\t)\n",
+            "\tverify(weapon, 2).fire(\n\t\t# the aim is not what this suite checks\n\t\tany()\n\t)\n",
+        ] {
+            assert_eq!(verified(fits), None, "{fits}");
+        }
+        for refused in [
+            "\tverify(weapon, 2).fire(NEAR)\n",
+            "\tweapon.fire(any())\n",
+            "\tverify(weapon, 2).fire(anything())\n",
+            "\tverify(weapon, 2).fire(company())\n",
+            "\tverify(weapon, 2).fire(targets.any(NEAR))\n",
+            "\tverify(weapon, 2).fire(NEAR)\n\tweapon.aim(any())\n",
+        ] {
+            assert!(verified(refused).is_some(), "{refused}");
+        }
+    }
+
+    /// The allowance holds only where the gdUnit4 skill puts a suite: directly in `res://test/`.
     #[test]
     fn a_test_suite_outside_the_test_folder_gets_no_allowance() {
         let annotation = "@warning_ignore_start(\"redundant_await\")\n";
-        assert!(saved_at("res://test/player_test.gd", annotation).is_none());
-        assert!(saved_at("res://test/enemy/spider_test.gd", annotation).is_none());
-        assert!(saved_at("res://scripts/player_test.gd", annotation).is_some());
-        assert!(saved_at("res://latest/player_test.gd", annotation).is_some());
+        for suite in ["res://test/player_test.gd", "test/player_test.gd"] {
+            assert!(saved_at(suite, annotation).is_none(), "{suite}");
+        }
+        for elsewhere in [
+            "res://scripts/test/player_test.gd",
+            "res://test/unit/player_test.gd",
+            "res://test/enemy/spider_test.gd",
+            "res://test/player.gd",
+            "res://test/_test.gd",
+            "res://scripts/player_test.gd",
+            "res://latest/player_test.gd",
+        ] {
+            assert!(saved_at(elsewhere, annotation).is_some(), "{elsewhere}");
+        }
     }
 
     /// A string is not an annotation. `godot-code-style`'s self-test holds exactly this line.

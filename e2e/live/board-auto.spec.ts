@@ -22,7 +22,7 @@ const AUTO_LIMIT_MS = 1_800_000
 const ASKS = [
     {
         title: 'Name the level scene',
-        body: 'Add a one-line comment at the top of scripts/main.gd saying which scene it drives.'
+        body: 'Add a one-line comment under the first line of scripts/main.gd saying why the tick exists.'
     },
     {
         title: 'Slow the tick',

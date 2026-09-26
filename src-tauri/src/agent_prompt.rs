@@ -119,7 +119,7 @@ pub fn default_prompt(tools: &[ToolDomain], strict_typing: bool) -> String {
 ///
 /// Its Variant clause once said "cast". An `as` cast of a Variant fails `unsafe_cast`, which the
 /// same rule sets to Error, so the line now says what `godot-code-style` says.
-const STRICT_TYPING_LINE: &str = "- This project treats GDScript warnings as errors, so untyped code does not parse: give every var, const, parameter and return an explicit type, never := (a gdUnit4 fuzzer parameter is the one exception), and read a Variant into a typed local before you use it, because an as cast of one is an error too";
+const STRICT_TYPING_LINE: &str = "- This project treats GDScript warnings as errors, so untyped code does not parse: give every var, const, parameter and return an explicit type (a setter's set(value) parameter takes its type from the property), never := (a gdUnit4 fuzzer parameter is the one exception), and read a Variant into a typed local before you use it, because an as cast of one is an error too";
 
 /// The one line of the prompt the user does not own: which engine this build is pinned to.
 ///

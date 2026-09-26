@@ -498,7 +498,7 @@
             "task": "Run the game exactly as the project is now. If the editor puts up a dialog, tell me its title and buttons and dismiss it with the button that cancels. Then set the main scene to the one scene the project has and run it for real, and stop it."
         },
         {
-            "id": "coin-pickup",
+            "id": "coin-pickup-lambda",
             "fixture": "live-project",
             "ops": [
                 "resource.create_texture",
@@ -507,7 +507,6 @@
                 "node.create_nodes",
                 "node.set_properties",
                 "script.save",
-                "node.connect_signal",
                 "scene.save",
                 "node.instantiate",
                 "node.change_type",
@@ -518,7 +517,7 @@
                 "logs.read",
                 "runtime.stop"
             ],
-            "task": "Build a coin the player can collect. Draw a 16x16 yellow coin texture, make a coin scene at res://scenes/coin.tscn whose root is an Area2D with a Sprite2D and a CollisionShape2D (a 16x16 rectangle shape), and a script that prints \"collected\" and frees the coin when a body enters it. Turn the Player into a CharacterBody2D with its own 24x24 rectangle collision shape, and make it move 200 px/s to the right while the D key is held. Place three coins to the right of the player at x = 120, 180, 240 on the player's y. Run the game, hold D for about a second, and prove from the log that at least one coin printed \"collected\"."
+            "task": "Build a coin the player can collect. Draw a 16x16 yellow coin texture, make a coin scene at res://scenes/coin.tscn whose root is an Area2D with a Sprite2D and a CollisionShape2D (a 16x16 rectangle shape), and a script that prints \"collected\" and frees the coin when a body enters it, connected in _ready with an inline lambda that keeps what connect returns. Turn the Player into a CharacterBody2D with its own 24x24 rectangle collision shape, and make it move 200 px/s to the right while the D key is held. Place three coins to the right of the player at x = 120, 180, 240 on the player's y. Run the game, hold D for about a second, and prove from the log that at least one coin printed \"collected\"."
         },
         {
             "id": "enemy-chase",

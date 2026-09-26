@@ -215,6 +215,13 @@ test('the task bank refuses two tasks with one id, and the shipped bank names on
                 `${task.id} aims at ${op}, which the catalogue does not have`
             )
     const aimed = new Set(shipped.flatMap(task => task.ops))
-    const unaimed = [...catalogue].filter(op => !aimed.has(op))
+    // godot-code-style connects a signal in _ready with a lambda, so no task may ask for this op.
+    const styleForbids = ['node.connect_signal']
+    assert.deepEqual(
+        styleForbids.filter(op => aimed.has(op)),
+        [],
+        'a task aims at an op the code style never uses'
+    )
+    const unaimed = [...catalogue].filter(op => !aimed.has(op) && !styleForbids.includes(op))
     assert.deepEqual(unaimed, [], 'every catalogue op needs a task that aims at it')
 })

@@ -1651,11 +1651,11 @@ describe('the live workspace', () => {
                 'Add coins to that level: at least three Area2D nodes named Coin, floating above '
                     + 'the ground where a player would jump for them, each with a collision shape '
                     + 'and something visible. Write res://scripts/coin.gd with a method that '
-                    + 'prints "coin collected" and frees the coin, and attach it to each one. Then '
-                    + 'wire each coin up in the scene itself: connect its body_entered signal to '
-                    + 'that method with your node.connect_signal tool, targeting the coin, '
-                    + 'and put every coin in the group "coins" with node.add_to_group. Save '
-                    + 'the scene.',
+                    + 'prints "coin collected" and frees the coin, and attach it to each one. The '
+                    + 'script connects its own body_entered signal in _ready with an inline '
+                    + 'lambda that calls that method, keeping what connect returns in a typed '
+                    + '_error; never save a connection into the scene. Put every coin in the '
+                    + 'group "coins" with node.add_to_group. Save the scene.',
                 async () => {
                     if (!existsSync(join(bound, 'scripts/coin.gd'))) return false
                     await openLevelInEditor()
@@ -1665,12 +1665,15 @@ describe('the live workspace', () => {
                     }).catch(() => null)
                     if (!coin) return false
                     if (!coin.groups.includes('coins')) return false
-                    return coin.connections.some(entry => entry.signal === 'body_entered')
+                    if (coin.connections.some(entry => entry.signal === 'body_entered'))
+                        return false
+                    const script = readFileSync(join(bound, 'scripts/coin.gd'), 'utf8')
+                    return script.includes('body_entered.connect(') && script.includes('func(')
                 },
                 'the level needs at least three Area2D coins carrying res://scripts/coin.gd, the '
-                    + 'first of them named Coin, each with its body_entered connected to that '
-                    + 'script’s method and each in the group "coins", and the scene saved '
-                    + 'afterwards. Connecting inside a coin scene you instance is fine.'
+                    + 'first of them named Coin, each in the group "coins", and the scene saved '
+                    + 'afterwards. The script wires body_entered itself, in _ready, with an inline '
+                    + 'lambda; a connection saved into the scene fails the check.'
             )
         })
 
@@ -1682,7 +1685,7 @@ describe('the live workspace', () => {
             )
             await openInspector()
             await clickTab('Node')
-            await expectInInspector(['coins', 'body_entered →'])
+            await expectInInspector(['coins'])
             await closeInspector()
         })
 
