@@ -1,7 +1,7 @@
 [[permission]]
 identifier = "main-window-commands"
 description = "Allows the main window to use Gofer's user-facing application commands."
-# GENERATED-BEGIN allow-list sha256:cd37dc7bd7b31901
+# GENERATED-BEGIN allow-list sha256:3c817a1f8e76f9fc
 commands.allow = [
     "abandon_task_merge",
     "activate_chat_task",
@@ -56,6 +56,7 @@ commands.allow = [
     "pending_project_changes",
     "query_godot_docs",
     "read_agent_prompt",
+    "read_card_template",
     "read_chat_attachment",
     "read_clipboard_image",
     "read_godot_logs",
@@ -73,6 +74,7 @@ commands.allow = [
     "run_storage_maintenance",
     "run_task_brief",
     "save_agent_prompt",
+    "save_card_template",
     "save_chat",
     "save_chat_attachment",
     "save_door_settings",

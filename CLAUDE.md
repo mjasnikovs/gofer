@@ -180,6 +180,7 @@ own. Gofer must be open on the project, and the door is shut until Settings, Oth
 node scripts/gofer.mjs tools                           every tool and its operations
 node scripts/gofer.mjs godot_scene list                one operation, flags are its parameters
 node scripts/gofer.mjs board comment --id 4 --body "…" a board write is signed by --owner or GOFER_OWNER
+node scripts/gofer.mjs board template                  the body a new card starts from
 ```
 
 A `board move` to `doing` from outside opens the card's task: a branch, a row in the task list, and

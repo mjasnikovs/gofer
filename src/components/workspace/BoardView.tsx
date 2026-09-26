@@ -28,6 +28,7 @@ import {
     moveCard,
     postCardToGofer,
     readCard,
+    readCardTemplate,
     storeCardAttachments,
     toBoardError,
     watchBoard
@@ -66,6 +67,7 @@ const STATUS_OPTIONS = CARD_STATUSES.map(status => ({
 
 export function BoardView() {
     const [cards, setCards] = useState<readonly Card[]>()
+    const [template, setTemplate] = useState('')
     const [error, setError] = useState<CommandError>()
     const [isLoading, setIsLoading] = useState(true)
     const [reads, setReads] = useState(0)
@@ -78,10 +80,11 @@ export function BoardView() {
 
     useEffect(() => {
         let cancelled = false
-        void listCards()
-            .then(rows => {
+        void Promise.all([listCards(), readCardTemplate()])
+            .then(([rows, starter]) => {
                 if (cancelled) return
                 setCards(rows)
+                setTemplate(starter.template)
                 setError(undefined)
             })
             .catch((failure: unknown) => {
@@ -203,6 +206,7 @@ export function BoardView() {
             )}
             {isAdding && (
                 <NewCardDialog
+                    template={template}
                     onClose={() => {
                         setIsAdding(false)
                     }}
@@ -343,13 +347,14 @@ function CardFields({
 }
 
 type NewCardDialogProps = Readonly<{
+    template: string
     onClose: () => void
     onCreated: () => void
 }>
 
-function NewCardDialog({onClose, onCreated}: NewCardDialogProps) {
+function NewCardDialog({template, onClose, onCreated}: NewCardDialogProps) {
     const [title, setTitle] = useState('')
-    const [body, setBody] = useState('')
+    const [body, setBody] = useState(template)
     const [failure, setFailure] = useState<string>()
     const [isSaving, setIsSaving] = useState(false)
     const pictures = useAttachmentPool(setFailure)

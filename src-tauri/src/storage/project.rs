@@ -24,6 +24,10 @@ impl Project<'_> {
 
     fn stored_ui_state(&self, key: &str) -> Result<Option<String>, CommandError> {
         validate_ui_key(key)?;
+        self.stored_state(key)
+    }
+
+    fn stored_state(&self, key: &str) -> Result<Option<String>, CommandError> {
         self.storage
             .connection()?
             .query_row(
@@ -47,14 +51,19 @@ impl Project<'_> {
 
     fn store_ui_state(&self, key: &str, value: Option<&str>) -> Result<(), CommandError> {
         validate_ui_key(key)?;
+        if value.is_some_and(|value| value.len() > MAX_UI_STATE_BYTES) {
+            return Err(CommandError::from(
+                "The interface state is too large to store".to_owned(),
+            ));
+        }
+        self.store_state(key, value)
+    }
+
+    /// Writes one `project_state` row, or deletes it when there is no value to keep.
+    fn store_state(&self, key: &str, value: Option<&str>) -> Result<(), CommandError> {
         let (_write_guard, connection) = self.storage.write_connection()?;
         match value {
             Some(value) => {
-                if value.len() > MAX_UI_STATE_BYTES {
-                    return Err(CommandError::from(
-                        "The interface state is too large to store".to_owned(),
-                    ));
-                }
                 connection
                     .execute(
                         "INSERT INTO project_state (key, value) VALUES (?1, ?2)
@@ -127,20 +136,8 @@ impl Project<'_> {
     /// `INSERT OR REPLACE` rather than a failure on a second start, because starting again is what a
     /// user does when the first attempt stopped, and the phase columns are rewritten as the new run
     pub fn read_agent_prompt(&self) -> Result<Option<String>, CommandError> {
-        self.stored_agent_prompt()
+        self.stored_state(AGENT_PROMPT_KEY)
             .map_err(CommandError::or_coded("prompt_unreadable"))
-    }
-
-    fn stored_agent_prompt(&self) -> Result<Option<String>, CommandError> {
-        self.storage
-            .connection()?
-            .query_row(
-                "SELECT value FROM project_state WHERE key = ?1",
-                [AGENT_PROMPT_KEY],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(database_error)
     }
 
     /// Stores this project's prompt, or forgets it so the project follows the shipped one again.
@@ -149,32 +146,26 @@ impl Project<'_> {
     /// cannot reach it the way it reaches those: it is what the agent is told, so it comes through
     /// a command that checks its size rather than through the general interface-state write.
     pub fn write_agent_prompt(&self, prompt: Option<&str>) -> Result<(), CommandError> {
-        self.store_agent_prompt(prompt)
+        self.store_state(AGENT_PROMPT_KEY, prompt)
             .map_err(CommandError::or_coded("prompt_unwritable"))
     }
 
-    fn store_agent_prompt(&self, prompt: Option<&str>) -> Result<(), CommandError> {
-        let (_write_guard, connection) = self.storage.write_connection()?;
-        match prompt {
-            Some(prompt) => {
-                connection
-                    .execute(
-                        "INSERT INTO project_state (key, value) VALUES (?1, ?2)
-                         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                        params![AGENT_PROMPT_KEY, prompt],
-                    )
-                    .map_err(database_error)?;
-            }
-            None => {
-                connection
-                    .execute(
-                        "DELETE FROM project_state WHERE key = ?1",
-                        [AGENT_PROMPT_KEY],
-                    )
-                    .map_err(database_error)?;
-            }
+    /// The body this project's new cards start from, or `None` while it follows the shipped one.
+    pub fn read_card_template(&self) -> Result<Option<String>, CommandError> {
+        self.stored_state(CARD_TEMPLATE_KEY)
+            .map_err(CommandError::or_coded("card_template_unreadable"))
+    }
+
+    /// Stores this project's card template, or forgets it so new cards start from the shipped one.
+    pub fn write_card_template(&self, template: Option<&str>) -> Result<(), CommandError> {
+        if template.is_some_and(|template| template.len() > MAX_STORED_MESSAGE_BYTES) {
+            return Err(CommandError::new(
+                "card_template_too_large",
+                "A card template cannot be larger than a card body",
+            ));
         }
-        Ok(())
+        self.store_state(CARD_TEMPLATE_KEY, template)
+            .map_err(CommandError::or_coded("card_template_unwritable"))
     }
 
     /// The skills this project has turned off, or an empty list while it has turned off none.
@@ -703,6 +694,27 @@ mod tests {
                 .expect("read"),
             Some("kept".to_owned())
         );
+    }
+
+    /// A template the project stores is the project's; storing none is how it follows the shipped one.
+    #[test]
+    fn the_card_template_round_trips_and_can_be_given_back() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+
+        assert_eq!(storage.project().read_card_template().expect("read"), None);
+        storage
+            .project()
+            .write_card_template(Some("GOAL\n\nVERIFY\n"))
+            .expect("write");
+        assert_eq!(
+            storage.project().read_card_template().expect("read"),
+            Some("GOAL\n\nVERIFY\n".to_owned())
+        );
+
+        storage.project().write_card_template(None).expect("forget");
+        assert_eq!(storage.project().read_card_template().expect("read"), None);
+        assert_eq!(storage.project().read_agent_prompt().expect("read"), None);
     }
 
     /// The unsent message belongs to the conversation, so deleting the conversation takes it.

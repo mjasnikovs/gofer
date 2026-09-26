@@ -21,7 +21,14 @@ import type {
 } from '../models/memory'
 import type {FileDiff, TaskChanges} from '../models/changes'
 import type {ProjectSketch, SketchHtml} from '../models/sketch'
-import type {Card, CardComment, CardDetail, CardEdit, CardStatus} from '../models/board'
+import type {
+    Card,
+    CardComment,
+    CardDetail,
+    CardEdit,
+    CardStatus,
+    CardTemplate
+} from '../models/board'
 import type {SkillsResponse} from '../models/skills'
 import type {UnsavedWork} from '../models/unsaved-work'
 import type {
@@ -243,6 +250,7 @@ export type DesktopCommandMap = Readonly<{
     'plugin:dialog|open': CommandSpec<{options: OpenDialogOptions}, string | null>
     query_godot_docs: CommandSpec<{request: DocsQuery}, DocsResponse>
     read_agent_prompt: CommandSpec<undefined, AgentPrompt>
+    read_card_template: CommandSpec<undefined, CardTemplate>
     read_chat_attachment: CommandSpec<{attachment: ChatAttachment}, string>
     read_clipboard_image: CommandSpec<undefined, ClipboardImage | null>
     read_godot_logs: CommandSpec<{query: GodotLogQuery}, GodotLogPage>
@@ -263,6 +271,7 @@ export type DesktopCommandMap = Readonly<{
         void
     >
     save_agent_prompt: CommandSpec<{prompt: string}, AgentPrompt>
+    save_card_template: CommandSpec<{template: string}, CardTemplate>
     save_chat: CommandSpec<{chat: StoredChatPayload}, void>
     save_chat_attachment: CommandSpec<{request: AttachmentUpload}, void>
     save_door_settings: CommandSpec<{door: DoorSettings}, SettingsResponse>

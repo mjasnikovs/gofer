@@ -12,6 +12,7 @@ import {
     startSubagentConnection,
     withActiveConnection
 } from './settings'
+import type {CardTemplate} from './board'
 import type {
     AgentPrompt,
     AiConnectionProfile,
@@ -37,6 +38,7 @@ export type SettingsTask =
     | 'testing'
     | 'saving'
     | 'savingPrompt'
+    | 'savingTemplate'
     | 'savingGodot'
     | 'savingDoor'
     | 'downloading'
@@ -46,12 +48,13 @@ export type SettingsTask =
 
 export type SettingsBusy = Readonly<Record<SettingsTask, boolean>>
 
-export type SettingsTab = 'ai' | 'prompt' | 'godot' | 'agents' | 'models' | 'storage'
+export type SettingsTab = 'ai' | 'prompt' | 'board' | 'godot' | 'agents' | 'models' | 'storage'
 
 export const TASK_TABS: Readonly<Record<SettingsTask, SettingsTab>> = {
     testing: 'ai',
     saving: 'ai',
     savingPrompt: 'prompt',
+    savingTemplate: 'board',
     savingGodot: 'godot',
     savingDoor: 'agents',
     downloading: 'models',
@@ -94,6 +97,9 @@ export type SettingsDraft = Readonly<{
     agentPrompt: string
     savedAgentPrompt: string
     defaultAgentPrompt: string
+    cardTemplate: string
+    savedCardTemplate: string
+    defaultCardTemplate: string
 }>
 
 export type SettingsTaskAction =
@@ -108,6 +114,7 @@ export type SettingsAction =
           response: SettingsResponse
           cache: CacheStatus
           prompt: AgentPrompt
+          template: CardTemplate
       }>
     | Readonly<{type: 'unavailable'; notice: Notice}>
     | Readonly<{type: 'tab-chosen'; tab: SettingsTab}>
@@ -130,6 +137,9 @@ export type SettingsAction =
     | Readonly<{type: 'prompt-typed'; value: string}>
     | Readonly<{type: 'prompt-restored'}>
     | Readonly<{type: 'prompt-saved'; prompt: AgentPrompt}>
+    | Readonly<{type: 'template-typed'; value: string}>
+    | Readonly<{type: 'template-restored'}>
+    | Readonly<{type: 'template-saved'; template: CardTemplate}>
     | Readonly<{type: 'godot-changed'; update: Partial<GodotSettings>}>
     | Readonly<{type: 'godot-saved'; response: SettingsResponse}>
     | Readonly<{type: 'door-changed'; update: Partial<DoorSettings>}>
@@ -145,6 +155,7 @@ const NOTHING_RUNNING: SettingsBusy = {
     testing: false,
     saving: false,
     savingPrompt: false,
+    savingTemplate: false,
     savingGodot: false,
     savingDoor: false,
     downloading: false,
@@ -172,7 +183,10 @@ export const INITIAL_SETTINGS_DRAFT: SettingsDraft = {
     subagentModels: [],
     agentPrompt: '',
     savedAgentPrompt: '',
-    defaultAgentPrompt: ''
+    defaultAgentPrompt: '',
+    cardTemplate: '',
+    savedCardTemplate: '',
+    defaultCardTemplate: ''
 }
 
 function busyWith(busy: SettingsBusy, task: SettingsTask, isRunning: boolean): SettingsBusy {
@@ -275,6 +289,14 @@ export function agentPromptIsDefault(state: SettingsDraft) {
     return state.agentPrompt.trim() === state.defaultAgentPrompt.trim()
 }
 
+export function cardTemplateIsUnsaved(state: SettingsDraft) {
+    return state.cardTemplate !== state.savedCardTemplate
+}
+
+export function cardTemplateIsDefault(state: SettingsDraft) {
+    return state.cardTemplate.trim() === state.defaultCardTemplate.trim()
+}
+
 export function cacheIsBusy(state: SettingsDraft) {
     return state.cache?.state === 'busy' || state.busy.downloading
 }
@@ -298,6 +320,9 @@ export function reduce(
                 agentPrompt: action.prompt.prompt,
                 savedAgentPrompt: action.prompt.prompt,
                 defaultAgentPrompt: action.prompt.defaultPrompt,
+                cardTemplate: action.template.template,
+                savedCardTemplate: action.template.template,
+                defaultCardTemplate: action.template.defaultTemplate,
                 isLoading: false,
                 notices:
                     action.response.credentialStoreError ?
@@ -510,6 +535,25 @@ export function reduce(
                     status: 'success',
                     title: 'Agent prompt saved',
                     description: 'The agent is told this before every turn in this project.'
+                })
+            }
+
+        case 'template-typed':
+            return {...state, cardTemplate: action.value}
+
+        case 'template-restored':
+            return {...state, cardTemplate: state.defaultCardTemplate}
+
+        case 'template-saved':
+            return {
+                ...state,
+                cardTemplate: action.template.template,
+                savedCardTemplate: action.template.template,
+                defaultCardTemplate: action.template.defaultTemplate,
+                notices: noticedOn(state.notices, 'board', {
+                    status: 'success',
+                    title: 'Card template saved',
+                    description: 'Every new card on this project starts from it.'
                 })
             }
 

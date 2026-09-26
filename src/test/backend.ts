@@ -26,7 +26,7 @@ import type {MemoryEdit, MemoryState, ProjectMemory} from '../models/memory'
 import type {FileDiff, TaskChanges} from '../models/changes'
 import {NO_CHANGES} from '../models/changes'
 import type {ProjectSketch, SketchHtml} from '../models/sketch'
-import type {Card, CardComment, CardStatus, CardEdit} from '../models/board'
+import type {Card, CardComment, CardStatus, CardEdit, CardTemplate} from '../models/board'
 import type {Skill, SkillsResponse} from '../models/skills'
 import type {BriefRun} from '../models/brief'
 
@@ -77,6 +77,7 @@ export type BackendOptions = Readonly<{
     stored?: Readonly<Record<string, unknown>>
     settings?: SettingsResponse
     agentPrompt?: AgentPrompt
+    cardTemplate?: CardTemplate
     cache?: CacheStatus
     chat?: StoredChat
     health?: HealthReport
@@ -257,6 +258,11 @@ export const HEALTHY: HealthReport = {
 export const SKETCH_HTML: SketchHtml = {
     shown: '<p>data:image/png;base64,AAAA</p>',
     source: '<p>res://ui/panel.png</p>'
+}
+
+const CARD_TEMPLATE: CardTemplate = {
+    template: 'GOAL\n\nCONSTRAINTS\n\nKNOWN-UNKNOWNS\n\nSTEPS\n\nVERIFY\n',
+    defaultTemplate: 'GOAL\n\nCONSTRAINTS\n\nKNOWN-UNKNOWNS\n\nSTEPS\n\nVERIFY\n'
 }
 
 const PROMPT: AgentPrompt = {
@@ -481,6 +487,9 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
             case 'read_agent_prompt':
             case 'save_agent_prompt':
                 return options.agentPrompt ?? PROMPT
+            case 'read_card_template':
+            case 'save_card_template':
+                return options.cardTemplate ?? CARD_TEMPLATE
             case 'get_rag_cache_status':
             case 'delete_rag_cache':
                 return options.cache ?? CACHE

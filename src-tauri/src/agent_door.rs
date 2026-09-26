@@ -344,6 +344,7 @@ const TOOL_REFUSED: i64 = -32000;
 /// mean; `owner` signs the write and never changes whose card it is.
 pub(crate) const BOARD_LISTING: &str = r#"[
     {"op": "list", "summary": "Every card without its body.", "params": []},
+    {"op": "template", "summary": "The body a new card starts from.", "params": []},
     {"op": "read", "summary": "One card with its comments.", "params": [
         {"name": "id", "kind": "int", "required": true}
     ]},

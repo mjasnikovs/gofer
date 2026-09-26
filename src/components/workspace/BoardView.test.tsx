@@ -58,8 +58,15 @@ const COMMENT: CardComment = {
     createdAt: 1_700_000_000_000
 }
 
+const TEMPLATE = 'GOAL\n\nVERIFY\n'
+
 function backend(rows: readonly Card[] = [card(), DOING], answers: BackendAnswers = {}) {
-    return installBackend(tauri, {cards: rows, comments: [COMMENT], answers})
+    return installBackend(tauri, {
+        cards: rows,
+        comments: [COMMENT],
+        cardTemplate: {template: TEMPLATE, defaultTemplate: TEMPLATE},
+        answers
+    })
 }
 
 const calls = () => tauri.invoke.mock.calls.map(call => call[0])
@@ -404,7 +411,25 @@ describe('the board', () => {
         await flushUntil(() => calls().includes('card_create'))
 
         const created = tauri.invoke.mock.calls.find(call => call[0] === 'card_create')?.[1]
-        expect(created).toMatchObject({body: 'Second press\nin the air', attachments: []})
+        // jsdom puts the caret at the start of a seeded field, so only the typed part is asserted.
+        expect(created).toMatchObject({
+            body: expect.stringContaining('Second press\nin the air') as string,
+            attachments: []
+        })
+    })
+
+    it('starts a new card from the project template', async () => {
+        backend([])
+        await open()
+
+        await userEvent.click(screen.getByRole('button', {name: 'New card'}))
+        await flush()
+        await userEvent.type(screen.getByLabelText(/Title/u), 'Add a double jump')
+        await userEvent.click(screen.getByRole('button', {name: 'Add card'}))
+        await flushUntil(() => calls().includes('card_create'))
+
+        const created = tauri.invoke.mock.calls.find(call => call[0] === 'card_create')?.[1]
+        expect(created).toMatchObject({body: TEMPLATE})
     })
 
     it('shows a comment another agent leaves while the card is open', async () => {

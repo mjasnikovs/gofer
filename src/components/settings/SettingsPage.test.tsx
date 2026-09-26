@@ -62,6 +62,7 @@ const settingsResponse: SettingsResponse = {
 }
 
 const shippedPrompt = 'You are Gofer, a capable local coding agent.'
+const shippedTemplate = 'GOAL\n\nCONSTRAINTS\n\nKNOWN-UNKNOWNS\n\nSTEPS\n\nVERIFY\n'
 
 const installedCache = {path: '/tmp/gofer-rag', sizeBytes: 1024 ** 3, state: 'installed'} as const
 const missingCache = {path: '/tmp/gofer-rag', sizeBytes: 0, state: 'not-installed'} as const
@@ -415,6 +416,51 @@ describe('the agent prompt', () => {
         await flush()
 
         expect(screen.getByText('Agent prompt could not be saved')).toBeInTheDocument()
+        expect(screen.getByText(/read-only/)).toBeInTheDocument()
+    })
+})
+
+describe('the card template', () => {
+    it('stores an edited template with the project and restores the shipped one', async () => {
+        const user = userEvent.setup()
+        answer({save_card_template: {template: 'GOAL\n', defaultTemplate: shippedTemplate}})
+        await open()
+        await openTab('Board cards')
+
+        expect(screen.getByText(/This is the template Gofer ships/)).toBeInTheDocument()
+        expect(screen.getByRole('button', {name: 'Restore default'})).toBeDisabled()
+        expect(screen.getByRole('button', {name: 'Save template'})).toBeDisabled()
+
+        await user.type(screen.getByLabelText('Card template'), 'DONE-WHEN')
+        await flush()
+        expect(screen.getByText(/Edited for this project/)).toBeInTheDocument()
+        await user.click(screen.getByRole('button', {name: 'Save template'}))
+        await flush()
+
+        expect(tauri.invoke).toHaveBeenCalledWith('save_card_template', {
+            template: `${shippedTemplate}DONE-WHEN`
+        })
+        expect(screen.getByText('Card template saved')).toBeInTheDocument()
+
+        await user.click(screen.getByRole('button', {name: 'Restore default'}))
+        await flush()
+
+        expect(screen.getByLabelText('Card template')).toHaveValue(shippedTemplate)
+        expect(screen.getByRole('button', {name: 'Restore default'})).toBeDisabled()
+    })
+
+    it('reports a template save the backend refused', async () => {
+        const user = userEvent.setup()
+        answer({save_card_template: new Error('the project is read-only')})
+        await open()
+        await openTab('Board cards')
+
+        await user.type(screen.getByLabelText('Card template'), 'DONE-WHEN')
+        await flush()
+        await user.click(screen.getByRole('button', {name: 'Save template'}))
+        await flush()
+
+        expect(screen.getByText('Card template could not be saved')).toBeInTheDocument()
         expect(screen.getByText(/read-only/)).toBeInTheDocument()
     })
 })

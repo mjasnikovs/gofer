@@ -1,11 +1,26 @@
 import {invoke, listen} from './desktop'
 import {toCommandError} from '../utils/command-error'
 import type {CommandError} from '../models/errors'
-import type {Card, CardComment, CardDetail, CardEdit, CardStatus} from '../models/board'
+import type {
+    Card,
+    CardComment,
+    CardDetail,
+    CardEdit,
+    CardStatus,
+    CardTemplate
+} from '../models/board'
 import type {ChatAttachment, DraftAttachment, StoredChat} from '../models/chat'
 
 export function listCards(): Promise<readonly Card[]> {
     return invoke('board_list')
+}
+
+export function readCardTemplate(): Promise<CardTemplate> {
+    return invoke('read_card_template')
+}
+
+export function saveCardTemplate(template: string): Promise<CardTemplate> {
+    return invoke('save_card_template', {template})
 }
 
 export function readCard(id: string): Promise<CardDetail> {

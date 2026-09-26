@@ -54,6 +54,8 @@ test('a board write is signed, a board read is not, and the name comes from the 
     assert.equal(named.params.params.owner, 'claude')
     const read = requestFor(parseArgs(['board', 'list']), env)
     assert.deepEqual(read.params.params, {op: 'list'})
+    const template = requestFor(parseArgs(['board', 'template']), env)
+    assert.deepEqual(template.params.params, {op: 'template'})
     const unnamed = requestFor(parseArgs(['board', 'create', '--title', 'x']), {})
     assert.equal(unnamed.params.params.owner, 'terminal')
 })

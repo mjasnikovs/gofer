@@ -5,6 +5,7 @@ import {Layout, LayoutContent} from '@astryxdesign/core/Layout'
 import {VStack} from '@astryxdesign/core/Stack'
 import {
     AI_SETTINGS_TAB,
+    BOARD_SETTINGS_TAB,
     AGENTS_SETTINGS_TAB,
     GODOT_SETTINGS_TAB,
     MODELS_SETTINGS_TAB,
@@ -22,6 +23,7 @@ import {useGodotTab} from './GodotTab'
 import {useAgentsTab} from './AgentsTab'
 import {useModelsTab} from './ModelsTab'
 import {usePromptTab} from './PromptTab'
+import {useBoardTab} from './BoardTab'
 import {useStorageTab} from './StorageTab'
 import type {SettingsView} from './settings-view'
 
@@ -60,12 +62,13 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
             }
 
             try {
-                const [response, cacheResponse, prompt] = await Promise.all([
+                const [response, cacheResponse, prompt, template] = await Promise.all([
                     invoke('load_settings'),
                     invoke('get_rag_cache_status'),
-                    invoke('read_agent_prompt')
+                    invoke('read_agent_prompt'),
+                    invoke('read_card_template')
                 ])
-                dispatch({type: 'loaded', response, cache: cacheResponse, prompt})
+                dispatch({type: 'loaded', response, cache: cacheResponse, prompt, template})
             } catch (error) {
                 dispatch({
                     type: 'unavailable',
@@ -102,6 +105,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
 
     const ai = useAiTab(view)
     const prompt = usePromptTab(view)
+    const board = useBoardTab(view)
     const godot = useGodotTab(view)
     const agents = useAgentsTab(view)
     const models = useModelsTab(view, onCacheDeleted)
@@ -110,6 +114,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
     const tabs: Readonly<Record<SettingsTab, {body: ReactNode; footer: ReactNode}>> = {
         ai,
         prompt,
+        board,
         godot,
         agents,
         models,
@@ -165,6 +170,12 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                         label='Agent prompt'
                                         isLabelHidden={isCompact}
                                         {...PROMPT_SETTINGS_TAB}
+                                    />
+                                    <Tab
+                                        value='board'
+                                        label='Board cards'
+                                        isLabelHidden={isCompact}
+                                        {...BOARD_SETTINGS_TAB}
                                     />
                                     <Tab
                                         value='godot'

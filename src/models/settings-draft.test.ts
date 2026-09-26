@@ -3,6 +3,8 @@ import {
     INITIAL_SETTINGS_DRAFT,
     agentPromptIsDefault,
     agentPromptIsUnsaved,
+    cardTemplateIsDefault,
+    cardTemplateIsUnsaved,
     canDeleteCache,
     cacheIsBusy,
     reduce,
@@ -19,6 +21,7 @@ import {
     DEFAULT_WEB_SETTINGS,
     activeConnection
 } from './settings'
+import type {CardTemplate} from './board'
 import type {
     AgentPrompt,
     AiModelOption,
@@ -71,6 +74,8 @@ const CACHE: CacheStatus = {path: '/cache', sizeBytes: 1024, state: 'installed'}
 
 const SHIPPED_PROMPT = 'You are Gofer.'
 const PROMPT: AgentPrompt = {prompt: SHIPPED_PROMPT, defaultPrompt: SHIPPED_PROMPT}
+const SHIPPED_TEMPLATE = 'GOAL\n\nVERIFY\n'
+const TEMPLATE: CardTemplate = {template: SHIPPED_TEMPLATE, defaultTemplate: SHIPPED_TEMPLATE}
 
 const RESPONSE: SettingsResponse = {settings: SETTINGS, storedSecrets: {}}
 
@@ -78,7 +83,13 @@ function apply(...actions: readonly (SettingsAction | SettingsTaskAction)[]): Se
     return actions.reduce(reduce, INITIAL_SETTINGS_DRAFT)
 }
 
-const loaded = apply({type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT})
+const loaded = apply({
+    type: 'loaded',
+    response: RESPONSE,
+    cache: CACHE,
+    prompt: PROMPT,
+    template: TEMPLATE
+})
 
 describe('loading', () => {
     it('starts with nothing loaded and nothing running', () => {
@@ -94,6 +105,7 @@ describe('loading', () => {
         const state = apply({
             type: 'loaded',
             prompt: PROMPT,
+            template: TEMPLATE,
             response: {settings: sparse, storedSecrets: {}},
             cache: CACHE
         })
@@ -107,6 +119,7 @@ describe('loading', () => {
         const state = apply({
             type: 'loaded',
             prompt: PROMPT,
+            template: TEMPLATE,
             response: {settings: sparse, storedSecrets: {}},
             cache: CACHE
         })
@@ -121,6 +134,7 @@ describe('loading', () => {
         const state = apply({
             type: 'loaded',
             prompt: PROMPT,
+            template: TEMPLATE,
             response: {...RESPONSE, credentialStoreError: 'no keyring'},
             cache: CACHE
         })
@@ -191,7 +205,7 @@ describe('the request the page would send', () => {
 
     it('keeps rather than clears when the typed key is erased again', () => {
         const state = apply(
-            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT, template: TEMPLATE},
             {type: 'key-typed', secret: 'ai-default', value: 'sk-1'},
             {type: 'key-typed', secret: 'ai-default', value: '   '}
         )
@@ -230,7 +244,7 @@ describe('the request the page would send', () => {
 
     it('changes one key without disturbing the other', () => {
         const state = apply(
-            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT, template: TEMPLATE},
             {type: 'key-typed', secret: 'brave', value: 'brave-1'}
         )
         expect(settingsRequest(state)?.secrets['ai-default']).toEqual({action: 'keep'})
@@ -245,7 +259,7 @@ describe('the request the page would send', () => {
 
     it('discards a typed key when removal is chosen', () => {
         const state = apply(
-            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT, template: TEMPLATE},
             {type: 'key-typed', secret: 'ai-default', value: 'sk-1'},
             {type: 'key-removal-toggled', secret: 'ai-default'}
         )
@@ -265,7 +279,8 @@ describe('the request the page would send', () => {
                 }
             },
             cache: CACHE,
-            prompt: PROMPT
+            prompt: PROMPT,
+            template: TEMPLATE
         })
         expect(state.keys['ai-default'].isStored).toBe(true)
         expect(state.keys.brave.isStored).toBe(true)
@@ -358,7 +373,7 @@ describe('editing the connection', () => {
             input: ['text']
         }
         const stale = apply(
-            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT, template: TEMPLATE},
             {
                 type: 'model-changed',
                 update: {
@@ -427,7 +442,7 @@ describe('choosing the model the sub-agent answers with', () => {
 
     it('gives the child a model and a level of its own', () => {
         const state = apply(
-            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT, template: TEMPLATE},
             {type: 'subagent-driver-chosen', connectionType: 'local'},
             {type: 'subagent-model-chosen', model: smaller}
         )
@@ -444,7 +459,7 @@ describe('choosing the model the sub-agent answers with', () => {
 
     it('empties the model list when the driver changes, so nothing stale can be picked', () => {
         const state = apply(
-            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT, template: TEMPLATE},
             {type: 'subagent-driver-chosen', connectionType: 'local'},
             {type: 'subagent-models-listed', models: [smaller]},
             {type: 'subagent-driver-chosen', connectionType: undefined}
@@ -472,7 +487,7 @@ describe('choosing the model the sub-agent answers with', () => {
 
     it('sets the level the child is asked at', () => {
         const state = apply(
-            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT, template: TEMPLATE},
             {type: 'subagent-driver-chosen', connectionType: 'local'},
             {type: 'subagent-thinking-chosen', thinkingLevel: 'low'}
         )
@@ -487,6 +502,7 @@ describe('work in flight', () => {
             {
                 type: 'loaded',
                 prompt: PROMPT,
+                template: TEMPLATE,
                 response: {...RESPONSE, credentialStoreError: 'no keyring'},
                 cache: CACHE
             },
@@ -530,7 +546,7 @@ describe('work in flight', () => {
 describe('saving', () => {
     it('adopts what the backend stored and forgets every typed key', () => {
         const state = apply(
-            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT, template: TEMPLATE},
             {type: 'key-typed', secret: 'ai-default', value: 'sk-1'},
             {type: 'key-typed', secret: 'brave', value: 'brave-1'},
             {type: 'key-removal-toggled', secret: 'openrouter'},
@@ -584,7 +600,7 @@ describe('the Godot rules', () => {
             godot: {strictTyping: false, embedGameWindow: true, headless: false}
         }
         const state = apply(
-            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT, template: TEMPLATE},
             {type: 'godot-changed', update: {strictTyping: false}},
             {type: 'began', task: 'savingGodot'},
             {type: 'godot-saved', response: {settings: stored, storedSecrets: {}}}
@@ -608,7 +624,7 @@ describe('the Godot rules', () => {
             godot: {strictTyping: false, embedGameWindow: true, headless: false}
         }
         const saved = apply(
-            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT, template: TEMPLATE},
             {type: 'godot-changed', update: {strictTyping: false}},
             {type: 'began', task: 'savingGodot'},
             {type: 'godot-saved', response: {settings: stored, storedSecrets: {}}}
@@ -627,7 +643,7 @@ describe('the Godot rules', () => {
             description: 'x'
         } as const
         const state = apply(
-            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT, template: TEMPLATE},
             {type: 'godot-changed', update: {strictTyping: false}},
             {type: 'failed', task: 'savingGodot', notice},
             {type: 'godot-changed', update: {strictTyping: true}}
@@ -650,7 +666,7 @@ describe('the model cache', () => {
 
     it('cannot be deleted while this page is downloading into it', () => {
         const state = apply(
-            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT, template: TEMPLATE},
             {type: 'began', task: 'downloading'},
             {type: 'cache-downloading'}
         )
@@ -669,7 +685,7 @@ describe('the model cache', () => {
 
     it('closes its confirmation dialog when the delete succeeds', () => {
         const state = apply(
-            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT, template: TEMPLATE},
             {type: 'delete-dialog', isOpen: true},
             {type: 'began', task: 'deleting'},
             {type: 'cache-read', cache: {...CACHE, sizeBytes: 0, state: 'not-installed'}},
@@ -687,7 +703,7 @@ describe('the model cache', () => {
             description: 'x'
         } as const
         const state = apply(
-            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT, template: TEMPLATE},
             {type: 'delete-dialog', isOpen: true},
             {type: 'began', task: 'deleting'},
             {type: 'failed', task: 'deleting', notice},
@@ -717,7 +733,7 @@ describe('the agent prompt', () => {
 
     it('is unsaved from the first keystroke, and restoring it is a change of its own', () => {
         const edited = apply(
-            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT, template: TEMPLATE},
             {type: 'prompt-typed', value: 'Answer in Latvian.'}
         )
         expect(agentPromptIsUnsaved(edited)).toBe(true)
@@ -731,12 +747,42 @@ describe('the agent prompt', () => {
 
     it('takes the saved prompt from the backend rather than from the box', () => {
         const state = apply(
-            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT, template: TEMPLATE},
             {type: 'prompt-typed', value: `  ${SHIPPED_PROMPT}  `},
             {type: 'prompt-saved', prompt: PROMPT}
         )
         expect(state.agentPrompt).toBe(SHIPPED_PROMPT)
         expect(agentPromptIsUnsaved(state)).toBe(false)
+    })
+})
+
+describe('the card template', () => {
+    it('arrives as the text the box shows and the text Restore puts back', () => {
+        expect(loaded.cardTemplate).toBe(SHIPPED_TEMPLATE)
+        expect(cardTemplateIsUnsaved(loaded)).toBe(false)
+        expect(cardTemplateIsDefault(loaded)).toBe(true)
+    })
+
+    it('is unsaved from the first keystroke, and restoring it is a change of its own', () => {
+        const edited = reduce(loaded, {type: 'template-typed', value: 'GOAL\n'})
+        expect(cardTemplateIsUnsaved(edited)).toBe(true)
+        expect(cardTemplateIsDefault(edited)).toBe(false)
+
+        const restored = reduce(edited, {type: 'template-restored'})
+        expect(restored.cardTemplate).toBe(SHIPPED_TEMPLATE)
+        expect(cardTemplateIsUnsaved(restored)).toBe(false)
+    })
+
+    it('takes the saved template from the backend and notices on its own tab', () => {
+        const state = apply(
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT, template: TEMPLATE},
+            {type: 'template-typed', value: `  ${SHIPPED_TEMPLATE}  `},
+            {type: 'template-saved', template: TEMPLATE}
+        )
+        expect(state.cardTemplate).toBe(SHIPPED_TEMPLATE)
+        expect(cardTemplateIsUnsaved(state)).toBe(false)
+        expect(state.notices.board?.title).toBe('Card template saved')
+        expect(state.notices.prompt).toBeUndefined()
     })
 })
 
@@ -808,14 +854,14 @@ describe('the other agents door', () => {
     it('edits the draft and adopts what the backend stored', () => {
         const stored = {...SETTINGS, door: {enabled: false, port: 5005, token: 'minted'}}
         const edited = apply(
-            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT, template: TEMPLATE},
             {type: 'door-changed', update: {port: 5005}}
         )
         expect(edited.settings?.door).toEqual({...SETTINGS.door, port: 5005})
         expect(edited.savedSettings?.door).toEqual(SETTINGS.door)
 
         const saved = apply(
-            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT, template: TEMPLATE},
             {type: 'door-changed', update: {port: 5005}},
             {type: 'began', task: 'savingDoor'},
             {type: 'door-saved', response: {settings: stored, storedSecrets: {}}}
@@ -831,6 +877,7 @@ describe('the other agents door', () => {
         const state = apply({
             type: 'loaded',
             prompt: PROMPT,
+            template: TEMPLATE,
             response: {settings: sparse as GoferSettings, storedSecrets: {}},
             cache: CACHE
         })

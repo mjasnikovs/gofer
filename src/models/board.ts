@@ -12,6 +12,12 @@ export const CARD_STATUS_LABELS: Readonly<Record<CardStatus, string>> = {
     done: 'Done'
 }
 
+/** The body a new card starts from, and the one Gofer ships so the window can offer it back. */
+export type CardTemplate = Readonly<{
+    template: string
+    defaultTemplate: string
+}>
+
 export type Card = Readonly<{
     id: string
     number: number

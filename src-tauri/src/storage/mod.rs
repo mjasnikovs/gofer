@@ -46,6 +46,8 @@ const PROJECT_DATABASE_FILE_NAME: &str = "project.sqlite";
 const PROJECT_ID_KEY: &str = "project.id";
 /// The project's own agent prompt, absent while the project follows the shipped one.
 const AGENT_PROMPT_KEY: &str = "agent.system_prompt";
+/// The body a new card starts from, absent while the project follows the shipped one.
+const CARD_TEMPLATE_KEY: &str = "board.card_template";
 
 /// Which of this project's skills the user has turned off, as a JSON array of names.
 ///

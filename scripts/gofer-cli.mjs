@@ -99,6 +99,9 @@ export function parseArgs(argv) {
 const OWN_FLAGS = new Set(['params', 'out', 'owner', 'raw', 'ops', 'help'])
 
 /** The JSON-RPC body one invocation sends, or a usage error naming what is missing. */
+// A read is not signed: the door takes no owner on these, and a name on one would be noise.
+const BOARD_READS = new Set(['list', 'read', 'template'])
+
 export function requestFor({positional, flags}, env = process.env) {
     const [tool, op] = positional
     if (!tool || flags.help) return {usage: true}
@@ -123,7 +126,7 @@ export function requestFor({positional, flags}, env = process.env) {
         if (!op) throw new Error(`${tool} needs an operation: gofer-cli ${tool} <op>`)
         body = {op, ...params}
     }
-    if (tool === 'board' && !body.owner && op !== 'list' && op !== 'read')
+    if (tool === 'board' && !body.owner && !BOARD_READS.has(op))
         body.owner = flags.owner ?? env.GOFER_OWNER ?? 'terminal'
     return {method: 'call', params: {tool, params: body}}
 }

@@ -4,7 +4,7 @@
 //! Like `remember`, deliberately not a [`crate::ai_tools::CATALOG`] domain: the catalogue is
 //! Godot domains with an addon handler, and this is a host operation over the Ledger.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, Runtime};
 
@@ -52,6 +52,7 @@ pub(crate) fn outside_actor() -> Actor {
 #[serde(tag = "op", rename_all = "lowercase")]
 enum BoardCall {
     List,
+    Template,
     Read {
         id: Option<Value>,
     },
@@ -184,10 +185,12 @@ pub(crate) fn board_tool_from_outside<R: Runtime>(
     params: &Value,
 ) -> Result<Value, ToolFailure> {
     let op = params.get("op").and_then(Value::as_str);
-    let reads = matches!(op, Some("list" | "read"));
+    let reads = matches!(op, Some("list" | "read" | "template"));
     // An omitted id means the active task's card to the worker, which is on that task. An outside
     // agent is on no task, and would be writing on whatever card the worker happens to hold.
-    if !matches!(op, Some("list" | "create")) && params.get("id").is_none_or(Value::is_null) {
+    if !matches!(op, Some("list" | "template" | "create"))
+        && params.get("id").is_none_or(Value::is_null)
+    {
         return Err(ToolFailure::new(
             "invalid_params",
             "`id` is required: the card's number",
@@ -248,7 +251,9 @@ fn board_tool_as<R: Runtime>(
     let call: BoardCall = serde_json::from_value(params.clone()).map_err(|error| {
         ToolFailure::new(
             "invalid_params",
-            format!("board needs an `op` of list, read, create, move, comment or edit: {error}"),
+            format!(
+                "board needs an `op` of list, read, template, create, move, comment or edit: {error}"
+            ),
         )
     })?;
     let storage = crate::workspace::project_storage(app)
@@ -259,10 +264,14 @@ fn board_tool_as<R: Runtime>(
         Some(reference) => board.resolve(&reference),
         None => own.clone().ok_or_else(no_card_for_task),
     };
-    let reads = matches!(call, BoardCall::List | BoardCall::Read { .. });
+    let reads = matches!(
+        call,
+        BoardCall::List | BoardCall::Template | BoardCall::Read { .. }
+    );
     let actor = writer.actor();
     let answer = match call {
         BoardCall::List => tool_list(&board.list()?, own.as_ref()),
+        BoardCall::Template => json!({"template": card_template(&storage)?}),
         BoardCall::Read { id } => tool_detail(&board.read(&target(id)?.id)?, own.as_ref()),
         BoardCall::Create {
             title,
@@ -308,6 +317,55 @@ fn board_tool_as<R: Runtime>(
 #[tauri::command(async)]
 pub(crate) fn board_list(app: AppHandle) -> Result<Vec<CardRecord>, CommandError> {
     crate::workspace::project_storage(&app)?.board().list()
+}
+
+/// The body a new card starts from until the project writes its own. Bare headings, because the
+/// plan reads a section by its heading and a hint left under one would reach the model as content.
+pub const DEFAULT_CARD_TEMPLATE: &str =
+    "GOAL\n\nCONSTRAINTS\n\nKNOWN-UNKNOWNS\n\nSTEPS\n\nVERIFY\n";
+
+/// The template in force and the one Gofer ships, so the window can offer to restore it.
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CardTemplateResponse {
+    template: String,
+    default_template: String,
+}
+
+fn card_template(storage: &crate::storage::ProjectStorage) -> Result<String, CommandError> {
+    let stored = storage.project().read_card_template()?;
+    Ok(stored
+        .filter(|template| !template.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_CARD_TEMPLATE.to_owned()))
+}
+
+fn card_template_response(
+    storage: &crate::storage::ProjectStorage,
+) -> Result<CardTemplateResponse, CommandError> {
+    Ok(CardTemplateResponse {
+        template: card_template(storage)?,
+        default_template: DEFAULT_CARD_TEMPLATE.to_owned(),
+    })
+}
+
+#[tauri::command(async)]
+pub(crate) fn read_card_template(app: AppHandle) -> Result<CardTemplateResponse, CommandError> {
+    card_template_response(&crate::workspace::project_storage(&app)?)
+}
+
+/// Stores this project's card template, or forgets it when the text is the one Gofer ships, so a
+/// later Gofer can still change the default under a project that never edited it.
+#[tauri::command(async)]
+pub(crate) fn save_card_template(
+    app: AppHandle,
+    template: String,
+) -> Result<CardTemplateResponse, CommandError> {
+    let storage = crate::workspace::project_storage(&app)?;
+    let own = template.trim();
+    let stored =
+        (!own.is_empty() && own != DEFAULT_CARD_TEMPLATE.trim()).then_some(template.as_str());
+    storage.project().write_card_template(stored)?;
+    card_template_response(&storage)
 }
 
 #[tauri::command(async)]
@@ -511,7 +569,7 @@ mod tests {
         assert!(
             failure
                 .message
-                .contains("list, read, create, move, comment or edit"),
+                .contains("list, read, template, create, move, comment or edit"),
             "the refusal names the ops that do work: {}",
             failure.message
         );
@@ -601,5 +659,31 @@ mod tests {
             read["comments"],
             json!([{"author": "gofer", "body": "Done"}])
         );
+    }
+
+    /// The template is a read: no owner, no id, and the shipped text until the project writes its own.
+    #[test]
+    fn the_template_is_the_shipped_one_until_the_project_writes_its_own() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let app = crate::agent_door::tests::app_with_storage(&directory);
+        let storage = crate::workspace::project_storage(app.handle()).expect("storage");
+
+        let shipped = board_tool_from_outside(app.handle(), &json!({"op": "template"}))
+            .expect("a read needs no owner");
+        assert_eq!(shipped, json!({"template": DEFAULT_CARD_TEMPLATE}));
+
+        storage
+            .project()
+            .write_card_template(Some("GOAL\n\nVERIFY\n"))
+            .expect("write");
+        let own = board_tool(app.handle(), &json!({"op": "template"})).expect("template");
+        assert_eq!(own, json!({"template": "GOAL\n\nVERIFY\n"}));
+
+        storage
+            .project()
+            .write_card_template(Some("   \n"))
+            .expect("write blank");
+        let blank = board_tool(app.handle(), &json!({"op": "template"})).expect("template");
+        assert_eq!(blank, json!({"template": DEFAULT_CARD_TEMPLATE}));
     }
 }

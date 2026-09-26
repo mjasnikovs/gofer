@@ -88,7 +88,7 @@ mod workspace;
 
 use board::{
     board_list, card_comment, card_create, card_delete, card_edit, card_move, card_post_to_gofer,
-    card_read,
+    card_read, read_card_template, save_card_template,
 };
 
 use ai_turn::{
@@ -1400,6 +1400,7 @@ pub fn run() {
         open_script_document,
         query_godot_docs,
         read_agent_prompt,
+        read_card_template,
         read_chat_attachment,
         read_clipboard_image,
         read_godot_logs,
@@ -1417,6 +1418,7 @@ pub fn run() {
         run_task_brief,
         run_storage_maintenance,
         save_agent_prompt,
+        save_card_template,
         save_chat,
         save_project_memory,
         save_script_document,

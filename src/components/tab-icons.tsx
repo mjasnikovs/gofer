@@ -99,6 +99,7 @@ export const IMPORT_TAB = pair(ArrowDownTrayIcon, ArrowDownTraySolid)
 
 export const AI_SETTINGS_TAB = pair(LinkIcon, LinkSolid)
 export const PROMPT_SETTINGS_TAB = pair(PencilSquareIcon, PencilSquareSolid)
+export const BOARD_SETTINGS_TAB = pair(ViewColumnsIcon, ViewColumnsSolid)
 export const GODOT_SETTINGS_TAB = pair(AdjustmentsHorizontalIcon, AdjustmentsHorizontalSolid)
 export const AGENTS_SETTINGS_TAB = pair(UsersIcon, UsersSolid)
 export const MODELS_SETTINGS_TAB = pair(CpuChipIcon, CpuChipSolid)
