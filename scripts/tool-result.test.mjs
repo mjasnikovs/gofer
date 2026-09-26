@@ -16,7 +16,8 @@ test('captured frames become image content and large results are bounded', () =>
     })
     assert.equal(JSON.parse(captured.content[0].text).frame.data, undefined)
     assert.equal(JSON.parse(captured.content[0].text).frame.width, 320)
-    assert.equal(captured.details.frame.data, 'iVBORw0KGgo=')
+    assert.equal(captured.details.frame.data, undefined)
+    assert.equal(captured.details.frame.width, 320)
 
     const huge = toolResult({nodes: 'x'.repeat(40_000)})
     assert.equal(huge.content.length, 1)
@@ -306,8 +307,7 @@ test('an input frame another frame in the same call replaces is not sent', () =>
         ['only']
     )
 
-    assert.equal(stepped.details.ops[0].result.frame.data, 'down')
-    assert.equal(stepped.details.ops[2].result.frame.data, 'up')
+    assert.doesNotMatch(JSON.stringify(stepped.details), /"data"/u)
 
     const launched = toolResult({
         ops: [

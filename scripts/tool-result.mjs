@@ -246,6 +246,7 @@ export function toolResult(result) {
     const {described, images} = withoutTheirPixels(result)
     return {
         content: [{type: 'text', text: withinBudget(described, MAX_TOOL_TEXT_CHARS)}, ...images],
-        details: result
+        // The history keeps details forever, and a second copy of every frame filled it past 8 MiB.
+        details: described
     }
 }
