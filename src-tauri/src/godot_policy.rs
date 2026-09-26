@@ -3,8 +3,8 @@
 //! Two rules, both verified against Godot 4.7.2 rather than assumed:
 //!
 //! * **Strict typing.** `debug/gdscript/warnings/*` warnings are tri-state — 0 Ignore, 1 Warn,
-//!   2 Error. The rule sets the 23 that the `godot-code-style` skill sets, so a script Gofer writes
-//!   and a script that style writes are held to the same compiler. Godot excludes `res://addons`
+//!   2 Error. The rule sets all 49 that Godot 4.7.2 has, as the `godot-code-style` skill does, so
+//!   a script Gofer writes and a script that style writes are held to the same compiler. Godot excludes `res://addons`
 //!   from warnings by default, via `debug/gdscript/warnings/directory_rules`, so Gofer's own addon
 //!   is not caught by a rule Gofer turned on.
 //!
@@ -41,8 +41,8 @@ use serde_json::{Value, json};
 /// One GDScript warning the rule raises to Error, and the level Godot ships it at.
 pub(crate) struct EnforcedWarning {
     pub(crate) setting: &'static str,
-    /// What turning the rule off leaves behind. Measured on 4.7.2: six of these ship as Ignore and
-    /// the rest as Warn, so a reset is checked against this rather than against 0.
+    /// What turning the rule off leaves behind. Measured on 4.7.2 they ship at all three levels,
+    /// so a reset is checked against this rather than against 0.
     #[cfg_attr(
         not(all(test, feature = "godot-acceptance")),
         expect(
@@ -60,8 +60,24 @@ const fn warning(setting: &'static str, shipped_level: i64) -> EnforcedWarning {
     }
 }
 
-/// Every warning `godot-code-style` sets to Error, turned on and off together.
-pub(crate) const ENFORCED_WARNINGS: [EnforcedWarning; 23] = [
+/// Every GDScript warning Godot 4.7.2 has, in the order it lists them, turned on and off
+/// together. `godot-code-style` sets the same 49.
+pub(crate) const ENFORCED_WARNINGS: [EnforcedWarning; 49] = [
+    warning("debug/gdscript/warnings/unassigned_variable", 1),
+    warning("debug/gdscript/warnings/unassigned_variable_op_assign", 1),
+    warning("debug/gdscript/warnings/unused_variable", 1),
+    warning("debug/gdscript/warnings/unused_local_constant", 1),
+    warning("debug/gdscript/warnings/unused_private_class_variable", 1),
+    warning("debug/gdscript/warnings/unused_parameter", 1),
+    warning("debug/gdscript/warnings/unused_signal", 1),
+    warning("debug/gdscript/warnings/shadowed_variable", 1),
+    warning("debug/gdscript/warnings/shadowed_variable_base_class", 1),
+    warning("debug/gdscript/warnings/shadowed_global_identifier", 1),
+    warning("debug/gdscript/warnings/unreachable_code", 1),
+    warning("debug/gdscript/warnings/unreachable_pattern", 1),
+    warning("debug/gdscript/warnings/standalone_expression", 1),
+    warning("debug/gdscript/warnings/standalone_ternary", 1),
+    warning("debug/gdscript/warnings/incompatible_ternary", 1),
     warning("debug/gdscript/warnings/untyped_declaration", 0),
     warning("debug/gdscript/warnings/inferred_declaration", 0),
     warning("debug/gdscript/warnings/unsafe_property_access", 0),
@@ -69,22 +85,39 @@ pub(crate) const ENFORCED_WARNINGS: [EnforcedWarning; 23] = [
     warning("debug/gdscript/warnings/unsafe_cast", 0),
     warning("debug/gdscript/warnings/unsafe_call_argument", 0),
     warning("debug/gdscript/warnings/unsafe_void_return", 1),
-    warning("debug/gdscript/warnings/unused_variable", 1),
-    warning("debug/gdscript/warnings/unused_parameter", 1),
-    warning("debug/gdscript/warnings/unused_signal", 1),
-    warning("debug/gdscript/warnings/shadowed_variable", 1),
-    warning("debug/gdscript/warnings/standalone_expression", 1),
     warning("debug/gdscript/warnings/return_value_discarded", 0),
     warning("debug/gdscript/warnings/static_called_on_instance", 1),
+    warning("debug/gdscript/warnings/missing_tool", 1),
+    warning("debug/gdscript/warnings/redundant_static_unload", 1),
     warning("debug/gdscript/warnings/redundant_await", 1),
+    warning("debug/gdscript/warnings/missing_await", 0),
     warning("debug/gdscript/warnings/assert_always_true", 1),
     warning("debug/gdscript/warnings/assert_always_false", 1),
     warning("debug/gdscript/warnings/integer_division", 1),
     warning("debug/gdscript/warnings/narrowing_conversion", 1),
     warning("debug/gdscript/warnings/int_as_enum_without_cast", 1),
+    warning("debug/gdscript/warnings/int_as_enum_without_match", 1),
+    warning("debug/gdscript/warnings/enum_variable_without_default", 1),
+    warning("debug/gdscript/warnings/empty_file", 1),
+    warning("debug/gdscript/warnings/deprecated_keyword", 1),
     warning("debug/gdscript/warnings/confusable_identifier", 1),
     warning("debug/gdscript/warnings/confusable_local_declaration", 1),
     warning("debug/gdscript/warnings/confusable_local_usage", 1),
+    warning("debug/gdscript/warnings/confusable_capture_reassignment", 1),
+    warning(
+        "debug/gdscript/warnings/confusable_temporary_modification",
+        1,
+    ),
+    warning("debug/gdscript/warnings/inference_on_variant", 2),
+    warning("debug/gdscript/warnings/native_method_override", 2),
+    warning(
+        "debug/gdscript/warnings/get_node_default_without_onready",
+        2,
+    ),
+    warning("debug/gdscript/warnings/onready_with_export", 2),
+    warning("debug/gdscript/warnings/property_used_as_function", 1),
+    warning("debug/gdscript/warnings/constant_used_as_function", 1),
+    warning("debug/gdscript/warnings/function_used_as_property", 1),
 ];
 
 /// The prefix every GDScript warning setting shares, and what the refusal is keyed on.

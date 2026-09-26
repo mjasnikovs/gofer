@@ -67,7 +67,7 @@ export function useGodotTab(view: SettingsView): SettingsTabView {
                                 label='Enforce strict typing'
                                 value={draft.godot.strictTyping}
                                 isLoading={busy.savingGodot}
-                                description='The 23 warnings of the GDScript code style become parse errors, and no script may silence one. Only gdUnit4 test suites relax the few they need. Godot leaves res://addons alone.'
+                                description='Every GDScript warning becomes a parse error, and no script may silence one. Only gdUnit4 test suites relax the few they need. Godot leaves res://addons alone.'
                                 onChange={strictTyping => {
                                     void saveGodotSettings({strictTyping})
                                 }}
