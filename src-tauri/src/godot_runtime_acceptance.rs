@@ -1570,6 +1570,10 @@ fn a_break_refuses_only_the_calls_it_stops() {
         refused.starts_with("runtime_broke"),
         "a paused game must refuse a wait for the pause: {refused}"
     );
+    assert!(
+        refused.contains("runtime.wait would wait"),
+        "the refusal must name the call it refused: {refused}"
+    );
     let paused_tree = session.call("runtime.get_tree", json!({}));
     assert!(
         paused_tree.get("root").is_some(),
