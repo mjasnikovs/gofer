@@ -27,7 +27,12 @@ function picturesNote(count) {
     )
 }
 
-export function refinePrompt(raw, {existingFiles, planContext, pictures = 0} = {}) {
+const GIVEN_SECTIONS =
+    'GIVEN SECTIONS — the user already wrote these sections of the task below. Carry each one '
+    + 'through as written; add only what it leaves out. Never reword, merge or drop a rule the '
+    + 'user wrote:'
+
+export function refinePrompt(raw, {existingFiles, planContext, pictures = 0, given = []} = {}) {
     return (
         'Rewrite one development task as an unambiguous, self-contained statement. You are preparing '
         + 'work for a Godot project. Read files if you need to; change nothing.\n\n'
@@ -42,6 +47,7 @@ export function refinePrompt(raw, {existingFiles, planContext, pictures = 0} = {
         + '- Write "(none)" if there are none.\n\n'
         + 'Do not write code. Do not restate the task. Do not add sections.\n\n'
         + picturesNote(pictures)
+        + block(GIVEN_SECTIONS, given.join(', '))
         + block(
             'PLAN CONTEXT — the other steps of this plan, which this task must NOT do:',
             planContext

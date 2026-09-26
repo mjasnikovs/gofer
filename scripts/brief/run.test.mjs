@@ -156,6 +156,28 @@ test('a brief with nothing to plan never starts', async () => {
     assert.deepEqual(events, [])
 })
 
+test('steps and verify the user wrote reach compose and the critique as decisions', async () => {
+    const world = worldSaying(SPEC)
+    const prompts = []
+    world.runSubagentOutcome = async ({prompt}) => {
+        prompts.push(prompt)
+        return {kind: 'ok', text: prompt.includes('QUESTION') ? 'NONE' : SPEC, usage: {}}
+    }
+    const {promise} = run({
+        world,
+        prompt: 'add a pause menu\n\nGOAL\n\nSTEPS\n1. add scenes/pause.tscn\n\nVERIFY\n'
+    })
+    await promise
+
+    const told = prompts.filter(prompt => prompt.includes('STEPS the user wrote'))
+    assert.equal(told.length, 2, 'compose and the critique, nobody else')
+    assert.match(
+        told[0],
+        /DECISIONS[^\n]*\n- STEPS the user wrote\n {2}1\. add scenes\/pause\.tscn/u
+    )
+    assert.doesNotMatch(told[0], /VERIFY the user wrote/u)
+})
+
 test('the pictures the ask came with reach the phase that reads the ask', async () => {
     const world = worldSaying(SPEC)
     world.createModelContext = () => ({

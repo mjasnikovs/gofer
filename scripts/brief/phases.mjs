@@ -1,6 +1,7 @@
 import {classifyWorkerOutcome, degradedSection, emptySection} from './outcome.mjs'
 import {findPhantomPaths, formatPathCorrections} from './phantom.mjs'
 import {applyRefutations} from './refuted.mjs'
+import {givenSections} from './given.mjs'
 import {
     extractToolingCommands,
     onlyClaimedCommands,
@@ -54,7 +55,8 @@ export async function refine(raw, deps = {}) {
         prompt: refinePrompt(raw, {
             existingFiles: deps.existingFiles,
             planContext: deps.planContext,
-            pictures: pictures.length
+            pictures: pictures.length,
+            given: deps.given ?? givenSections(raw)
         })
     })
     if (verdict.kind === 'ok') return verdict.text

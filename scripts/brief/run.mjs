@@ -18,6 +18,7 @@ import {modelReadsImages} from '../agent-runtime.mjs'
 import {probeTools} from '../ai-reachability.mjs'
 import {BRIEF_PHASES} from './catalogue.mjs'
 import {PhaseFailed, PhaseStopped, compose, critique, grill, refine, research} from './phases.mjs'
+import {givenDecisions} from './given.mjs'
 import {appendNoThink} from './prompts.mjs'
 
 export {BRIEF_PHASES}
@@ -29,12 +30,17 @@ export const ASK_TOOL_NAME = 'ask_user'
 // code is what tells a cancelled run from a failed one.
 const CANCELLED_QUESTION = 'question_cancelled'
 
+// The user's STEPS and VERIFY are not refine's to keep, so they join the grill's decisions on
+// the way to compose; the stored `qa` stays what the grill itself settled.
+const decisions = done => [...done.qa, ...givenDecisions(done.prompt)]
+
 const PHASE_WORK = {
     refine: (done, deps) => refine(done.prompt, deps),
     research: (done, deps) => research(done.refined, deps),
     grill: (done, deps) => grill(done.refined, done.research, deps),
-    compose: (done, deps) => compose(done.refined, done.research, done.qa, deps),
-    critique: (done, deps) => critique(done.refined, done.research, done.qa, done.spec, deps)
+    compose: (done, deps) => compose(done.refined, done.research, decisions(done), deps),
+    critique: (done, deps) =>
+        critique(done.refined, done.research, decisions(done), done.spec, deps)
 }
 
 const stored = value => (typeof value === 'string' ? value : JSON.stringify(value))

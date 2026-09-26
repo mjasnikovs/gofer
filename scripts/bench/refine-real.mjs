@@ -1,6 +1,7 @@
 // The refine phase exactly as the application runs it — the real sub-agent runner, the real read
 // tool, the real refine() — from a raw ask and its screenshot. Arms are the sub-agent's thinking
-// level, with `:noread` to run without the read tool.
+// level, with `:noread` to run without the read tool and `:bare` to hide the sections the user
+// wrote (the A/B of the GIVEN SECTIONS block against a card written from the template).
 //
 //   REFINE_DIR=<dir with raw.txt [screenshot.png]> WORKSPACE=<project> \
 //     node scripts/bench/refine-real.mjs [seeds] [arms: medium,off]
@@ -8,7 +9,9 @@ import {appendFile, readFile} from 'node:fs/promises'
 import {existsSync} from 'node:fs'
 import {createModelContext} from '../ai-provider.mjs'
 import {runSubagentOutcome} from '../ai-subagent.mjs'
+import {givenSections} from '../brief/given.mjs'
 import {refine} from '../brief/phases.mjs'
+import {sectionLines} from '../brief/refuted.mjs'
 import {appendNoThink} from '../brief/prompts.mjs'
 
 const DIR = process.env.REFINE_DIR
@@ -50,6 +53,9 @@ const ASKS = {
     escape: /\bESC\b|escape/iu
 }
 
+// The rules the user wrote, each of which the refined text has to still carry word for word.
+const GIVEN_RULES = sectionLines(raw, 'CONSTRAINTS').filter(line => line.trim().startsWith('- '))
+
 function judge(text) {
     const constraints = section(text, 'CONSTRAINTS')
     const unknowns = section(text, 'KNOWN-UNKNOWNS')
@@ -62,19 +68,22 @@ function judge(text) {
         constraints: (constraints.match(/^- /gmu) ?? []).length,
         unknowns: /\(none\)/u.test(unknowns) ? 0 : (unknowns.match(/^- /gmu) ?? []).length,
         lineRefs: (text.match(/lines? \d+/gu) ?? []).length,
+        kept: GIVEN_RULES.filter(rule => text.includes(rule.trim())).length,
         ...covered,
         asks: Object.values(covered).reduce((a, b) => a + b, 0)
     }
 }
 
 async function runArm(arm) {
-    const [level, mode] = arm.split(':')
+    const [level, ...modes] = arm.split(':')
+    const mode = modes.includes('noread') ? 'noread' : undefined
     let steps = 0
     let usage = {}
     const started = Date.now()
     let fellThrough = false
     const text = await refine(raw, {
         images,
+        given: modes.includes('bare') ? [] : givenSections(raw),
         log: () => {
             fellThrough = true
         },

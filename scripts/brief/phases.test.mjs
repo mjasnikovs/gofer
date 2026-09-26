@@ -60,6 +60,22 @@ test('an optional block left out leaves the prompt byte-identical', async () => 
     assert.match(withBlock.calls[0].prompt, /step two does the HUD/u)
 })
 
+test('sections the user filled are named to refine, and an untouched template is not', async () => {
+    const bare = scriptedWorker([ok(REFINED)])
+    await refine('pause menu\n\nGOAL\n\nCONSTRAINTS\n\nSTEPS\n', {runWorker: bare.run})
+    assert.doesNotMatch(bare.calls[0].prompt, /GIVEN SECTIONS/u)
+
+    const given = scriptedWorker([ok(REFINED)])
+    await refine('pause menu\n\nGOAL\nESC pauses.\n\nCONSTRAINTS\n- keep the input map\n', {
+        runWorker: given.run
+    })
+    assert.match(given.calls[0].prompt, /GIVEN SECTIONS[^\n]*\nGOAL, CONSTRAINTS\n/u)
+
+    const overridden = scriptedWorker([ok(REFINED)])
+    await refine('pause menu\n\nGOAL\nESC pauses.\n', {runWorker: overridden.run, given: []})
+    assert.doesNotMatch(overridden.calls[0].prompt, /GIVEN SECTIONS/u)
+})
+
 test('research assembles its four sections in a fixed order', async () => {
     const worker = scriptedWorker([
         ok('FILES\n  a.gd  changed'),
