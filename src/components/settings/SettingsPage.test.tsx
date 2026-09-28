@@ -1,5 +1,5 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
-import {act, cleanup, render, screen} from '@testing-library/react'
+import {act, cleanup, render, screen, waitFor} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {SettingsPage} from './SettingsPage'
 import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../../test/desktop-driver'
@@ -377,9 +377,10 @@ describe('the agent prompt', () => {
         expect(screen.getByText('Agent prompt saved')).toBeInTheDocument()
 
         await user.click(screen.getByRole('button', {name: 'Restore default'}))
-        await flush()
 
-        expect(screen.getByLabelText(/System prompt/)).toHaveValue(shippedPrompt)
+        await waitFor(() => {
+            expect(screen.getByLabelText(/System prompt/)).toHaveValue(shippedPrompt)
+        })
         expect(screen.getByRole('button', {name: 'Restore default'})).toBeDisabled()
     })
 
@@ -443,9 +444,10 @@ describe('the card template', () => {
         expect(screen.getByText('Card template saved')).toBeInTheDocument()
 
         await user.click(screen.getByRole('button', {name: 'Restore default'}))
-        await flush()
 
-        expect(screen.getByLabelText('Card template')).toHaveValue(shippedTemplate)
+        await waitFor(() => {
+            expect(screen.getByLabelText('Card template')).toHaveValue(shippedTemplate)
+        })
         expect(screen.getByRole('button', {name: 'Restore default'})).toBeDisabled()
     })
 
@@ -574,7 +576,9 @@ describe('the agent prompt after a Godot rule changes', () => {
 
         expect(screen.getByLabelText(/System prompt/)).toHaveValue('Answer in Latvian.')
         await user.click(screen.getByRole('button', {name: 'Restore default'}))
-        expect(screen.getByLabelText(/System prompt/)).toHaveValue(shippedPrompt)
+        await waitFor(() => {
+            expect(screen.getByLabelText(/System prompt/)).toHaveValue(shippedPrompt)
+        })
     })
 })
 
