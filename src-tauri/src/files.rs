@@ -665,6 +665,48 @@ fn validate_relative(relative: &str) -> Result<PathBuf, FileError> {
 }
 // coverage-critical-end: path
 
+/// The scratch directory the worker names to the model for this workspace.
+///
+/// Spelled exactly as `scratchDirectory` in `scripts/workspace-confinement.mjs`: a different key is
+/// a directory the model is told it may write and every Rust-side writer refuses.
+pub fn scratch_directory(workspace: &Path) -> PathBuf {
+    scratch_directory_under(
+        &node_temp_directory(|name| std::env::var_os(name)),
+        workspace,
+    )
+}
+
+fn scratch_directory_under(temp: &Path, workspace: &Path) -> PathBuf {
+    // What `path.resolve` hashes: one separator kind, no `.`, no trailing separator.
+    let resolved: PathBuf = workspace.components().collect();
+    let key = hash_text(&resolved.display().to_string());
+    temp.join("gofer").join("scratch").join(&key[..12])
+}
+
+/// Node's `os.tmpdir()`. `std::env::temp_dir` reads other variables in another order.
+fn node_temp_directory(variable: impl Fn(&str) -> Option<std::ffi::OsString>) -> PathBuf {
+    let set = |name| variable(name).filter(|value| !value.is_empty());
+    let found = if cfg!(windows) {
+        set("TEMP").or_else(|| set("TMP")).map_or_else(
+            || {
+                PathBuf::from(
+                    set("SystemRoot")
+                        .or_else(|| set("windir"))
+                        .unwrap_or_default(),
+                )
+                .join("temp")
+            },
+            PathBuf::from,
+        )
+    } else {
+        set("TMPDIR")
+            .or_else(|| set("TMP"))
+            .or_else(|| set("TEMP"))
+            .map_or_else(|| PathBuf::from("/tmp"), PathBuf::from)
+    };
+    found.components().collect()
+}
+
 pub fn hash_text(text: &str) -> String {
     hash_bytes(text.as_bytes())
 }
@@ -989,6 +1031,89 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary workspace");
         let workspace = Workspace::open(directory.path()).expect("workspace");
         (directory, workspace)
+    }
+
+    /// What the worker's own `scratchDirectory` answers for each spelling, in the environment given.
+    fn the_workers_scratch_directories(
+        spellings: &[String],
+        environment: &[(&str, Option<&Path>)],
+    ) -> Vec<PathBuf> {
+        let module =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../scripts/workspace-confinement.mjs");
+        let mut node = std::process::Command::new(crate::workers::node_binary());
+        node.args([
+            "--input-type=module",
+            "-e",
+            "const {pathToFileURL} = await import('node:url'); \
+             const {scratchDirectory} = await import(pathToFileURL(process.argv[1])); \
+             for (const spelled of JSON.parse(process.argv[2])) console.log(scratchDirectory(spelled))",
+        ])
+        .arg(module)
+        .arg(serde_json::to_string(spellings).expect("the spellings as JSON"));
+        for (name, value) in environment {
+            match value {
+                Some(value) => node.env(name, value),
+                None => node.env_remove(name),
+            };
+        }
+        let output = node.output().expect("node runs");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("utf-8")
+            .lines()
+            .map(PathBuf::from)
+            .collect()
+    }
+
+    /// The model is told the worker's directory and the router writes into its own, so the two
+    /// have to be one directory for every spelling of the workspace the worker is handed.
+    #[test]
+    fn the_scratch_directory_is_the_one_the_worker_names() {
+        let directory = tempfile::tempdir().expect("temporary workspace");
+        let plain = directory.path().display().to_string();
+        let separator = std::path::MAIN_SEPARATOR;
+        let mut spellings = vec![
+            plain.clone(),
+            format!("{plain}{separator}"),
+            format!("{plain}{separator}.{separator}"),
+        ];
+        if cfg!(windows) {
+            spellings.push(plain.replace('\\', "/"));
+        }
+        let told = the_workers_scratch_directories(&spellings, &[]);
+        for (spelled, told) in spellings.iter().zip(&told) {
+            assert_eq!(&scratch_directory(Path::new(spelled)), told, "{spelled}");
+        }
+    }
+
+    /// `std::env::temp_dir` reads TMPDIR alone on Unix and TMP before TEMP on Windows; Node reads
+    /// TMPDIR, TMP, TEMP on Unix and TEMP before TMP on Windows.
+    #[test]
+    fn the_scratch_directory_reads_the_temporary_directory_as_the_worker_does() {
+        let directory = tempfile::tempdir().expect("temporary directories");
+        let tmp = directory.path().join("tmp");
+        let temp = directory.path().join("temp");
+        let environment = [
+            ("TMPDIR", None),
+            ("TMP", Some(tmp.as_path())),
+            ("TEMP", Some(temp.as_path())),
+        ];
+        let workspace = directory.path().join("workspace").display().to_string();
+        let told = the_workers_scratch_directories(std::slice::from_ref(&workspace), &environment);
+        let temporary = node_temp_directory(|name| {
+            environment
+                .iter()
+                .find(|(set, _)| *set == name)
+                .and_then(|(_, value)| value.map(|path| path.as_os_str().to_owned()))
+        });
+        assert_eq!(
+            scratch_directory_under(&temporary, Path::new(&workspace)),
+            told[0]
+        );
     }
 
     #[test]

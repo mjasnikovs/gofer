@@ -5073,7 +5073,7 @@
         {
             "tool": "godot_runtime",
             "op": "run",
-            "summary": "Runs the project and captures the first frame, unless `playArgs` start it with `--headless`, which draws none. `saveTo` writes that frame into the project instead of answering with its bytes. While it runs the scene can be read and opened but not changed: a mutation answers session_playing until stop.",
+            "summary": "Runs the project and captures the first frame, unless `playArgs` start it with `--headless`, which draws none. `saveTo`, a path in the project or the scratch directory, writes that frame there instead of answering with its bytes. While it runs the scene can be read and opened but not changed: a mutation answers session_playing until stop.",
             "alone": {
                 "scope": "repeat",
                 "why": "There is one running game, so a second one in the same call is the first one again."
@@ -5096,7 +5096,7 @@
                     "name": "saveTo",
                     "kind": "path",
                     "required": false,
-                    "note": "A path inside the project. The first frame is written there and the answer carries the path instead of the bytes. A directory this creates gets a .gdignore, so captures are not imported as assets."
+                    "note": "A path in the project or the scratch directory. The first frame is written there and the answer carries the path instead of the bytes. A project directory this creates gets a .gdignore, so captures are not imported as assets."
                 }
             ],
             "result": {
@@ -5158,7 +5158,7 @@
                     "name": "saveTo",
                     "kind": "path",
                     "required": false,
-                    "note": "A path inside the project. The first frame is written there and the answer carries the path instead of the bytes. A directory this creates gets a .gdignore, so captures are not imported as assets."
+                    "note": "A path in the project or the scratch directory. The first frame is written there and the answer carries the path instead of the bytes. A project directory this creates gets a .gdignore, so captures are not imported as assets."
                 }
             ],
             "result": {
@@ -5458,7 +5458,7 @@
         {
             "tool": "godot_runtime",
             "op": "capture",
-            "summary": "Captures a PNG frame. With `saveTo`, a path inside the project, the PNG is written there and the answer carries the path instead of the bytes.",
+            "summary": "Captures a PNG frame. With `saveTo`, a path in the project or the scratch directory, the PNG is written there and the answer carries the path instead of the bytes.",
             "params": [
                 {
                     "name": "source",
@@ -5470,7 +5470,7 @@
                     "name": "saveTo",
                     "kind": "path",
                     "required": false,
-                    "note": "A path inside the project. A directory this creates gets a .gdignore, so captures are not imported as assets."
+                    "note": "A path in the project or the scratch directory. A project directory this creates gets a .gdignore, so captures are not imported as assets."
                 }
             ],
             "result": {

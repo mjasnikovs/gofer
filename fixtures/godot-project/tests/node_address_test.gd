@@ -244,3 +244,19 @@ func _test_running_refusals(address: GDScript, failures: Array[String]) -> void:
     var corrected: String = address.call("running_not_found", root, "root", "/Main/Player")
     if not corrected.ends_with("Send \"root\": \"/root/Main/Player\"."):
         failures.append("an edited spelling of a running node is corrected by its key: %s" % [corrected])
+    # A live turn sent `root: "HudCommandBar"` for /root/Main/CanvasLayer/HudCommandBar, in two runs.
+    var by_name: String = address.call("running_not_found", root, "root", "Sprite")
+    if not by_name.ends_with("Send \"root\": \"/root/Main/Player/Sprite\"."):
+        failures.append("a bare name is corrected to the one node that carries it: %s" % [by_name])
+    var rooted: String = address.call("running_not_found", root, "path", "/root/Sprite")
+    if not rooted.ends_with("Send \"path\": \"/root/Main/Player/Sprite\"."):
+        failures.append("a /root spelling of a deeper node is corrected too: %s" % [rooted])
+    var twin := Sprite2D.new()
+    twin.name = "Sprite"
+    _main.get_node("Crowd/Child0").add_child(twin)
+    var both: String = address.call("running_not_found", root, "path", "Sprite")
+    twin.free()
+    if not (both.contains("/root/Main/Player/Sprite") and both.contains("/root/Main/Crowd/Child0/Sprite")):
+        failures.append("a bare name two nodes carry names both: %s" % [both])
+    if both.contains("Send \"path\""):
+        failures.append("a bare name two nodes carry is not corrected to either: %s" % [both])

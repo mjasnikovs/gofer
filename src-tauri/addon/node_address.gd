@@ -183,16 +183,38 @@ static func running_not_found(tree_root: Node, parameter: String, path: String) 
             + "something that outlives it, or name the node where it is created"
         )
     if path.begins_with("/root/"):
-        return plain + as_far_as_the_path_goes(tree_root, path)
+        return _and(plain + as_far_as_the_path_goes(tree_root, path), _carried_deeper(tree_root, parameter, path))
     var spelled := "/root/" + path.trim_prefix("/")
     if tree_root.get_node_or_null(NodePath(spelled)) == null:
-        return plain
+        return _and(plain, _carried_deeper(tree_root, parameter, path))
     var corrected := (
         "%s. The running tree names it '%s': every path here starts at /root, while the node.*"
         + " operations name the edited scene, which is a different tree in a different process."
         + " Send \"%s\": \"%s\"."
     )
     return corrected % [plain, spelled, parameter, spelled]
+
+## Where the running tree holds nodes whose path ends in `path`, when a short one was sent.
+static func _carried_deeper(tree_root: Node, parameter: String, path: String) -> String:
+    var tail := "/" + path.trim_prefix("/root/").trim_prefix("/")
+    var found := PackedStringArray()
+    for node in tree_root.find_children(tail.get_file(), "", true, false):
+        var full := path_in(tree_root, node)
+        if full.ends_with(tail):
+            found.append(full)
+    if found.size() == 1:
+        return "The running tree holds it at '%s'. Send \"%s\": \"%s\"." % [found[0], parameter, found[0]]
+    if found.is_empty():
+        return ""
+    var listed := ", ".join(found.slice(0, NAMES_AT_MOST))
+    if found.size() > NAMES_AT_MOST:
+        listed += " and %d more" % (found.size() - NAMES_AT_MOST)
+    return "%d running nodes end that way: %s. Send the full path of the one you mean." % [found.size(), listed]
+
+static func _and(told: String, more: String) -> String:
+    if more.is_empty():
+        return told
+    return "%s%s %s" % [told, "" if told.ends_with(".") else ".", more]
 
 ## `@ClassName@ID`: the engine's name for an unnamed child, numbered per run and gone when it is.
 static func _is_an_engine_name(segment: String) -> bool:

@@ -851,7 +851,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Path, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:3b5b0f5901bc4686
+// GENERATED-BEGIN operations sha256:50173a3ec805e12e
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -1927,7 +1927,7 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
         op(
             "godot_runtime",
             "run",
-            "Runs the project and captures the first frame, unless `playArgs` start it with `--headless`, which draws none. `saveTo` writes that frame into the project instead of answering with its bytes. While it runs the scene can be read and opened but not changed: a mutation answers session_playing until stop.",
+            "Runs the project and captures the first frame, unless `playArgs` start it with `--headless`, which draws none. `saveTo`, a path in the project or the scratch directory, writes that frame there instead of answering with its bytes. While it runs the scene can be read and opened but not changed: a mutation answers session_playing until stop.",
             Answers::Addon("runtime.run"),
             &[
                 opt("scene", Path),
@@ -2035,7 +2035,7 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
     op(
         "godot_runtime",
         "capture",
-        "Captures a PNG frame. With `saveTo`, a path inside the project, the PNG is written there and the answer carries the path instead of the bytes.",
+        "Captures a PNG frame. With `saveTo`, a path in the project or the scratch directory, the PNG is written there and the answer carries the path instead of the bytes.",
         Answers::Addon("runtime.capture"),
         &[
             opt("source", Kind::Choice(&["game", "editor"])),

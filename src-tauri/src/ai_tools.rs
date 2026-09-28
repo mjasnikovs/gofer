@@ -537,7 +537,8 @@ fn what_the_call_names(params: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Writes a captured frame into the project and answers with where, in place of the bytes.
+/// Writes a captured frame into the project or the scratch directory and answers with where, in
+/// place of the bytes.
 ///
 /// The bytes are for a model that can look at a picture. A terminal caller wants a file, and a
 /// local model that cannot take an image wants nothing at all — eighty kilobytes of base64 in a
@@ -564,8 +565,11 @@ fn the_frame_written_to<R: Runtime>(
             )
         })?;
     let relative = save_to.strip_prefix("res://").unwrap_or(save_to);
-    let workspace = crate::active_workspace(app)?;
-    let path = workspace.resolve(relative)?;
+    let scratch = a_file_in_scratch(app, relative)?;
+    let path = match &scratch {
+        Some(path) => path.clone(),
+        None => crate::active_workspace(app)?.resolve(relative)?,
+    };
     let unwritable = |error: std::io::Error| {
         ToolFailure::new(
             "frame_unwritable",
@@ -578,13 +582,52 @@ fn the_frame_written_to<R: Runtime>(
         std::fs::create_dir_all(parent).map_err(unwritable)?;
         // A directory made for captures is not an asset folder: without this every frame gains
         // a .import beside it on the editor's next scan.
-        std::fs::write(parent.join(".gdignore"), "").map_err(unwritable)?;
+        if scratch.is_none() {
+            std::fs::write(parent.join(".gdignore"), "").map_err(unwritable)?;
+        }
     }
     crate::files::write_atomically(&path, &bytes).map_err(unwritable)?;
     frame.remove("data");
     frame.remove("encoding");
     frame.insert("path".to_owned(), json!(relative));
     Ok(answer)
+}
+
+/// `save_to` as a file inside the scratch directory the worker told the model of, or `None` when
+/// it names none. Keyed off the agent workspace uncanonicalized, because that is what the worker
+/// hashed.
+fn a_file_in_scratch<R: Runtime>(
+    app: &AppHandle<R>,
+    save_to: &str,
+) -> Result<Option<std::path::PathBuf>, ToolFailure> {
+    let target = std::path::Path::new(save_to);
+    if !target.is_absolute() {
+        return Ok(None);
+    }
+    let Some(told) = crate::workspace::project_storage(app)
+        .ok()
+        .and_then(|storage| storage.tasks().agent_workspace().ok())
+    else {
+        return Ok(None);
+    };
+    let scratch = files::scratch_directory(&told);
+    let Ok(inside) = target.strip_prefix(&scratch) else {
+        return Ok(None);
+    };
+    let refused = |reason: String| {
+        ToolFailure::new(
+            "outside_workspace",
+            format!(
+                "{save_to} is not a file inside the scratch directory {}: {reason}",
+                scratch.display()
+            ),
+        )
+    };
+    std::fs::create_dir_all(&scratch).map_err(|error| refused(error.to_string()))?;
+    files::Workspace::open(&scratch)
+        .and_then(|directory| directory.resolve(&inside.to_string_lossy()))
+        .map(Some)
+        .map_err(|failure| refused(failure.message))
 }
 
 /// A start refused because another is in flight is a start to wait on, not a failure.
@@ -2257,6 +2300,104 @@ mod tests {
         assert_eq!(
             asked[0].params["path"], "res://levels/level.tscn",
             "an addon operation is forwarded verbatim, scheme and all"
+        );
+    }
+
+    /// Two live turns were told the scratch directory takes every tool, then refused a capture
+    /// there with `invalid_path`.
+    #[test]
+    fn a_capture_is_saved_into_the_scratch_directory_the_model_was_told_of() {
+        let directory = TempDir::new().expect("temporary application data");
+        let workspace_path = directory.path().join("workspace");
+        std::fs::create_dir(&workspace_path).expect("create workspace");
+        let storage =
+            crate::storage::ProjectStorage::open(&directory.path().join("data"), &workspace_path)
+                .expect("open project storage");
+        let app = unattended_app();
+        app.manage(crate::storage::StorageSlot::new(Ok(storage)));
+        let told = crate::workspace::project_storage(app.handle())
+            .expect("storage")
+            .tasks()
+            .agent_workspace()
+            .expect("the path the worker is handed");
+        let scratch = crate::files::scratch_directory(&told);
+        let worktree = crate::active_workspace(app.handle())
+            .expect("the task worktree")
+            .root()
+            .to_owned();
+        let _addon = crate::scripted_addon::ScriptedAddon::answering(
+            &worktree,
+            &[(
+                "runtime.capture",
+                json!({"frame": {"encoding": "png-base64", "data": "iVBORw0KGgo=", "width": 1, "height": 1}}),
+            )],
+        );
+        let target = scratch.join("glow_frame.png");
+
+        let answer = dispatch(
+            app.handle(),
+            call(
+                GODOT_TOOL,
+                "runtime.capture",
+                json!({"saveTo": target.display().to_string()}),
+            ),
+        );
+        let written = std::fs::read(&target);
+        #[cfg(unix)]
+        let escaped = {
+            std::os::unix::fs::symlink(directory.path(), scratch.join("out")).expect("a link out");
+            dispatch(
+                app.handle(),
+                call(
+                    GODOT_TOOL,
+                    "runtime.capture",
+                    json!({"saveTo": scratch.join("out/escaped.png").display().to_string()}),
+                ),
+            )
+        };
+        // The router's own `..` gate splits on `/` alone, so a backslash one reaches scratch.
+        #[cfg(windows)]
+        let climbed = dispatch(
+            app.handle(),
+            call(
+                GODOT_TOOL,
+                "runtime.capture",
+                json!({"saveTo": format!("{}\\x\\..\\..\\escaped.png", scratch.display())}),
+            ),
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+        #[cfg(windows)]
+        {
+            climbed.expect_err("a `..` out of scratch is not scratch");
+            assert!(
+                !scratch.with_file_name("escaped.png").exists(),
+                "nothing was written above scratch"
+            );
+        }
+        #[cfg(unix)]
+        {
+            let refused = escaped.expect_err("a link out of scratch is not scratch");
+            assert!(
+                refused.message.contains("scratch"),
+                "the refusal is about scratch, not the worktree: {refused:?}"
+            );
+            assert!(
+                !directory.path().join("escaped.png").exists(),
+                "nothing was written through it"
+            );
+        }
+
+        let answer = answer.expect("a scratch path is a place a capture may go");
+        assert_eq!(
+            answer["ops"][0]["result"]["frame"]["path"],
+            target.display().to_string(),
+            "{answer}"
+        );
+        assert!(
+            written
+                .expect("the frame is on disk")
+                .starts_with(b"\x89PNG"),
+            "what was written is the frame"
         );
     }
 
