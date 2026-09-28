@@ -13,6 +13,7 @@ const SUITES = [
     'res://tests/parse_test.gd',
     'res://tests/project_config_test.gd',
     'res://tests/runtime_queue_test.gd',
+    'res://tests/node_address_test.gd',
     'res://tests/monitors_test.gd',
     'res://tests/tagged_value_test.gd'
 ]
@@ -27,6 +28,7 @@ function stageAddon() {
         'params.gd',
         'project_config.gd',
         'runtime_queue.gd',
+        'node_address.gd',
         'plugin.gd',
         'runtime.gd'
     ])

@@ -669,42 +669,6 @@ static func outside_the_values_it_takes(
         + " nothing about the write said so."
     ) % [int(wanted), property, ", ".join(listed)]
 
-## How many children a refusal lists before it says how many are left.
-##
-## Enough that a real scene's node is in the list, short enough that the sentence is still read. The
-## widest node in the fixtures holds nine.
-const NAMES_AT_MOST := 12
-
-## What a node path reached before it stopped matching, and what was there instead.
-##
-## `node_not_found` repeats the path back, which is the one thing the caller already knew. Four
-## refusals in the recordings say nothing else, and two of them are consecutive — `/PauseMenu/Box`
-## and then `/PauseMenu/Title` — a caller guessing at names under a node it could not see. A third
-## asked for `@Area2D@214/@CollisionShape2D@212`, guessing at names the engine had made up. The
-## deepest part of the path that does exist, and the names under it, ends all three in one answer.
-static func as_far_as_the_path_goes(
-    reached: String, present: PackedStringArray, missing: String
-) -> String:
-    if reached.is_empty() or missing.is_empty():
-        return ""
-    if present.is_empty():
-        return (
-            " %s is there and has no children at all, so nothing under it is called %s."
-            % [reached, missing]
-        )
-    var shown := present
-    var rest := 0
-    if present.size() > NAMES_AT_MOST:
-        shown = present.slice(0, NAMES_AT_MOST)
-        rest = present.size() - NAMES_AT_MOST
-    var listed := ", ".join(shown)
-    if rest > 0:
-        listed += " and %d more" % rest
-    return (
-        " %s is there and holds %s, and nothing under it is called %s."
-        % [reached, listed, missing]
-    )
-
 static func instead_of(
     property: String, wanted: Variant, found: Variant, hint_string: String = ""
 ) -> String:

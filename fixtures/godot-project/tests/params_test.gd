@@ -373,33 +373,6 @@ func _test_readback(params: GDScript, failures: Array[String]) -> void:
     ).is_empty():
         failures.append("a value that is not a number is a type_mismatch, not this")
 
-    var reached: String = params.call(
-        "as_far_as_the_path_goes",
-        "/Main/PauseMenu",
-        PackedStringArray(["Panel", "Title"]),
-        "Box"
-    )
-    for named in ["/Main/PauseMenu", "Panel, Title", "called Box"]:
-        if not reached.contains(named):
-            failures.append("a path that stopped matching must name %s" % named)
-    if not str(
-        params.call("as_far_as_the_path_goes", "/Main/Player", PackedStringArray(), "Sprite")
-    ).contains("no children at all"):
-        failures.append("a node with nothing under it says so rather than listing nothing")
-    var many := PackedStringArray()
-    for index in range(20):
-        many.append("Child%d" % index)
-    var trimmed: String = params.call("as_far_as_the_path_goes", "/Main", many, "Missing")
-    for named in ["Child0", "Child11", "and 8 more"]:
-        if not trimmed.contains(named):
-            failures.append("a long list must name %s" % named)
-    if trimmed.contains("Child12"):
-        failures.append("and it must stop at twelve")
-    if not str(
-        params.call("as_far_as_the_path_goes", "", PackedStringArray(["A"]), "B")
-    ).is_empty():
-        failures.append("a path that reached nowhere gains no clause")
-
     for asked in [1, 9]:
         var placed: String = params.call("instead_of", "layout_mode", asked, 3)
         for named in ["node.reparent", "Container", "size_flags_horizontal", "uncontrolled"]:

@@ -11,7 +11,7 @@ extends SceneTree
 ## It is not a substitute for `godot-acceptance.mjs`. It is what stops a rename reaching it.
 func _init() -> void:
     var broken := PackedStringArray()
-    for name in ["plugin", "runtime", "params", "protocol"]:
+    for name in ["plugin", "runtime", "params", "protocol", "node_address"]:
         if load("res://addons/gofer/%s.gd" % name) == null:
             broken.append(name)
     if not broken.is_empty():

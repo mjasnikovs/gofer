@@ -17,12 +17,13 @@ const PROTOCOL_VERSION := 2
 ## Tagged values and PNG frames must read the same whichever process produced them, so both halves
 ## of the addon encode them through this one script.
 const Protocol := preload("res://addons/gofer/protocol.gd")
-## The same wording the editor half uses for a path that stopped matching. Static, and it reads
-## nothing but its arguments, so loading it in the game process costs a parse.
+## What both halves decide alike. Static, and it reads nothing but its arguments, so loading it in
+## the game process costs a parse.
 const Params := preload("res://addons/gofer/params.gd")
+## The running tree's lookups, walk and refusals, which the editor's twin reads with its own root.
+const NodeAddress := preload("res://addons/gofer/node_address.gd")
 ## A tree dump larger than this risks the 1 MiB envelope cap; truncation is reported, never fatal.
 const MAX_TREE_NODES := 2048
-const MAX_TREE_DEPTH := 32
 ## What a call that names no `limit` answers with.
 ##
 ## The envelope is not the binding cap. The worker bounds a tool result at 24,000 characters and
@@ -97,11 +98,6 @@ class ErrorCatcher extends Logger:
         return distinct
 
 var _errors := ErrorCatcher.new()
-var _tree_nodes_seen: int = 0
-var _tree_truncated: bool = false
-## The bounds of the walk in progress, taken from the call and held at the engine's own caps.
-var _tree_budget: int = MAX_TREE_NODES
-var _tree_depth: int = MAX_TREE_DEPTH
 
 func _ready() -> void:
     process_mode = Node.PROCESS_MODE_ALWAYS
@@ -184,94 +180,13 @@ func _succeed(payload: Dictionary = {}) -> Dictionary:
 func _failure(code: String, message: String) -> Dictionary:
     return {"ok": false, "code": code, "message": message}
 
-## A node the running tree does not hold, and the spelling that would have found it.
-##
-## The failure this closes, counted over a week of one project: every `node_not_found` this script
-## answered was a path written the way `godot_node` names the EDITED scene — `/Main/Units` — and
-## all twenty calls that spelled it `/root/Main/...` were answered. Four were refused, and the
-## refusal repeated the wrong spelling back without saying that another one existed. The editor's
-## tool and this one name two trees in two processes, so one node has two names.
-##
-## Only `message` survives to the model: `plugin.gd` relays a runtime failure with its code and its
-## message and drops `details`, so the corrected call is a sentence rather than a field. The
-## parameter is named because the two callers spell it differently — `root` for the tree walk,
-## `path` for the inspection — and a corrected call that names the wrong key is not one.
-## Whether this is a name the engine made up, rather than one anybody wrote.
-##
-## Godot names an unnamed child `@ClassName@ID`, where the id counts instances for the whole run.
-## A bullet or an enemy `add_child`ed by a spawner has one, and it belongs to that one instance:
-## the next run gives it a different number, and freeing the node takes it away entirely.
-func _is_an_engine_name(segment: String) -> bool:
-    if not segment.begins_with("@"):
-        return false
-    var parts := segment.split("@", false)
-    return parts.size() == 2 and parts[1].is_valid_int()
-
-## Walks a running path from `/root` and asks `Params` to word where it stopped.
-##
-## `/root/Main/Scoreboard/ScoreLabel` and `/root/Main/@Area2D@214/@CollisionShape2D@212` were both
-## answered by repeating them back. The first is a caller guessing at a name; the second is one
-## guessing at a name the engine made up. Naming what is actually under the deepest node that does
-## exist answers both.
-func _as_far_as_the_path_goes(raw: String) -> String:
-    var parts := raw.strip_edges().trim_prefix("/").split("/", false)
-    if parts.size() < 2 or parts[0] != "root":
-        return ""
-    var here: Node = get_tree().root
-    var reached := "/root"
-    for index in range(1, parts.size()):
-        var next := here.get_node_or_null(NodePath(parts[index]))
-        if next == null:
-            var present := PackedStringArray()
-            for child in here.get_children():
-                present.append(String(child.name))
-            return Params.as_far_as_the_path_goes(reached, present, parts[index])
-        here = next
-        reached += "/" + parts[index]
-    return ""
-
-## The node a path names in the running tree, however the path is spelled.
-##
-## `/root/Main/Player` is the tree's own spelling; `Main/Player` and `Player` are the edited
-## scene's, and every live turn that inspected a running node wrote one of those first and was
-## corrected once. The correction was right and cost a call every run, so the spellings resolve.
 func _running_node(path: String) -> Node:
-    var root := get_tree().root
-    var found := root.get_node_or_null(NodePath(path))
-    if found != null:
-        return found
-    found = root.get_node_or_null(NodePath("/root" + path if path.begins_with("/") else "/root/" + path))
-    if found != null:
-        return found
-    var scene := get_tree().current_scene
-    return null if scene == null else scene.get_node_or_null(NodePath(path))
+    return NodeAddress.running_node(get_tree().root, get_tree().current_scene, path)
 
 func _node_not_found(parameter: String, path: String) -> Dictionary:
-    var plain := "No running node at '%s'" % path
-    if _is_an_engine_name(path.get_file()):
-        plain += (
-            ". A name like that is the engine's own for a node nobody named: it belongs to one "
-            + "instance, is numbered differently every run, and goes when that node is freed — "
-            + "which is what a bullet or an enemy does between one call and the next. Watch "
-            + "something that outlives it, or name the node where it is created"
-        )
-    if path.begins_with("/root/"):
-        return _failure("node_not_found", plain + _as_far_as_the_path_goes(path))
-    var spelled := "/root/" + path.trim_prefix("/")
-    if get_tree().root.get_node_or_null(NodePath(spelled)) == null:
-        return _failure("node_not_found", plain)
-    var corrected := (
-        "%s. The running tree names it '%s': every path here starts at /root, while the node.*"
-        + " operations name the edited scene, which is a different tree in a different process."
-        + " Send \"%s\": \"%s\"."
-    )
-    return _failure("node_not_found", corrected % [plain, spelled, parameter, spelled])
+    return _failure("node_not_found", NodeAddress.running_not_found(get_tree().root, parameter, path))
 
 ## Dumps the live scene tree from `root` down, `limit` nodes at most and `depth` levels at most.
-##
-## The default budget is what keeps `truncated` readable at all. The worker slices an oversized tool
-## result at a fixed character count with no regard for the JSON, and the flag is inside whatever it
-## cuts — so the answer is bounded here rather than explained after the fact.
 func _op_tree(params: Dictionary) -> Dictionary:
     var start: Node = get_tree().root
     var from := str(params.get("root", ""))
@@ -279,37 +194,14 @@ func _op_tree(params: Dictionary) -> Dictionary:
         start = _running_node(from)
         if start == null:
             return _node_not_found("root", from)
-    var levels := int(params.get("depth", MAX_TREE_DEPTH))
+    var levels := int(params.get("depth", NodeAddress.MAX_TREE_DEPTH))
     var budget := int(params.get("limit", DEFAULT_TREE_NODES))
-    _tree_nodes_seen = 0
-    _tree_truncated = false
-    _tree_budget = clampi(budget, 1, MAX_TREE_NODES)
-    _tree_depth = clampi(levels, 0, MAX_TREE_DEPTH)
-    var summary := _runtime_node_summary(start, 0)
+    var walked := NodeAddress.tree(start, get_tree().root, levels, budget, MAX_TREE_NODES)
     return _succeed({
-        "truncated": _tree_truncated,
-        "root": summary,
+        "truncated": walked["truncated"],
+        "root": walked["root"],
         "paused": get_tree().paused,
     })
-
-func _runtime_node_summary(node: Node, depth: int) -> Dictionary:
-    _tree_nodes_seen += 1
-    var children: Array = []
-    if depth < _tree_depth and _tree_nodes_seen < _tree_budget:
-        for child in node.get_children():
-            if _tree_nodes_seen >= _tree_budget:
-                _tree_truncated = true
-                break
-            children.append(_runtime_node_summary(child, depth + 1))
-    elif node.get_child_count() > 0:
-        _tree_truncated = true
-    return {
-        "name": node.name,
-        "type": node.get_class(),
-        "icon": Params.icon_class(node),
-        "path": str(node.get_path()),
-        "children": children,
-    }
 
 ## Lets the game run on, and answers with what actually passed.
 ##

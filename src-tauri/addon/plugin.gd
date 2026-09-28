@@ -21,6 +21,7 @@ const Protocol := preload("res://addons/gofer/protocol.gd")
 const Params := preload("res://addons/gofer/params.gd")
 const ProjectConfig := preload("res://addons/gofer/project_config.gd")
 const RuntimeQueue := preload("res://addons/gofer/runtime_queue.gd")
+const NodeAddress := preload("res://addons/gofer/node_address.gd")
 
 var _peer: StreamPeerTCP
 var _status: int = -1
@@ -43,11 +44,6 @@ var _session_id: String = "gofer-session"
 var _current_scene_path: String = ""
 var _scene_revision: int = 0
 var _playing: bool = false
-
-var _tree_nodes_seen: int = 0
-var _tree_truncated: bool = false
-var _tree_budget: int = MAX_TREE_NODES
-var _tree_depth: int = MAX_TREE_DEPTH
 
 var _scene_pending: Array[Dictionary] = []
 
@@ -109,30 +105,10 @@ const SCENE_SWITCH_RETRY_MS := 1000
 ## lets a refusal say which of the two is happening. See `_reread_the_script_on`.
 var _autoloads_added_here: Array[String] = []
 
-## The scene the running game was started on, or "" for the project's own main scene.
-##
-## Held so `runtime.restart` restarts what is actually running rather than the project's entry
-## point, which is a different game whenever `run` named a scene.
-var _runtime_scene: String = ""
-
-## The command line the running game was started with, held for the same reason as _runtime_scene.
-var _runtime_args: PackedStringArray = PackedStringArray()
-
 var _debugger_bridge: GoferDebuggerBridge
-var _runtime_session_id: int = -1
-var _runtime_ready: bool = false
-## Whether the debugger has paused the game and the game has said nothing since. A game paused at an
-## error is running and unreachable at once: it is neither "not running" nor able to answer.
-##
-## Kept as "and has said nothing since" rather than as the debugger's own `is_breaked()`, which is
-## the obvious source and the wrong one. A break Gofer's debug adapter continues or terminates
-## leaves that flag set on the editor's session, so it reads `true` over a game that is running
-## perfectly well and answering — and every runtime call would then be refused against a healthy
-## game, which is worse than the wait this is here to end. Any message from the game is proof it is
-## running, and a paused game sends none. The debugger's `continued` clears it too, for the break
-## that is resumed by hand and followed by nothing.
-var _runtime_broke: bool = false
-var _runtime_pending: Array[Dictionary] = []
+## Every call to the running game and what the plugin knows about that game. The plugin reads the
+## editor and performs what this returns.
+var _runtime := RuntimeQueue.new(_configured_launch_timeout_ms(), _configured_request_timeout_ms())
 
 ## Frames left before the editor quits, counted down by `_process`. Zero means no quit is due.
 ##
@@ -155,39 +131,22 @@ const RUN_ARGS_SETTING := "editor/run/main_run_args"
 ## difference without paying for it. That one test was the whole suite's floor, hoisted to run first
 ## because nothing could follow it. The environment lets it buy the same proof for four seconds.
 ##
-## Read once, here, rather than at each of the three call sites: a deadline that could change
-## between the launch and the stop is a different bug to debug.
-var _runtime_launch_timeout_ms: int = _configured_launch_timeout_ms()
-
-## The forwarded-request deadline this editor actually waits out.
-##
-## Read from the environment for the same reason the launch one is: the acceptance suite has to
-## watch a request expire, and twenty seconds a time is the whole cost of the test. Nothing ships
-## with anything but the constant.
-var _runtime_request_timeout_ms: int = _configured_request_timeout_ms()
-
+## Read once, when the queue is made: a deadline that could change between the launch and the stop
+## is a different bug to debug.
 static func _configured_launch_timeout_ms() -> int:
     var value := OS.get_environment("GOFER_RUNTIME_LAUNCH_TIMEOUT_MS")
     if value.is_empty():
         return RUNTIME_LAUNCH_TIMEOUT_MS
     return maxi(1, value.to_int())
 
+## The forwarded-request deadline this editor actually waits out, read from the environment for the
+## same reason: the acceptance suite has to watch a request expire. Nothing ships with anything but
+## the constant.
 static func _configured_request_timeout_ms() -> int:
     var value := OS.get_environment("GOFER_RUNTIME_REQUEST_TIMEOUT_MS")
     if value.is_empty():
         return RUNTIME_REQUEST_TIMEOUT_MS
     return maxi(1, value.to_int())
-
-## The runtime operations that cannot answer until the game has drawn a frame.
-##
-## `input` waits two process frames and then a `frame_post_draw`, `capture` waits a
-## `frame_post_draw`, and waiting is all `wait` does. Every other operation answers straight out of
-## the debugger message pump, which the main loop polls whether or not the game is drawing — which
-## is why a halted game answers `inspect_node` in milliseconds and leaves these three to expire.
-
-## The pending kinds that are waiting on a game the editor has already been told to start, and so
-## are ended by that game dying. `restart` is not one of them: it is waiting for the *previous*
-## game to go, and a stopped editor is the thing it wants.
 
 ## The commands `_handle_request` routes to the runtime bridge instead of answering synchronously.
 # GENERATED-BEGIN runtime-commands sha256:16a049fd54ab80c9
@@ -229,7 +188,6 @@ const MAX_SEARCH_RESULTS := ProjectConfig.MAX_SEARCH_RESULTS
 ## ceiling is a scene the panel used to draw whole and now would not; 4096 nodes is what the panel
 ## asks for, and about 450KB, well inside the 1 MiB envelope that ends the session if it is passed.
 const MAX_TREE_NODES := 4096
-const MAX_TREE_DEPTH := 32
 const DEFAULT_TREE_NODES := 150
 
 ## One icon request covers a whole scene tree's worth of classes and no more, and each icon stays
@@ -866,8 +824,8 @@ func _track_edited_scene() -> void:
 ## and reports the transition. Gofer maps these events onto its own session lifecycle.
 func _track_play_state() -> void:
     var playing := EditorInterface.is_playing_scene()
-    if _runtime_ready and not playing:
-        _on_runtime_debugger_session_stopped(_runtime_session_id)
+    if _runtime.ready and not playing:
+        _on_runtime_debugger_session_stopped(_runtime.session_id)
     if playing == _playing:
         return
     _playing = playing
@@ -935,8 +893,8 @@ func _handle_runtime_request(id: String, command: String, params: Dictionary) ->
         "runtime.get_state":
             _respond_result(id, {
                 "running": EditorInterface.is_playing_scene(),
-                "runtimeReady": _runtime_ready,
-                "broke": _runtime_broke,
+                "runtimeReady": _runtime.ready,
+                "broke": _runtime.broke,
             })
         "runtime.run":
             var asked = params.get("playArgs", [])
@@ -946,13 +904,11 @@ func _handle_runtime_request(id: String, command: String, params: Dictionary) ->
             else:
                 _runtime_launch(id, false, str(params.get("scene", "")), _as_args(asked))
         "runtime.restart":
-            _runtime_launch(id, true, _runtime_scene, _runtime_args)
+            _runtime_launch(id, true, _runtime.scene, _runtime.args)
         "runtime.stop":
-            _runtime_stop()
-            if EditorInterface.is_playing_scene():
-                _runtime_pending.append({"id": id, "kind": "stop", "deadline": _runtime_deadline(_runtime_launch_timeout_ms)})
-            else:
-                _respond_result(id, {"running": false})
+            _perform(_runtime.stop(EditorInterface.is_playing_scene()))
+            # Read again: the stop may already have ended the game.
+            _perform(_runtime.answer_stop_when_gone(id, EditorInterface.is_playing_scene(), Time.get_ticks_msec()))
         "runtime.capture":
             var source := str(params.get("source", "game"))
             if source == "editor":
@@ -984,50 +940,21 @@ func _handle_runtime_request(id: String, command: String, params: Dictionary) ->
         _:
             _respond_error_dict(id, Params.unknown_command_error(command)["_gofer_error"])
 
-## Stops the game. The helper it carried is gone from this moment on, so readiness drops here
-## rather than when the debugger session finally tears down: the next game's announcement has to
-## read as a first one. Launches waiting on the stopped game are answered rather than left to
-## expire.
-func _runtime_stop() -> void:
-    if EditorInterface.is_playing_scene():
-        EditorInterface.stop_playing_scene()
-    _runtime_ready = false
-    _runtime_broke = false
-    _fail_pending(["run", "restart", "run_frame"], "runtime_not_running", "The game was stopped before it finished launching")
-
-## Starts (or restarts) the game. The response waits for the GoferRuntime autoload to announce
-## itself, then rides back with the first rendered frame attached — the launch is only proven once
-## the game has produced pixels.
+## Starts (or restarts) the game; what that means is `RuntimeQueue.launch`.
 func _runtime_launch(id: String, restart: bool, scene: String, args: PackedStringArray) -> void:
     var playing := EditorInterface.is_playing_scene()
-    # A game halted at an error is worth nothing to keep: four of four live turns that met
-    # runtime_broke ran again without stopping first and were refused for it.
-    if playing and not restart and _runtime_ready and not _runtime_broke:
-        _respond_error(id, "already_running", "The project is already running. Stop it with runtime.stop and run again, or use runtime.restart to run the same scene from the start", true)
-        return
-    if not scene.is_empty() and not FileAccess.file_exists(scene):
-        _respond_error(
+    _perform(
+        _runtime.launch(
             id,
-            "scene_not_found",
-            "No scene at '%s'. scene.list names every scene this project has" % scene,
-            false,
-            {"scene": scene}
+            restart,
+            scene,
+            args,
+            Time.get_ticks_msec(),
+            playing,
+            FileAccess.file_exists(scene),
+            null if playing else _editor_dialog()
         )
-        return
-    if playing:
-        _runtime_scene = scene
-        _runtime_args = args
-        _runtime_stop()
-        _runtime_pending.append({"id": id, "kind": "restart", "deadline": _runtime_deadline(_runtime_launch_timeout_ms)})
-        return
-    var asking: Variant = _editor_dialog()
-    if asking != null:
-        _respond_dialog_open(id, asking)
-        return
-    _runtime_scene = scene
-    _runtime_args = args
-    _runtime_play()
-    _runtime_pending.append(_launch_pending(id, "run"))
+    )
 
 ## Why this command line cannot be delivered, or "" when it can.
 ##
@@ -1064,13 +991,13 @@ func _as_args(playArgs: Variant) -> PackedStringArray:
 ## `editor/run/main_run_args` is the only command line the launched game can be given: neither
 ## play_custom_scene nor play_main_scene takes one. It is put back before this returns and never
 ## saved, so a project.godot does not gain a line because an agent ran a scene.
-func _runtime_play() -> void:
+func _runtime_play(scene: String, args: PackedStringArray) -> void:
     var restore: String = str(ProjectSettings.get_setting(RUN_ARGS_SETTING, ""))
-    _set_run_args(" ".join(_runtime_args))
-    if _runtime_scene.is_empty():
+    _set_run_args(" ".join(args))
+    if scene.is_empty():
         EditorInterface.play_main_scene()
     else:
-        EditorInterface.play_custom_scene(_runtime_scene)
+        EditorInterface.play_custom_scene(scene)
     _set_run_args(restore)
 
 
@@ -1122,269 +1049,70 @@ func _a_main_scene_the_dialog_is_about(text: String) -> String:
         + "and run again."
     ) % main_scene
 
-## A launch entry. `seen_playing` is what lets the sweep tell a game still booting from a game that
-## booted and died: both read `is_playing_scene() == false`, and only the second one is over.
-func _launch_pending(id: String, kind: String) -> Dictionary:
-    return {
-        "id": id,
-        "kind": kind,
-        "deadline": _runtime_deadline(_runtime_launch_timeout_ms),
-        "seen_playing": false,
-    }
-
-## A game the editor is playing whose helper never answered is halted at an error or still
-## starting: a live turn read get_state's `running: true` and this refusal's "no game" ten seconds
-## apart and took them for two different games.
-func _why_no_helper_answers() -> String:
-    if not EditorInterface.is_playing_scene():
-        return "No game with the Gofer runtime helper is running"
-    return (
-        "A game is playing but its Gofer helper has not answered, so nothing inside it can be "
-        + "read: it is halted at an error or still starting. runtime.get_state says which; "
-        + "runtime.stop ends it."
-    )
-
-## Forwards a request to the running game. Without a live helper the request fails immediately —
-## the caller can start the game and retry, so the error is retryable.
+## Forwards a request to the running game; whether it may go is `RuntimeQueue.forward`.
 func _runtime_forward(id: String, op: String, params: Dictionary) -> void:
-    if not _runtime_ready or _runtime_session_id < 0:
-        # A wait sent before the helper announced answered `exited: true` about a game that was
-        # still booting; only a game the editor is no longer playing has exited.
-        if RuntimeQueue.EXIT_ANSWERING_OPS.has(op) and not EditorInterface.is_playing_scene():
-            _respond_result(id, {"exited": true})
-        else:
-            _respond_error(id, "runtime_not_running", _why_no_helper_answers(), true)
-        return
-    if _runtime_broke and RuntimeQueue.PROCESS_AWAITING_OPS.has(op):
-        _respond_error(id, "runtime_broke", "The game is paused in the debugger, so runtime.%s would wait for a frame that never comes. runtime.get_tree, runtime.inspect_node and runtime.get_monitors all answer while it is paused. debug.continue lets it go, and debug.stack_trace says where it is stopped. If it stopped while starting, what stopped it is in the session output - read that, fix it, and run again; runtime.run restarts a halted game by itself" % op, true)
-        return
-    _runtime_pending.append({
-        "id": id,
-        "kind": "game",
-        "op": op,
-        "deadline": _runtime_deadline(_runtime_request_timeout_ms),
-    })
-    _send_runtime_message({"id": id, "op": op, "params": params})
-
-func _runtime_deadline(budget_ms: int) -> int:
-    return Time.get_ticks_msec() + budget_ms
+    _perform(_runtime.forward(id, op, params, Time.get_ticks_msec(), EditorInterface.is_playing_scene()))
 
 func _send_runtime_message(payload: Dictionary) -> void:
-    if _debugger_bridge == null or _runtime_session_id < 0:
+    if _debugger_bridge == null or _runtime.session_id < 0:
         return
-    var session := _debugger_bridge.get_session(_runtime_session_id)
+    var session := _debugger_bridge.get_session(_runtime.session_id)
     if session == null:
         return
     session.send_message("gofer:request", [payload])
 
-## A new debugger session means a new game process: any readiness the previous helper reported
-## belonged to it, so it is dropped, and the new helper is pinged in case its announcement raced
-## the session setup.
+## The debugger bridge calls these four by name.
 func _on_runtime_debugger_session_started(session_id: int) -> void:
-    if _runtime_session_id != session_id:
-        _runtime_ready = false
-    _runtime_session_id = session_id
-    _runtime_broke = false
-    _send_runtime_message({"id": "", "op": "ping", "params": {}})
+    _perform(_runtime.started(session_id))
 
-## The debugger has paused the game. It is still running and it answers nothing, which is the one
-## failure that looks exactly like a slow game: the process is alive, the editor still reports a
-## playing scene, and nothing arrives.
-##
-## Only a launch is ended here, and only one that has not seen its first frame: a game that halts
-## before drawing it will not draw it. Other requests belong to a game that is up and will go on
-## answering once it continues. This addon cannot tell an error from a breakpoint, so a launch
-## halted at a breakpoint the caller armed is turned back into a success by the router, which
-## reads the adapter's stop reason.
 func _on_runtime_debugger_session_breaked(session_id: int) -> void:
-    if session_id != _runtime_session_id:
-        return
-    _runtime_broke = true
-    _fail_the_frames_nobody_will_draw()
-    _fail_pending(
-        ["run"],
-        "runtime_broke",
-        "The game stopped at an error while starting and is paused in the debugger; read the error in the session output, fix what it names, and run again - runtime.run restarts a halted game by itself, no stop is needed first",
-    )
-    _fail_pending(
-        ["run_frame"],
-        "runtime_broke",
-        "The game halted in the debugger before it drew its first frame, at an error or at a breakpoint; debug.stack_trace says where. If it is an error, it is in the session output - fix what it names and run again; runtime.run restarts a halted game by itself",
-    )
+    _perform(_runtime.breaked(session_id))
 
-## The debugger has resumed the game. It can answer again, and a game that is only being watched
-## sends nothing on its own, so this is the clearing that does not wait for the game to speak.
 func _on_runtime_debugger_session_continued(session_id: int) -> void:
-    if session_id != _runtime_session_id:
-        return
-    _runtime_broke = false
+    _perform(_runtime.continued(session_id))
 
 func _on_runtime_debugger_session_stopped(session_id: int) -> void:
-    if session_id != _runtime_session_id:
-        return
-    _runtime_session_id = -1
-    _runtime_ready = false
-    _runtime_broke = false
-    _end_the_waits_their_game_outlived()
-    _fail_pending(["game", "run_frame"], "runtime_not_running", "The game stopped before it could answer")
-    _send_event("runtime.stopped", {})
-
-## Answers every pending wait whose game has just gone. There is nothing left to wait for, which is
-## an answer; the frame count is left out rather than reported as zero, because the frames that did
-## pass went unobserved.
-func _end_the_waits_their_game_outlived() -> void:
-    var kept: Array[Dictionary] = []
-    for pending in _runtime_pending:
-        if pending["kind"] == "game" and RuntimeQueue.EXIT_ANSWERING_OPS.has(str(pending.get("op", ""))):
-            _respond_result(pending["id"], {"exited": true})
-        else:
-            kept.append(pending)
-    _runtime_pending = kept
-
-## Answers and drops every pending entry of the named kinds; the rest stay waiting. Every caller
-## here is retryable: the game is gone or paused, and the caller can start one and ask again.
-## A request waiting for frames when the debugger takes the game will never get them: a live
-## turn pressed the key that reached its own breakpoint and waited out twenty seconds to be told
-## the game had stopped. The press was delivered; only the answer was owed, and this is it.
-func _fail_the_frames_nobody_will_draw() -> void:
-    var kept: Array[Dictionary] = []
-    for pending in _runtime_pending:
-        if pending["kind"] == "game" and RuntimeQueue.PROCESS_AWAITING_OPS.has(pending["op"]):
-            _respond_error(
-                pending["id"],
-                "runtime_broke",
-                (
-                    "The debugger stopped the game while this call was waiting for frames: what "
-                    + "the call sent was delivered, and the game halted before it could answer. "
-                    + "debug.stack_trace says where it stopped; debug.continue lets it run on."
-                ),
-                true
-            )
-        else:
-            kept.append(pending)
-    _runtime_pending = kept
-
-func _fail_pending(kinds: Array, code: String, message: String) -> void:
-    var kept: Array[Dictionary] = []
-    for pending in _runtime_pending:
-        if kinds.has(pending["kind"]):
-            _respond_error(pending["id"], code, message, true)
-        else:
-            kept.append(pending)
-    _runtime_pending = kept
+    _perform(_runtime.stopped(session_id))
 
 ## A message from the game says the helper is alive; it does not say the game is running. The
-## debugger serves reads through a break, so a `get_tree` answered here used to clear the break and
-## let the next capture wait out its timeout against a game that draws nothing. Only `continued`
-## and a new or ended session clear it.
+## debugger serves reads through a break, so only `continued` and a new or ended session clear it.
 func _on_runtime_debugger_message(message: String, data: Array, session_id: int) -> void:
     if data.is_empty() or typeof(data[0]) != TYPE_DICTIONARY:
         return
     var payload: Dictionary = data[0]
     if message == "gofer:ready":
-        var first := not _runtime_ready
-        _runtime_session_id = session_id
-        _runtime_ready = true
-        if first:
-            _send_event("runtime.ready", {"protocolVersion": payload.get("protocolVersion", 0)})
-        _complete_pending_run()
+        _perform(_runtime.announced(session_id, payload.get("protocolVersion", 0), Time.get_ticks_msec()))
     elif message == "gofer:response":
-        _complete_runtime_response(payload)
+        _perform(_runtime.answered(payload))
 
-## A launch is answered once the helper is up, with the game's first rendered frame chained on.
-## The frame is best-effort: a game that cannot produce one still counts as launched.
-## The engine flag that starts a game with no display, and only where the engine reads it: anything
-## after a `--` belongs to the game.
-const HEADLESS_FLAG := "--headless"
-
-func _asks_for_no_display(args: PackedStringArray) -> bool:
-    for arg in args:
-        if arg == "--":
-            return false
-        if arg == HEADLESS_FLAG:
-            return true
-    return false
-
-func _complete_pending_run() -> void:
-    for index in range(_runtime_pending.size()):
-        var pending := _runtime_pending[index]
-        if pending["kind"] != "run":
-            continue
-        _runtime_pending.remove_at(index)
-        # A game with no display draws nothing, so the capture that proves every other launch can
-        # only time out here - and the launch times out with it, about a game that started fine.
-        # The helper announcing is the whole of the evidence a headless game can produce.
-        if _asks_for_no_display(_runtime_args):
-            _respond_result(pending["id"], {"running": true})
-            return
-        _runtime_pending.append({
-            "id": pending["id"],
-            "kind": "run_frame",
-            "deadline": _runtime_deadline(_runtime_request_timeout_ms),
-            "seen_playing": true,
-        })
-        _send_runtime_message({"id": pending["id"], "op": "capture", "params": {}})
-        return
-
-func _complete_runtime_response(payload: Dictionary) -> void:
-    var id := str(payload.get("id", ""))
-    for index in range(_runtime_pending.size()):
-        var pending := _runtime_pending[index]
-        if str(pending["id"]) != id:
-            continue
-        _runtime_pending.remove_at(index)
-        if pending["kind"] == "run_frame":
-            var launch := {"running": true}
-            if payload.get("ok", false) and payload.has("frame"):
-                launch["frame"] = payload["frame"]
-            _respond_result(id, launch)
-            return
-        if payload.get("ok", false):
-            var result := payload.duplicate()
-            result.erase("id")
-            result.erase("ok")
-            _respond_result(id, result)
-        else:
-            _respond_error(
-                id,
-                str(payload.get("code", "runtime_failed")),
-                str(payload.get("message", "The runtime helper refused the request")),
-                false
-            )
-        return
-
-## Answers every pending call the game has run out of time for, and starts the one a restart wants.
-##
 ## Runs even while the RPC link is down: a restart must still start the new game once the old one
-## has stopped. The two editor reads are here and the arithmetic is not — which of six things a
-## silence means is `RuntimeQueue.sweep`.
+## has stopped.
 func _sweep_runtime_pending() -> void:
-    if _runtime_pending.is_empty():
+    if not _runtime.waiting():
         return
     var playing := EditorInterface.is_playing_scene()
-    var swept := RuntimeQueue.sweep(
-        _runtime_pending,
-        Time.get_ticks_msec(),
-        playing,
-        null if playing else _editor_dialog()
-    )
-    _runtime_pending.assign(swept["kept"])
-    for answer in swept["answers"]:
-        match str(answer["kind"]):
-            "dialog":
-                _respond_dialog_open(answer["id"], answer["dialog"], true)
+    _perform(_runtime.tick(Time.get_ticks_msec(), playing, null if playing else _editor_dialog()))
+
+## Does what the runtime queue decided, in the order it decided it.
+func _perform(effects: Array[Dictionary]) -> void:
+    for effect in effects:
+        match str(effect["kind"]):
             "result":
-                _respond_result(answer["id"], answer["result"])
-            _:
+                _respond_result(effect["id"], effect["result"])
+            "error":
                 _respond_error(
-                    answer["id"],
-                    answer["code"],
-                    answer["message"],
-                    answer["retryable"],
-                    answer["details"]
+                    effect["id"], effect["code"], effect["message"], effect["retryable"], effect["details"]
                 )
-    if swept["play"]:
-        _runtime_play()
+            "dialog":
+                _respond_dialog_open(effect["id"], effect["dialog"], effect["waiting"])
+            "send":
+                _send_runtime_message(effect["payload"])
+            "event":
+                _send_event(effect["event"], effect["data"])
+            "play":
+                _runtime_play(effect["scene"], effect["args"])
+            "stop":
+                EditorInterface.stop_playing_scene()
 
 ## Captures the editor's own viewport, with the windows standing over it drawn back on. A headless
 ## editor has no pixels to read, which is an environment fact rather than a transient failure, so
@@ -1517,7 +1245,7 @@ func _session_state() -> Dictionary:
 ## Answers before it acts: the quit takes the socket with it, and a caller that lost its answer
 ## cannot tell an orderly shutdown from a crashed editor.
 func _session_quit() -> Dictionary:
-    _runtime_stop()
+    _perform(_runtime.stop(EditorInterface.is_playing_scene()))
     _quit_countdown = 2
     return {"quitting": true}
 
@@ -1604,14 +1332,10 @@ func _session_cancel(params: Dictionary) -> Dictionary:
     _scene_pending = kept_scenes
     _refresh_readiness()
 
-    var kept_runtime: Array[Dictionary] = []
-    for pending in _runtime_pending:
-        if String(pending["id"]) == request_id:
-            cancelled = true
-            _respond_error(request_id, "cancelled", "The request was cancelled by its caller", false)
-        else:
-            kept_runtime.append(pending)
-    _runtime_pending = kept_runtime
+    var runtime_cancelled := _runtime.cancel(request_id)
+    if not runtime_cancelled.is_empty():
+        cancelled = true
+    _perform(runtime_cancelled)
 
     return {"requestId": request_id, "cancelled": cancelled}
 
@@ -2995,15 +2719,11 @@ func _scene_tree(params: Dictionary) -> Dictionary:
         if start == null:
             return _node_not_found_error(from)
     var budget := int(params.get("limit", DEFAULT_TREE_NODES))
-    var levels := int(params.get("depth", MAX_TREE_DEPTH))
-    _tree_nodes_seen = 0
-    _tree_truncated = false
-    _tree_budget = clampi(budget, 1, MAX_TREE_NODES)
-    _tree_depth = clampi(levels, 0, MAX_TREE_DEPTH)
-    var summary := _node_summary(start, 0)
+    var levels := int(params.get("depth", NodeAddress.MAX_TREE_DEPTH))
+    var walked := NodeAddress.tree(start, root, levels, budget, MAX_TREE_NODES)
     return {
-        "truncated": _tree_truncated,
-        "root": summary,
+        "truncated": walked["truncated"],
+        "root": walked["root"],
         "revision": _scene_revision,
         "scene": _current_scene_path,
     }
@@ -3132,7 +2852,7 @@ func _node_create_nodes(params: Dictionary) -> Dictionary:
         # One spelling for a parent this call is still to create: `.`, `Enemy`, `Main/Enemy` and
         # `/Main/Enemy` all name the same node, and a live turn was refused for writing the
         # second under a first entry whose parent was `.` — the way the saved scene spells them.
-        var parent_key := _root_relative(parent_path)
+        var parent_key := NodeAddress.edited_relative(_edited_root(), parent_path)
         var parent: Node = pending.get(parent_key, null)
         if parent == null:
             parent = _find_node(parent_path)
@@ -3579,7 +3299,7 @@ func _node_delete(params: Dictionary) -> Dictionary:
         if _find_node(node_path_str) == null:
             missing.append(node_path_str)
     if not missing.is_empty():
-        return _nodes_not_found_error(missing)
+        return NodeAddress.edited_all_not_found(_edited_root(), missing)
     for node_path_str in named:
         var node := _find_node(node_path_str)
         if node == root:
@@ -3732,7 +3452,7 @@ func _node_set_properties(params: Dictionary) -> Dictionary:
             if not named_node.is_empty() and _find_node(named_node) == null and not missing.has(named_node):
                 missing.append(named_node)
     if not missing.is_empty():
-        return _nodes_not_found_error(missing)
+        return NodeAddress.edited_all_not_found(_edited_root(), missing)
     for entry in entries:
         if typeof(entry) != TYPE_DICTIONARY:
             return Params.error(
@@ -4449,157 +4169,17 @@ func _reread_the_script_on(target: Node) -> bool:
     loaded.source_code = text
     return loaded.reload(true) == OK
 
-## Walks a path from the scene's root and asks `Params` to word where it stopped.
-##
-## Only for a path that is under the right root and simply names something that is not there — the
-## four clauses above answer every path that is under the wrong tree, and adding a list of children
-## to one of those would bury the sentence that repairs it.
-func _as_far_as_the_path_goes(raw: String) -> String:
-    var root := _edited_root()
-    if root == null:
-        return ""
-    var parts := raw.strip_edges().trim_prefix("/").split("/", false)
-    if parts.size() < 2 or parts[0] != String(root.name):
-        return ""
-    var here := root
-    var reached := "/" + String(root.name)
-    for index in range(1, parts.size()):
-        var next := here.get_node_or_null(NodePath(parts[index]))
-        if next == null:
-            var present := PackedStringArray()
-            for child in here.get_children():
-                present.append(String(child.name))
-            return Params.as_far_as_the_path_goes(reached, present, parts[index])
-        here = next
-        reached += "/" + parts[index]
-    return ""
-
-## The mirror of `runtime.gd`'s funnel, for the mistake made the other way round. `godot_runtime`
-## names the running game's tree, whose every path starts at `/root`; this names the scene the
-## editor has open, whose paths start at the scene's own root. Two trees, two processes, one node
-## with two names — so a path that arrives with `/root/` in front of it is not a missing node, it
-## is the other tool's spelling, and saying so costs one sentence.
-##
-## Two more spellings reach here, both watched in one live turn against a real editor, and neither
-## is a node path at all. `/root` on its own is the running tree's root, named where this scene's
-## root was meant; `res://scenes/main.tscn` is the scene the model had just opened, sent where a
-## node inside it was meant. Repeating either back says only that it is absent, which is the one
-## thing the caller already knew. Both are answered with the name the root actually has, because
-## that is the fact that repairs them — every node path in the edited scene begins with it.
-## One refusal for every path a batch named that is not in the scene, so a caller who cannot
-## cheaply rebuild the batch learns all of them at once.
-func _nodes_not_found_error(paths: Array) -> Dictionary:
-    if paths.size() == 1:
-        return _node_not_found_error(str(paths[0]))
-    return Params.error(
-        "node_not_found",
-        "Nodes %s were not found in the edited scene" % ", ".join(paths),
-        {"nodes": paths}
-    )
-
-func _node_not_found_error(raw: String) -> Dictionary:
-    var path := raw.strip_edges()
-    var message := "Node %s was not found in the edited scene" % path
-    var root := _edited_root()
-    var root_path: String = "/" + String(root.name) if root != null else ""
-    if path.begins_with("/root/") and _find_node(path.substr(5)) != null:
-        message = (
-            "%s. It is there as %s: a path that starts at /root is how the runtime.* operations"
-            + " name the running game, which is a different tree in a different process."
-        ) % [message, path.substr(5)]
-    elif (path == "/root" or path == "/root/") and not root_path.is_empty():
-        message = (
-            "%s. /root is how the runtime.* operations name the running game's root, which is a"
-            + " different tree in a different process; this scene's root is %s."
-        ) % [message, root_path]
-    elif path.begins_with("res://") and not root_path.is_empty():
-        message = (
-            "%s. That names a scene file, not a node inside one: this scene's root is %s, and"
-            + " every node path here starts there."
-        ) % [message, root_path]
-    elif (
-        not root_path.is_empty()
-        and path != root_path
-        and not path.begins_with(root_path + "/")
-    ):
-        # The walk is the fact a caller needs — which ancestor exists and what is under it — and
-        # a live turn sent the same relative path three times before an absolute one earned it.
-        message = (
-            "%s. Every node path here starts at the scene's own root, which is %s.%s"
-        ) % [message, root_path, _as_far_as_the_path_goes(root_path + "/" + path)]
-    else:
-        message += _as_far_as_the_path_goes(path)
-    return {
-        "_gofer_error": {
-            "code": "node_not_found",
-            "message": message,
-            "retryable": false,
-            "readiness": "ready",
-            "details": {"path": path}
-        }
-    }
-
 func _edited_root() -> Node:
     return EditorInterface.get_edited_scene_root()
 
 func _find_node(raw: String) -> Node:
-    var root := _edited_root()
-    if root == null:
-        return null
-    var path := raw.strip_edges()
-    if path == root.name or path == "/" + root.name or path == "":
-        return root
-    var relative := path
-    if relative.begins_with("/"):
-        relative = relative.substr(1)
-    if relative.begins_with(root.name + "/"):
-        relative = relative.substr(root.name.length() + 1)
-    return root.get_node_or_null(NodePath(relative))
-
-## A path the way `_find_node` reads it: relative to the edited root, and empty for the root.
-func _root_relative(raw: String) -> String:
-    var root := _edited_root()
-    var path := raw.strip_edges()
-    if root == null or path == "." or path == "" or path == root.name or path == "/" + root.name:
-        return ""
-    if path.begins_with("/"):
-        path = path.substr(1)
-    if path.begins_with(root.name + "/"):
-        path = path.substr(root.name.length() + 1)
-    return path
+    return NodeAddress.edited_node(_edited_root(), raw)
 
 func _node_path(node: Node) -> String:
-    var root := _edited_root()
-    if node == root:
-        return "/" + root.name
-    var path := node.get_path()
-    var root_path := root.get_path()
-    var relative := String(path).substr(String(root_path).length())
-    return "/" + root.name + relative
+    return NodeAddress.path_in(_edited_root(), node)
 
-## One node and the part of its subtree the walk still has budget for.
-##
-## Bounded like the running tree's, and for the same reason: the answer used to be every node of
-## the edited scene however many there were, and the worker slices an oversized tool result at a
-## fixed character count, mid-JSON.
-func _node_summary(node: Node, depth: int) -> Dictionary:
-    _tree_nodes_seen += 1
-    var children: Array[Dictionary] = []
-    if depth < _tree_depth and _tree_nodes_seen < _tree_budget:
-        for i in range(node.get_child_count()):
-            if _tree_nodes_seen >= _tree_budget:
-                _tree_truncated = true
-                break
-            children.append(_node_summary(node.get_child(i), depth + 1))
-    elif node.get_child_count() > 0:
-        _tree_truncated = true
-    return {
-        "name": node.name,
-        "type": node.get_class(),
-        "icon": Params.icon_class(node),
-        "path": _node_path(node),
-        "children": children
-    }
+func _node_not_found_error(raw: String) -> Dictionary:
+    return NodeAddress.edited_not_found(_edited_root(), raw)
 
 
 

@@ -39,7 +39,7 @@ const EXCLUDE_MARKER: &str = "# Gofer: the managed Godot addon is never part of 
 
 /// The addon as shipped. `include_str!` keeps the files in the binary, so staging needs no
 /// installation directory and cannot be tampered with between releases.
-const ADDON_FILES: [(&str, &str); 7] = [
+const ADDON_FILES: [(&str, &str); 8] = [
     (
         "addons/gofer/plugin.cfg",
         include_str!("../addon/plugin.cfg"),
@@ -61,6 +61,10 @@ const ADDON_FILES: [(&str, &str); 7] = [
     (
         "addons/gofer/runtime.gd",
         include_str!("../addon/runtime.gd"),
+    ),
+    (
+        "addons/gofer/node_address.gd",
+        include_str!("../addon/node_address.gd"),
     ),
 ];
 
@@ -1154,6 +1158,7 @@ mod tests {
             "addons/gofer/runtime_queue.gd.uid",
             "addons/gofer/protocol.gd.uid",
             "addons/gofer/runtime.gd.uid",
+            "addons/gofer/node_address.gd.uid",
         ] {
             fixture
                 .workspace
@@ -1650,6 +1655,7 @@ mod tests {
                 "addons/gofer/runtime_queue.gd".to_owned(),
                 "addons/gofer/protocol.gd".to_owned(),
                 "addons/gofer/runtime.gd".to_owned(),
+                "addons/gofer/node_address.gd".to_owned(),
                 MANIFEST_PATH.to_owned(),
             ]
         );
