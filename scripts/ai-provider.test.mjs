@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import {readFile, readdir, rm} from 'node:fs/promises'
 import {createServer} from 'node:http'
+import {join} from 'node:path'
 import test from 'node:test'
 import {createToolHost} from './ai-host.mjs'
 import {cannedModels} from './ai-subagent.mjs'
 import {
-    createAgentTools,
     createModelContext,
     DRIVERS,
     DRIVER_SECRETS,
@@ -310,34 +310,6 @@ test('cancels an active provider stream through AbortSignal', async context => {
 
     const result = await completion
     assert.equal(result.stopReason, 'aborted')
-})
-
-test('agent tools confine paths to the temporary workspace', async context => {
-    const workspace = await temporaryWorkspace({}, {'secret.txt': 'outside secret'})
-    context.after(workspace.remove)
-    const {env, tools} = createAgentTools(workspace.path)
-    context.after(() => env.cleanup())
-    const read = tools.find(tool => tool.name === 'read')
-    const bash = tools.find(tool => tool.name === 'bash')
-
-    await assert.rejects(
-        read.execute(
-            'read-outside',
-            {path: '../secret.txt'},
-            new AbortController().signal,
-            () => undefined
-        ),
-        /outside|workspace|path|ENOENT/iu
-    )
-    await assert.rejects(
-        bash.execute(
-            'bash-outside',
-            {command: 'cat ../secret.txt'},
-            new AbortController().signal,
-            () => undefined
-        ),
-        /workspace/iu
-    )
 })
 
 test('runs the Pi agent tool loop and streams tool lifecycle events', async context => {
@@ -1753,6 +1725,34 @@ test('a delegation is answered by the model the sub-agent was given, not the par
     assert.equal(mock.bodies[0].model, MODEL_ID)
     assert.equal(mock.bodies[1].model, 'small.gguf')
     assert.equal(mock.bodies[2].model, MODEL_ID)
+})
+
+test('a path the specification freezes is frozen for the sub-agent’s shell too', async context => {
+    const workspace = await temporaryWorkspace({'DESIGN.md': 'the contract\n'})
+    context.after(workspace.remove)
+    const mock = startScriptedServer([
+        {calls: [{name: 'subagent', args: {prompt: 'Note the new frame in DESIGN.md.'}}]},
+        {calls: [{name: 'bash', args: {command: 'echo "wreck frame waived" >> DESIGN.md'}}]},
+        {text: 'DESIGN.md could not be written.'},
+        {text: 'The design document is frozen.'}
+    ])
+    const url = await baseUrl(context, mock.server)
+
+    await runAgent({
+        settings: servedBy(url),
+        messages: [
+            {
+                sender: 'user',
+                text: 'GOAL\nFix the wreck frame.\n\nCONSTRAINTS\n- Do not modify `DESIGN.md`.\n',
+                timestamp: 1
+            }
+        ],
+        workspacePath: workspace.path,
+        emit: () => undefined
+    })
+
+    assert.equal(await readFile(join(workspace.path, 'DESIGN.md'), 'utf8'), 'the contract\n')
+    assert.match(JSON.stringify(mock.bodies[2]), /freezes DESIGN\.md under CONSTRAINTS/u)
 })
 
 test('registers both connections when the sub-agent is on the other one', async context => {

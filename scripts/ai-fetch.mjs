@@ -172,6 +172,7 @@ export async function fetchFocused({
     signal,
     timers,
     probe,
+    frozen,
     progress,
     fetchAndClean = defaultFetchAndClean
 }) {
@@ -200,7 +201,8 @@ export async function fetchFocused({
         signal,
         timers,
         probe,
-        progress
+        progress,
+        deps: {frozen}
     })
 
     const parsed = parseChildOutput(child.text)
@@ -300,6 +302,7 @@ export function createWebFetchTool({
     settings,
     timers,
     probe,
+    frozen,
     fetchAndClean
 }) {
     return {
@@ -353,6 +356,7 @@ export function createWebFetchTool({
                     signal,
                     timers,
                     probe,
+                    frozen,
                     progress: toolProgress(onUpdate),
                     fetchAndClean: probing ? cannedPage() : fetchAndClean
                 })

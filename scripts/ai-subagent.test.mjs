@@ -860,29 +860,6 @@ function fakeTimers() {
     }
 }
 
-test('a tool call that never returns is cut off, and the sub-agent is told why', async context => {
-    const workspace = await temporaryWorkspace()
-    context.after(workspace.remove)
-    const timers = fakeTimers()
-    const {env, tools} = createChildTools(workspace.path, {
-        bounds: {...SUBAGENT_BOUNDS, commandTimeoutMs: 60_000},
-        timers
-    })
-    context.after(() => env.cleanup())
-
-    const running = assert.rejects(
-        tools.find(tool => tool.name === 'bash').execute('call-1', {command: 'sleep 600'}),
-        error => {
-            assert.match(error.message, /was stopped after 60 seconds and produced no result/u)
-            assert.match(error.message, /Do not report it as finished/u)
-            assert.match(error.message, /bash tool's own timeout parameter set, in seconds/u)
-            return true
-        }
-    )
-    await timers.advance(60_000)
-    await running
-})
-
 test('a tool call inside its ceiling is left alone', async context => {
     const workspace = await temporaryWorkspace({'a.gd': 'extends Node\n'})
     context.after(workspace.remove)

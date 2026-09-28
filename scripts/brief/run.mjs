@@ -15,6 +15,7 @@ import {
 import {createModelContext} from '../ai-provider.mjs'
 import {createChildTools, eventProgress, runSubagentOutcome} from '../ai-subagent.mjs'
 import {modelReadsImages} from '../agent-runtime.mjs'
+import {frozenPathsIn} from '../frozen-paths.mjs'
 import {probeTools} from '../ai-reachability.mjs'
 import {BRIEF_PHASES} from './catalogue.mjs'
 import {PhaseFailed, PhaseStopped, compose, critique, grill, refine, research} from './phases.mjs'
@@ -111,7 +112,8 @@ export async function runBrief({
         domains,
         host,
         braveApiKey: secrets.brave,
-        searchProvider: settings?.web?.searchProvider
+        searchProvider: settings?.web?.searchProvider,
+        frozen: frozenPathsIn([{sender: 'user', text: prompt}])
     }
 
     let spend = {input: 0, output: 0}

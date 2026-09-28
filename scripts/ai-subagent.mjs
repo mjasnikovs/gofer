@@ -1,11 +1,8 @@
-import {Agent, createBashTool, createReadTool} from '@earendil-works/pi-agent-core/node'
+import {Agent} from '@earendil-works/pi-agent-core/node'
 import {createAssistantMessageEventStream} from '@earendil-works/pi-ai'
 import {createGodotTools} from './godot-tools.mjs'
-import {withLineNumbers} from './numbered-read.mjs'
 import {
     abortableWait,
-    createToolEnv,
-    decorateTools,
     endedStream,
     isWorthRetrying,
     modelReadsImages,
@@ -14,12 +11,9 @@ import {
     zeroUsage
 } from './agent-runtime.mjs'
 import {createWebSearchTool} from './ai-search.mjs'
-import {ASK_USER_TOOL_NAME, createAskUserTool} from './ai-ask.mjs'
-import {createProgressGuard} from './progress-guard.mjs'
+import {createAskUserTool} from './ai-ask.mjs'
 import {toolStepLine} from './tool-target.mjs'
-import {confineTool} from './workspace-confinement.mjs'
-import {createGrepTool} from './ai-grep.mjs'
-import {readsADirectory} from './read-a-directory.mjs'
+import {createToolbelt, isFileTool} from './toolbelt.mjs'
 import {withoutEmptyToolCalls} from './ai-transcript.mjs'
 
 export const SUBAGENT_TOOL_NAME = 'subagent'
@@ -191,60 +185,6 @@ export function assertChildTools(tools, allowed = CHILD_TOOL_NAMES) {
     )
 }
 
-export function commandOverrunMessage(toolName, timeoutMs) {
-    const seconds = Math.max(1, Math.round(timeoutMs / 1000))
-    return (
-        `The ${toolName} call was stopped after ${String(seconds)} seconds and produced no result. `
-        + `Do not report it as finished, and do not assume anything it would have started is now `
-        + `running. If it genuinely needs that long, run it again with the bash tool's own timeout `
-        + `parameter set, in seconds, so it cannot hang. Otherwise break it into smaller steps or `
-        + `answer from what you already have. Do not repeat the same unbounded command.`
-    )
-}
-
-const WAITS_ON_A_PERSON = new Set([ASK_USER_TOOL_NAME])
-
-function underCommandClock(tool, {timeoutMs, timers}) {
-    if (!(timeoutMs > 0) || WAITS_ON_A_PERSON.has(tool.name)) return tool
-    return {
-        ...tool,
-        execute: async (id, params, signal, onUpdate) => {
-            const controller = new AbortController()
-            const stop = () => controller.abort()
-            if (signal?.aborted) stop()
-            else signal?.addEventListener('abort', stop, {once: true})
-            let timer
-            let overran = false
-            try {
-                const result = await Promise.race([
-                    tool.execute(id, params, controller.signal, onUpdate),
-                    new Promise(resolve => {
-                        timer = timers.schedule(() => {
-                            overran = true
-                            controller.abort()
-                            resolve(undefined)
-                        }, timeoutMs)
-                    })
-                ])
-                if (overran) throw new Error(commandOverrunMessage(tool.name, timeoutMs))
-                return result
-            } catch (error) {
-                if (overran) throw new Error(commandOverrunMessage(tool.name, timeoutMs))
-                throw error
-            } finally {
-                timers.cancel(timer)
-                signal?.removeEventListener('abort', stop)
-            }
-        }
-    }
-}
-
-const CONFINED_CHILD_TOOLS = {
-    read: () => readsADirectory(withLineNumbers(createReadTool())),
-    grep: createGrepTool,
-    bash: createBashTool
-}
-
 /// The script operations that only ask a question. A child holds these and nothing else of that
 /// domain, because a research agent that could call `edit` or `save` would no longer be one.
 const ASKS_THE_LANGUAGE_SERVER = new Set([
@@ -334,22 +274,21 @@ export function createChildTools(
     {bounds = SUBAGENT_BOUNDS, timers = realTimers, toolNames = SUBAGENT_TOOL_NAMES, deps = {}} = {}
 ) {
     assertChildTools([], toolNames)
-    const env = createToolEnv(workspacePath)
-    const built = toolNames.map(name =>
-        name in CONFINED_CHILD_TOOLS ?
-            confineTool(CONFINED_CHILD_TOOLS[name](), workspacePath)
-        :   REACHING_CHILD_TOOLS[name](deps)
-    )
-    const guard = createProgressGuard()
-    const tools = decorateTools({
-        env,
-        tools: built,
+    const belt = createToolbelt({
+        seat: 'child',
+        workspacePath,
+        files: toolNames.filter(isFileTool),
+        reaching: toolNames
+            .filter(name => !isFileTool(name))
+            .map(name => REACHING_CHILD_TOOLS[name](deps)),
+        frozen: deps.frozen,
+        host: deps.host,
         model: deps.model,
-        guard: guard.decorate,
-        extras: [tool => underCommandClock(tool, {timeoutMs: bounds.commandTimeoutMs, timers})]
+        commandTimeoutMs: bounds.commandTimeoutMs,
+        timers
     })
-    assertChildTools(tools, toolNames)
-    return {env, tools, guard}
+    assertChildTools(belt.tools, toolNames)
+    return belt
 }
 
 export {realTimers}
@@ -793,6 +732,7 @@ export function createSubagentTool({
     settings,
     timers,
     probe,
+    frozen,
     slots = createSlots(boundsFrom(settings).maxConcurrent)
 }) {
     return {
@@ -840,7 +780,8 @@ export function createSubagentTool({
             timers,
             probe,
             signal,
-            progress: toolProgress(onUpdate)
+            progress: toolProgress(onUpdate),
+            deps: {frozen}
         })
         return {
             content: [{type: 'text', text: `${result.text}\n\n${usageFooter(result, model)}`}],

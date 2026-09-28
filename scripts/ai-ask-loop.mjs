@@ -84,6 +84,7 @@ export function createAskDelegate({
     timers,
     probe,
     host,
+    frozen,
     images = []
 }) {
     return async ({ownerCallId, brief, signal, onUpdate, probing = false}) => {
@@ -105,7 +106,7 @@ export function createAskDelegate({
             signal,
             progress: toolProgress(onUpdate),
             stopWhen: () => agreed.approved === true,
-            deps: {host, ownerCallId, agreed}
+            deps: {host, ownerCallId, agreed, frozen}
         })
         if (probing) return {text: result.text, details: {turns: result.turns}}
         return {

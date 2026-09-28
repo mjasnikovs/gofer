@@ -3,11 +3,7 @@ import {
     calculateContextTokens,
     compact,
     convertToLlm,
-    createBashTool,
     createCompactionSummaryMessage,
-    createEditTool,
-    createReadTool,
-    createWriteTool,
     estimateContextTokens,
     estimateTokens,
     prepareCompaction,
@@ -21,13 +17,9 @@ import {isContextOverflow} from '@earendil-works/pi-ai/compat'
 import {openAICompletionsApi} from '@earendil-works/pi-ai/api/openai-completions.lazy'
 import {openaiCodexProvider} from '@earendil-works/pi-ai/providers/openai-codex'
 import {createGodotTools} from './godot-tools.mjs'
-import {createGrepTool} from './ai-grep.mjs'
-import {readsADirectory} from './read-a-directory.mjs'
 import {carriedText, carryTurnContext, turnContextText, withTurnContext} from './turn-context.mjs'
 import {
     abortableWait,
-    createToolEnv,
-    decorateTools,
     EMPTY_ANSWER,
     isWorthRetrying,
     realTimers,
@@ -58,16 +50,12 @@ import {createRememberTool} from './ai-remember.mjs'
 import {createBoardTool} from './ai-board.mjs'
 import {createAskDelegate} from './ai-ask-loop.mjs'
 import {createSubagentTool} from './ai-subagent.mjs'
-import {createProgressGuard} from './progress-guard.mjs'
 import {createWebFetchTool} from './ai-fetch.mjs'
 import {createWebSearchTool} from './ai-search.mjs'
 import {createTranscript, withoutEmptyToolCalls, withoutTrailingAnswer} from './ai-transcript.mjs'
 import {toolTarget} from './tool-target.mjs'
-import {withoutPackedLiterals} from './scene-text.mjs'
-import {withLineNumbers} from './numbered-read.mjs'
-import {notesTheRead} from './noted-read.mjs'
-import {forwardsScriptsToTheServer} from './script-forwarding.mjs'
-import {confineTool, ensureScratchDirectory} from './workspace-confinement.mjs'
+import {ensureScratchDirectory} from './workspace-confinement.mjs'
+import {createToolbelt} from './toolbelt.mjs'
 import {readableProviderError} from './provider-error.mjs'
 import {piThinkingLevel} from './thinking-level.mjs'
 import {piModel} from './pi-model.mjs'
@@ -376,33 +364,18 @@ function contextMessage(message, model) {
     }
 }
 
+const PARENT_FILE_TOOLS = ['read', 'grep', 'write', 'edit', 'bash']
+
 export function createAgentTools(workspacePath, domains, host, extra = [], model, frozen = []) {
-    const env = createToolEnv(workspacePath)
-    const confined = [
-        notesTheRead(
-            confineTool(
-                readsADirectory(withoutPackedLiterals(withLineNumbers(createReadTool()))),
-                workspacePath,
-                frozen
-            ),
-            host,
-            workspacePath
-        ),
-        ...[createGrepTool(), createWriteTool(), createEditTool(), createBashTool()].map(tool =>
-            forwardsScriptsToTheServer(confineTool(tool, workspacePath, frozen), host)
-        )
-    ]
-    const guard = createProgressGuard()
-    return {
-        env,
-        guard,
-        tools: decorateTools({
-            env,
-            tools: [...confined, ...(host ? createGodotTools(domains, host) : []), ...extra],
-            model,
-            guard: guard.decorate
-        })
-    }
+    return createToolbelt({
+        seat: 'parent',
+        workspacePath,
+        files: PARENT_FILE_TOOLS,
+        reaching: [...(host ? createGodotTools(domains, host) : []), ...extra],
+        frozen,
+        host,
+        model
+    })
 }
 
 // Any answer at all, a 401 or a 404 included, is a host that is up. Only a request that never
@@ -588,33 +561,28 @@ export async function runAgent({
         sessionId,
         signal
     })
+    const frozen = frozenPathsIn(messages)
+    const delegation = {
+        workspacePath,
+        models,
+        model: subagent.model,
+        thinkingLevel: subagent.thinkingLevel,
+        streamOptions,
+        settings: settings.subagent,
+        probe,
+        frozen
+    }
     const {env, tools, guard} = createAgentTools(
         workspacePath,
         domains,
         host,
         [
-            createSubagentTool({
-                workspacePath,
-                models,
-                model: subagent.model,
-                thinkingLevel: subagent.thinkingLevel,
-                streamOptions,
-                settings: settings.subagent,
-                probe
-            }),
+            createSubagentTool(delegation),
             createWebSearchTool({
                 provider: settings.web?.searchProvider ?? DEFAULT_SEARCH_PROVIDER,
                 apiKey: secrets.brave
             }),
-            createWebFetchTool({
-                workspacePath,
-                models,
-                model: subagent.model,
-                thinkingLevel: subagent.thinkingLevel,
-                streamOptions,
-                settings: settings.subagent,
-                probe
-            }),
+            createWebFetchTool(delegation),
             ...(host ?
                 [
                     createRememberTool({host}),
@@ -623,13 +591,7 @@ export async function runAgent({
                         host,
                         model,
                         delegate: createAskDelegate({
-                            workspacePath,
-                            models,
-                            model: subagent.model,
-                            thinkingLevel: subagent.thinkingLevel,
-                            streamOptions,
-                            settings: settings.subagent,
-                            probe,
+                            ...delegation,
                             host,
                             images: askedAbout(messages)
                         })
@@ -638,7 +600,7 @@ export async function runAgent({
             :   [])
         ],
         model,
-        frozenPathsIn(messages)
+        frozen
     )
     try {
         await probeTools({tools, host, workspacePath, signal})
