@@ -28,6 +28,12 @@ happened, not at the seam it crosses — a task that is not there is `task_not_f
 was asked, and a view names the situation only for a sentence nobody has classified. A task's brief
 travels with `tasks`, because it belongs to one task and is deleted with it.
 
+**Project value** — what a screen draws out of the Ledger: memories, sketches, a task's changes, the
+board. The view that writes one announces it through a notifier port in
+`src-tauri/src/project_changes.rs`, so no caller can forget to, and the window reads every one
+through `src/hooks/useProjectValue.ts`, which owns the first read, merges reads that overlap and
+holds the one subscription.
+
 **Task** — one unit of work in the sidebar: a conversation, and a git branch to do it in. Tasks are
 created, activated, deleted, and merged back. A task made before the repository existed gets its
 branch when one appears.
@@ -78,12 +84,13 @@ why an armed breakpoint can be asserted without forging another module's globals
 this is what a runtime rejection is given to say.
 
 **Addon** — the GDScript plugin Gofer stages into the project, which answers protocol commands from
-inside the editor. Six scripts: `plugin.gd` in the editor, `runtime.gd` in the running game, and
-`protocol.gd`, `params.gd`, `project_config.gd` and `runtime_queue.gd` beside both.
+inside the editor. Seven scripts: `plugin.gd` in the editor, `runtime.gd` in the running game, and
+`protocol.gd`, `params.gd`, `project_config.gd`, `runtime_queue.gd` and `node_address.gd` beside
+both.
 
 `plugin.gd` extends `EditorPlugin`, and that one line is the addon's testability seam: nothing in
 that class can be reached without booting a real editor under xvfb, whether it touches the editor or
-not. The other four are on the other side of it — preloadable, so `fixtures/godot-project/tests`
+not. The other five are on the other side of it — preloadable, so `fixtures/godot-project/tests`
 drives them from source in about a second each. A command whose handler lives in one of them says so
 with `module` in `protocol/schemas/v2/commands.json`, and the generated dispatch table calls it
 through the preload constant of the same name.
@@ -97,10 +104,13 @@ readback comparison that knows a 32-bit float drifts and a cleared object proper
 `TYPE_NIL`. Each of those was measured on a real editor once and is re-proved from source since.
 
 `project_config.gd` is everything the `project.*` commands decide, which is `ProjectSettings`,
-`InputMap` and `FileAccess` and never `EditorInterface`. `runtime_queue.gd` is what a call to the
-running game is told when it runs out of time: six diagnoses over a queue, behind two editor values
-the plugin reads and passes in. Both were inside `plugin.gd`, and reaching any of it cost a booted
-editor — a real game as well, for the queue.
+`InputMap` and `FileAccess` and never `EditorInterface`. `runtime_queue.gd` owns every call to the
+running game: the queue, the helper's readiness and the debugger's break. Each debugger signal and
+each frame is an event it takes with the editor's facts as values, and it returns the effects the
+plugin performs, in order — so which calls a break ends is one rule, not three. `node_address.gd` is
+node addressing for both trees: the lookup, the path, the bounded walk and the not-found wording,
+given the edited scene's root or the running tree's. All three were inside `plugin.gd` or doubled in
+`runtime.gd`, and reaching any of it cost a booted editor — a real game as well, for the queue.
 
 Two of them are read by both halves at once — `authored_groups` and `icon_class` take a `Node` and
 never ask whether it is being edited or played. Each existed twice, byte for byte, once on each side
@@ -140,6 +150,16 @@ a match, not a table.
 **Game** / **run** — the project playing. Distinct from the editor: the editor survives the game
 being closed, and a node read out of a running game does not survive it.
 
+**Game run** — whether the debugger holds a game, whether it is halted and why, and the breakpoints
+the next game is handed. One value in `src-tauri/src/game_run.rs`: the debugger, the adapter's
+reader and the router feed it transitions, and the second-game guard, the halted-game refusal and
+`SessionFacts` read it, so no two of them can disagree.
+
+**Project sync** — what the editor and the language server are told after a file changed on disk.
+Every write path reports the change to `src-tauri/src/project_sync.rs`, which decides the rescan and
+the reparse. A `.gd` is rescanned too: `didSave` reloads a script but never registers its
+`class_name`. Which commands reparse is `reparsesScripts` in `commands.json`.
+
 **Epoch** — a counter that says which run, or which opened scene, a reading came from. A node path
 means one node in the scene the editor had open when it was clicked and another in the next one, so
 a chosen node carries the epoch that makes its path mean something.
@@ -175,6 +195,15 @@ and it is deleted. What is left in Rust is `tool_check.rs`, which refuses by nam
 nothing. `fixtures/tool-call-repairs.json` is one row per repair naming which engine owns it —
 `worker` or `schema` — and the suites compute that rather than read it, by asking pi-ai's own
 validator whether the schema would have let the raw shape through.
+
+**Read ledger** — what the agent last saw of each file and scene, and the guard that refuses a write
+over a copy it never read. `src-tauri/src/read_ledger.rs` owns the rules as well as the record: the
+router passes each call through it, and the editor is a port it sends to, so the hash and revision
+arithmetic is tested over a temporary root.
+
+**Toolbelt** — the file tools a seat is handed, parent or sub-agent, built by one decorator stack in
+`scripts/toolbelt.mjs`. What differs between seats is named in its `SEATS` table; everything else,
+confinement and frozen paths included, is the same for both.
 
 **Secret** — a slot in the one keyring, and the thing a driver authenticates with. Which slot that
 is is one row of `protocol/drivers.json`: `driver_secret` in Rust, `AI_CONNECTION_SECRETS` and

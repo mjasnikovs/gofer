@@ -1,5 +1,5 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
-import {act, renderHook} from '@testing-library/react'
+import {act, cleanup, renderHook} from '@testing-library/react'
 import type {Channel} from '@tauri-apps/api/core'
 import {useScriptBuffers} from './useScriptBuffers'
 import type {FormatPreview, RenamePreview} from './useScriptBuffers'
@@ -142,6 +142,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+    cleanup()
     removeDesktopFake()
     setScheduler(timerScheduler)
     vi.clearAllMocks()

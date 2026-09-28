@@ -262,6 +262,7 @@ impl Board<'_> {
         replace_attachments(&transaction, &id, &card.attachments)?;
         let created = require_card(&transaction, &id)?;
         transaction.commit().map_err(database_error)?;
+        self.storage.announce(ProjectValue::Board);
         Ok(created)
     }
 
@@ -291,6 +292,7 @@ impl Board<'_> {
             .map_err(database_error)?;
         let moved = require_card(&transaction, card_id)?;
         transaction.commit().map_err(database_error)?;
+        self.storage.announce(ProjectValue::Board);
         Ok(moved)
     }
 
@@ -328,6 +330,7 @@ impl Board<'_> {
         }
         let edited = require_card(&transaction, card_id)?;
         transaction.commit().map_err(database_error)?;
+        self.storage.announce(ProjectValue::Board);
         Ok(edited)
     }
 
@@ -339,6 +342,7 @@ impl Board<'_> {
         connection
             .execute("DELETE FROM cards WHERE id = ?1", [card_id])
             .map_err(database_error)?;
+        self.storage.announce(ProjectValue::Board);
         Ok(())
     }
 
@@ -379,6 +383,7 @@ impl Board<'_> {
             )
             .map_err(database_error)?;
         transaction.commit().map_err(database_error)?;
+        self.storage.announce(ProjectValue::Board);
         Ok(CardComment {
             id,
             card_id: card_id.to_owned(),
@@ -416,6 +421,7 @@ impl Board<'_> {
             .map_err(database_error)?;
         let attached = require_card(&transaction, card_id)?;
         transaction.commit().map_err(database_error)?;
+        self.storage.announce(ProjectValue::Board);
         Ok(attached)
     }
 

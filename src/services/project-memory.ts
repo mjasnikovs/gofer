@@ -1,5 +1,5 @@
 import {Channel} from '@tauri-apps/api/core'
-import {invoke, listen} from './desktop'
+import {invoke, watchEvent} from './desktop'
 import {toCommandError} from '../utils/command-error'
 import type {CommandError} from '../models/errors'
 import type {AiStreamPayload} from '../models/chat'
@@ -43,8 +43,8 @@ export function judgeProjectMemory(
     )
 }
 
-export function watchMemoryJudge(handler: (event: MemoryJudgeEvent) => void): Promise<() => void> {
-    return listen('ai-memory-judge', event => {
+export function watchMemoryJudge(handler: (event: MemoryJudgeEvent) => void): () => void {
+    return watchEvent('ai-memory-judge', event => {
         if (isMemoryJudgeEvent(event.payload)) handler(event.payload)
     })
 }
@@ -57,8 +57,8 @@ export function sweepProjectMemory(
     )
 }
 
-export function watchMemorySweep(handler: (event: MemorySweepEvent) => void): Promise<() => void> {
-    return listen('ai-memory-sweep', event => {
+export function watchMemorySweep(handler: (event: MemorySweepEvent) => void): () => void {
+    return watchEvent('ai-memory-sweep', event => {
         if (isMemorySweepEvent(event.payload)) handler(event.payload)
     })
 }

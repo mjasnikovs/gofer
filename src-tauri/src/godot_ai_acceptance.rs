@@ -789,7 +789,7 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
 /// state this one refuses to start from.
 /// A frame-awaiting runtime call against a game the debugger has stopped is refused, not waited out.
 ///
-/// The end of what `godot_session::a_game_the_debugger_has_halted` promises: the flag is set by a
+/// The end of what `session_diagnosis::a_game_the_debugger_has_halted` promises: the flag is set by a
 /// real adapter's `stopped` event (`godot_dap_acceptance`), the decision is unit-tested
 /// (`godot_session::tests`), and this is the two lines in `run_one` between them — on a real editor,
 /// a real debuggee and the real router.
@@ -852,7 +852,7 @@ fn a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits() {
     )
     .expect("the debugger launches the probe");
     assert_eq!(
-        crate::debug::armed_breakpoints(),
+        crate::game_run::now().armed_files(),
         vec![PROBE_PATH.to_owned()],
         "a launch that sets a breakpoint has to be remembered as having set one"
     );
@@ -966,7 +966,7 @@ fn a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits() {
 
     let _ = call("godot_debug", json!({"ops": [{"op": "terminate"}]}));
     assert_eq!(
-        crate::debug::armed_breakpoints(),
+        crate::game_run::now().armed_files(),
         vec![PROBE_PATH.to_owned()]
     );
 
@@ -983,7 +983,7 @@ fn a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits() {
         "a restart carries the breakpoints of the launch before it: {again}"
     );
     assert!(
-        crate::debug::holds_a_game(),
+        crate::game_run::now().debugger_holds_a_game(),
         "the old game's end, written before the restart was answered, is not the new game's"
     );
     let _ = call("godot_debug", json!({"ops": [{"op": "terminate"}]}));
@@ -993,7 +993,7 @@ fn a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits() {
         json!({"ops": [{"op": "set_breakpoints", "path": PROBE_PATH, "lines": []}]}),
     )
     .expect("clear the breakpoint");
-    assert!(crate::debug::armed_breakpoints().is_empty());
+    assert!(crate::game_run::now().armed_files().is_empty());
 
     // Last, because it ends the session every call above needed.
     call(
@@ -1002,7 +1002,7 @@ fn a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits() {
     )
     .expect("let go of the adapter");
     assert!(
-        !crate::debug::holds_a_game(),
+        !crate::game_run::now().debugger_holds_a_game(),
         "a disconnect that terminates the debuggee leaves no game behind"
     );
 }
@@ -2368,7 +2368,7 @@ fn a_handler_the_editor_cannot_compile_says_so_rather_than_blaming_the_script() 
 /// typing on, a warning like that is an error and the script does not load.
 ///
 /// Measured before it was changed: reopening the dependent script does not fix it, and neither
-/// does a whole-project `rescan` with no path. Naming the file does. See `told_the_editor_about`.
+/// does a whole-project `rescan` with no path. Naming the file does. See `project_sync`.
 #[test]
 fn a_class_name_written_this_session_is_a_type_the_next_script_can_use() {
     let session = start_session();
@@ -2425,6 +2425,60 @@ fn a_class_name_written_this_session_is_a_type_the_next_script_can_use() {
         complaints(&asked["ops"][0]["result"]["files"][0]).is_empty(),
         "{asked}"
     );
+}
+
+/// The same, saved from Gofer's own script editor rather than by the agent.
+///
+/// The renderer's save skipped the rescan for every `.gd`, on the belief that `didSave` registers
+/// a script; the measurement above says it does not register a `class_name`.
+#[test]
+fn a_class_name_saved_from_the_script_editor_is_a_type_the_next_script_can_use() {
+    let session = start_session();
+    std::fs::create_dir_all(session.worktree.join("scripts")).expect("create scripts");
+    let save = |path: &str, text: &str| {
+        crate::script::save_document(crate::script::SaveScriptRequest {
+            path: path.to_owned(),
+            text: text.to_owned(),
+            expected_hash: None,
+        })
+        .unwrap_or_else(|failure| panic!("{path}: {} {}", failure.code, failure.message))
+    };
+    let published = crate::script::published_diagnostics().expect("the language server answers");
+    save(
+        "scripts/coin.gd",
+        "class_name Coin\nextends Area2D\n\n\nfunc value() -> int:\n\treturn 1\n",
+    );
+    save(
+        "scripts/holder.gd",
+        "extends Node\n\nvar held: Coin = null\n",
+    );
+
+    // The save answers before the rescan does; once it registers Coin, holder.gd is parsed again.
+    let ceiling = std::time::Duration::from_millis(
+        crate::godot_rpc::DEFAULT_REQUEST_TIMEOUT_MS + crate::script::DEFAULT_DIAGNOSTICS_WAIT_MS,
+    );
+    let deadline = std::time::Instant::now() + ceiling;
+    let mut last = Vec::new();
+    loop {
+        let publication = published
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .unwrap_or_else(|_| {
+                panic!(
+                    "a class saved a moment ago must be a type the next script can name: {last:?}"
+                )
+            });
+        if !publication.uri.path().ends_with("/scripts/holder.gd") {
+            continue;
+        }
+        if publication.diagnostics.is_empty() {
+            break;
+        }
+        last = publication
+            .diagnostics
+            .into_iter()
+            .map(|one| one.message)
+            .collect();
+    }
 }
 
 #[test]
@@ -2603,7 +2657,7 @@ fn a_run_after_a_terminated_debug_game_does_not_inherit_its_breakpoint() {
     .expect("the first stop");
     call("godot_debug", json!({"ops": [{"op": "terminate"}]})).expect("terminate");
     assert_eq!(
-        crate::debug::armed_breakpoints(),
+        crate::game_run::now().armed_files(),
         vec![PROBE_PATH.to_owned()],
         "Gofer's own record outlives the game, for the next launch to re-send"
     );

@@ -30,13 +30,14 @@
 //! prevents cdylib/staticlib builds from treating them as dead code until those commands land.
 #![allow(dead_code)]
 
+use crate::game_run::{Halt, Transition};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::path::Path;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
@@ -1084,66 +1085,17 @@ fn read_loop(
     }
 }
 
-/// Whether the debuggee is halted right now, as the adapter's own events report it.
-///
-/// A game stopped at a breakpoint is not a slow game: the process is halted, so every call that
-/// needs it to draw a frame waits its whole deadline and comes back
-/// `runtime_timeout: The game did not answer in time`. Counted across every recorded live trace:
-/// **21 such calls, 20 seconds each, 420 seconds** — one seventh of all the time every tool call in
-/// the corpus took, spent in one percent of them, waiting for an answer that could not come.
-/// `R01-backwards` spent eight of those in a row against a breakpoint it had set itself.
-///
-/// [`crate::debug::holds_a_game`] already says the debugger started this game, which is what the
-/// refusal's sentence is written from. It does not say the game is halted *this instant*, and that
-/// is the fact worth having: a game the debugger launched and let run answers a frame like any
-/// other.
-///
-/// Maintained here rather than in `debug.rs` because [`dispatch`] is the one place every adapter
-/// event passes through. `debug.rs` reads events only while something is waiting for a stop, so a
-/// `stopped` that arrives with nobody waiting sits in a queue and would be seen late or not at all.
-static DEBUGGEE_STATE: AtomicU8 = AtomicU8::new(DEBUGGEE_RUNNING);
-
-const DEBUGGEE_RUNNING: u8 = 0;
-/// Halted inside a script: a breakpoint, a step, an exception — there is a frame to read.
-const DEBUGGEE_IN_A_FRAME: u8 = 1;
-/// Halted by a pause, which stops the game between frames and leaves none to read.
-const DEBUGGEE_PAUSED: u8 = 2;
-/// Halted at a breakpoint: in a frame, and where someone asked it to stop.
-const DEBUGGEE_AT_A_BREAKPOINT: u8 = 3;
-
 /// No request is waiting to start a run. Request sequence numbers start at 1, so zero is free.
 const NO_BOUNDARY: u64 = 0;
 
-/// Whether the debuggee is halted, as far as the adapter's events have said.
-pub fn debuggee_is_stopped() -> bool {
-    DEBUGGEE_STATE.load(Ordering::Relaxed) != DEBUGGEE_RUNNING
-}
-
-/// Whether the halt is a pause, which leaves no frame: measured on 4.7.2, `stackTrace` answers
-/// `[]` after one and every `evaluate` waits out its timeout. The reason at a pause is `paused`,
-/// and Godot echoes an empty `exception` behind it — see [`StoppedDetails::is_a_pauses_echo`].
-pub fn debuggee_is_paused() -> bool {
-    DEBUGGEE_STATE.load(Ordering::Relaxed) == DEBUGGEE_PAUSED
-}
-
-/// Whether the halt is a breakpoint rather than an error, a step or a pause.
-pub fn debuggee_is_at_a_breakpoint() -> bool {
-    DEBUGGEE_STATE.load(Ordering::Relaxed) == DEBUGGEE_AT_A_BREAKPOINT
-}
-
-/// Records that the debuggee is running again.
-///
-/// Called on the adapter's own `continued`, `terminated` and `exited` events, and on every request
-/// this client writes that resumes the game. Both, deliberately: Godot 4.7 does send `continued`,
-/// and a build that stopped would otherwise leave the flag stuck at halted — which is the one
-/// failure mode this must not have, because it would refuse a call that could have been answered.
-/// Clearing twice costs nothing; clearing never costs a working call.
-pub(crate) fn note_the_debuggee_is_running() {
-    DEBUGGEE_STATE.store(DEBUGGEE_RUNNING, Ordering::Relaxed);
+/// Records that the game runs again, on every request that resumes it as well as on `continued`:
+/// a stuck halt would refuse a call that could have been answered, and clearing twice costs nothing.
+fn note_the_debuggee_is_running() {
+    crate::game_run::note(Transition::Resumed);
 }
 
 /// Which halt a `stopped` event announces, read the way [`StoppedDetails`] reads it.
-fn how_the_debuggee_halted(body: Option<&Value>) -> u8 {
+fn how_the_debuggee_halted(body: Option<&Value>) -> Halt {
     let reason = body
         .and_then(|body| body.get("reason"))
         .and_then(Value::as_str)
@@ -1153,11 +1105,11 @@ fn how_the_debuggee_halted(body: Option<&Value>) -> u8 {
         .and_then(Value::as_str)
         .unwrap_or_default();
     if reason == "paused" || (reason == "exception" && text.is_empty()) {
-        DEBUGGEE_PAUSED
+        Halt::Paused
     } else if reason == "breakpoint" {
-        DEBUGGEE_AT_A_BREAKPOINT
+        Halt::AtABreakpoint
     } else {
-        DEBUGGEE_IN_A_FRAME
+        Halt::InAFrame
     }
 }
 
@@ -1195,19 +1147,16 @@ fn dispatch(shared: &Arc<Mutex<Shared>>, next_seq: &AtomicU64, marks: &Marks, me
                     // A stop is proof the new debuggee exists, for an adapter that answers the
                     // request that started it later than that.
                     open_the_run_that_is_already_stopped(&marks.run, &marks.run_boundary);
-                    DEBUGGEE_STATE.store(
-                        how_the_debuggee_halted(message.get("body")),
-                        Ordering::Relaxed,
-                    );
+                    // Noted here, where every event passes, not where a wait drains the queue.
+                    crate::game_run::note(Transition::Halted(how_the_debuggee_halted(
+                        message.get("body"),
+                    )));
                 }
                 "continued" => note_the_debuggee_is_running(),
-                "terminated" | "exited" => {
-                    note_the_debuggee_is_running();
-                    // While a launch or restart is unanswered, this is the old game ending.
-                    if marks.run_boundary.load(Ordering::Relaxed) == NO_BOUNDARY {
-                        crate::debug::note_the_game_is_gone();
-                    }
-                }
+                "terminated" | "exited" => crate::game_run::note(Transition::DebuggeeEnded {
+                    while_a_launch_is_unanswered: marks.run_boundary.load(Ordering::Relaxed)
+                        != NO_BOUNDARY,
+                }),
                 _ => {}
             }
             let event = DapEvent {
@@ -1338,31 +1287,29 @@ pub(crate) mod tests {
     /// A pause and its empty exception echo leave no frame; every other stop is inside one.
     #[test]
     fn a_pause_and_its_echo_are_told_apart_from_a_stop_in_a_frame() {
-        use super::{
-            DEBUGGEE_AT_A_BREAKPOINT, DEBUGGEE_IN_A_FRAME, DEBUGGEE_PAUSED, how_the_debuggee_halted,
-        };
+        use super::{Halt, how_the_debuggee_halted};
         let halted = |body: serde_json::Value| how_the_debuggee_halted(Some(&body));
         assert_eq!(
             halted(serde_json::json!({"reason": "paused"})),
-            DEBUGGEE_PAUSED
+            Halt::Paused
         );
         assert_eq!(
             halted(serde_json::json!({"reason": "exception", "text": ""})),
-            DEBUGGEE_PAUSED
+            Halt::Paused
         );
         assert_eq!(
             halted(serde_json::json!({"reason": "exception", "text": "Invalid call"})),
-            DEBUGGEE_IN_A_FRAME
+            Halt::InAFrame
         );
         assert_eq!(
             halted(serde_json::json!({"reason": "breakpoint"})),
-            DEBUGGEE_AT_A_BREAKPOINT
+            Halt::AtABreakpoint
         );
         assert_eq!(
             halted(serde_json::json!({"reason": "step"})),
-            DEBUGGEE_IN_A_FRAME
+            Halt::InAFrame
         );
-        assert_eq!(how_the_debuggee_halted(None), DEBUGGEE_IN_A_FRAME);
+        assert_eq!(how_the_debuggee_halted(None), Halt::InAFrame);
     }
 
     use super::*;

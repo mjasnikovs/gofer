@@ -6,7 +6,7 @@ import {HStack, VStack} from '@astryxdesign/core/Stack'
 import {Heading, Text} from '@astryxdesign/core/Text'
 import ShieldCheckIcon from '@heroicons/react/24/outline/ShieldCheckIcon'
 import {invoke} from '../../services/desktop'
-import type {GodotSettings} from '../../models/settings'
+import type {GodotSettings, SettingsResponse} from '../../models/settings'
 import {SETTINGS_GRID_COLUMNS, settingsBanner} from './settings-view'
 import type {SettingsTabView, SettingsView} from './settings-view'
 
@@ -19,16 +19,28 @@ export function useGodotTab(view: SettingsView): SettingsTabView {
         const previous = draft?.godot
         if (!previous) return
         dispatch({type: 'godot-changed', update})
+        let saved: SettingsResponse | undefined
         await run('savingGodot', 'Godot rules could not be saved', async () => {
             try {
                 const response = await invoke('save_godot_settings', {
                     godot: {...previous, ...update}
                 })
                 dispatch({type: 'godot-saved', response})
+                saved = response
             } catch (error) {
                 dispatch({type: 'godot-changed', update: previous})
                 throw error
             }
+        })
+        if (
+            saved === undefined
+            || update.strictTyping === undefined
+            || update.strictTyping === previous.strictTyping
+        )
+            return
+        // The shipped prompt carries a line for strict typing, so the Prompt tab's copy is now stale.
+        await run('savingGodot', 'The agent prompt could not be read again', async () => {
+            dispatch({type: 'prompt-reloaded', prompt: await invoke('read_agent_prompt')})
         })
     }
 

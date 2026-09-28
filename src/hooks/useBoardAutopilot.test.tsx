@@ -39,7 +39,6 @@ function card(overrides: Partial<Card> = {}): Card {
 const SECOND = card({id: 'card-2', number: 2, title: 'Fix the ladder'})
 
 let server: Backend
-let boardChanged: (() => void) | undefined
 const openTask = vi.fn()
 
 function Driver() {
@@ -55,13 +54,6 @@ function Driver() {
 
 function start(rows: readonly Card[], answers: BackendAnswers = {}) {
     server = installBackend(tauri, {cards: rows, tasks: [], answers})
-    tauri.listen.mockImplementation(async (name, handler) => {
-        if (name === 'board-changed')
-            boardChanged = () => {
-                handler({payload: undefined as never})
-            }
-        return () => undefined
-    })
     render(<Driver />)
     startAutopilot()
 }
@@ -102,7 +94,6 @@ afterEach(() => {
     clearTurnActivity()
     tauri.invoke.mockReset()
     openTask.mockReset()
-    boardChanged = undefined
 })
 
 describe('auto mode', () => {
@@ -294,7 +285,7 @@ describe('auto mode', () => {
         await flush()
         expect(autopilotState()).toMatchObject({phase: 'merging', refused: true, detail: 'busy'})
 
-        boardChanged?.()
+        server.publishProjectChange('board')
         await flushUntil(stopped)
         expect(merges).toBe(2)
         expect(autopilotState().stop).toBe('ready-empty')
@@ -376,7 +367,7 @@ describe('auto mode', () => {
         start([card()])
         await flushUntil(() => autopilotState().phase === 'opening')
         openTask.mockReset()
-        boardChanged?.()
+        server.publishProjectChange('board')
         await flush()
         expect(openTask).toHaveBeenCalledWith('task-1')
     })

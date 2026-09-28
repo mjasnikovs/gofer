@@ -8,8 +8,8 @@ import {
     settleRunningTools,
     settleStoredChat,
     settleStreaming,
+    turnActivity,
     withFallbackText,
-    withoutActivity,
     withoutStatus
 } from '../models/chat-timeline'
 import type {
@@ -37,6 +37,8 @@ export type TurnState = Readonly<{
     handBack: readonly string[]
     taskId?: string | undefined
     isStreaming: boolean
+    // Only while isStreaming. It lives on no message, so nothing stored can keep it.
+    activity?: string | undefined
     error?: string
 }>
 
@@ -149,7 +151,7 @@ export function createTurnRunner({send, cancel, steer, compact}: TurnDependencie
     }
 
     const settle = (message: Message) =>
-        withoutActivity(settleStreaming(settleRunningTools(message, UNFINISHED_TOOL_REASON)))
+        settleStreaming(settleRunningTools(message, UNFINISHED_TOOL_REASON))
 
     const cleared = (state: TurnState): TurnState => {
         if (state.error === undefined) return state
@@ -209,7 +211,7 @@ export function createTurnRunner({send, cancel, steer, compact}: TurnDependencie
             const replacing =
                 isUnanswered(answering) ?
                     [promoted, answering]
-                :   [withoutActivity(settleStreaming(answering)), promoted, streamingAssistant()]
+                :   [settleStreaming(answering), promoted, streamingAssistant()]
             publish({
                 ...current,
                 messages: [...rest.slice(0, at), ...replacing, ...rest.slice(at + 1)],
@@ -229,6 +231,8 @@ export function createTurnRunner({send, cancel, steer, compact}: TurnDependencie
             if (event.type === 'turn-state' || event.type === 'done') {
                 publish({...current, agentMessages: event.agentMessages})
             }
+            // amend delivers straight after, so this rides on its notification.
+            current = {...current, activity: turnActivity(current.activity, event)}
             const isProseDelta = event.type === 'text-delta' || event.type === 'thinking-delta'
             amend(
                 assistantId,
@@ -273,7 +277,7 @@ export function createTurnRunner({send, cancel, steer, compact}: TurnDependencie
                 if (activeRequestId === requestId) activeRequestId = undefined
                 for (const left of current.queued.filter(one => one.requestId === requestId))
                     drop(left.steerId)
-                publish({...current, isStreaming: false})
+                publish({...current, isStreaming: false, activity: undefined})
             }
         }
         void attempt()

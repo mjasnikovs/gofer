@@ -199,6 +199,9 @@ impl Tasks<'_> {
             }
             transaction.commit().map_err(database_error)?;
         }
+        // The task's cards went back to the board and its memories went with it.
+        self.storage.announce(ProjectValue::Board);
+        self.storage.announce(ProjectValue::Memories);
         if let Some(branch_name) = branch {
             let base = self.storage.base_branch()?;
             git::discard_task_branch(&self.storage.workspace_path, &branch_name, &base).map_err(
@@ -341,6 +344,7 @@ impl Tasks<'_> {
         switch.onto(&branch_name)?;
         let conflicts =
             git::resolve_task_conflicts(&self.storage.workspace_path, &branch_name, &base)?;
+        self.storage.announce(ProjectValue::Changes);
         Ok(ResolveTaskResult {
             task_id: task_id.to_owned(),
             conflicts,
@@ -356,7 +360,9 @@ impl Tasks<'_> {
     fn abandon_record(&self, task_id: &str) -> Result<(), CommandError> {
         let _checkout = self.storage.claim_checkout()?;
         self.branch_of_the_open_task(task_id)?;
-        Ok(git::abandon_task_conflicts(&self.storage.workspace_path)?)
+        git::abandon_task_conflicts(&self.storage.workspace_path)?;
+        self.storage.announce(ProjectValue::Changes);
+        Ok(())
     }
 
     /// reaches them anyway.
@@ -521,6 +527,8 @@ impl Tasks<'_> {
             .map_err(database_error)?;
         super::board::finish_cards_of_task(&transaction, task_id)?;
         transaction.commit().map_err(database_error)?;
+        self.storage.announce(ProjectValue::Changes);
+        self.storage.announce(ProjectValue::Board);
         Ok(MergeTaskResult {
             task_id: task_id.to_owned(),
             head_commit: merged.head_commit,

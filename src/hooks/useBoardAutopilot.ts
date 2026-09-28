@@ -9,7 +9,8 @@ import {
     watchAutopilot
 } from '../services/board-autopilot'
 import type {Autopilot, AutopilotCard} from '../services/board-autopilot'
-import {listCards, postCardToGofer, watchBoard} from '../services/board'
+import {listCards, postCardToGofer} from '../services/board'
+import {watchProjectChange} from '../services/project-changes'
 import {
     isTaskOperationRunning,
     listPendingChanges,
@@ -63,15 +64,14 @@ export function useBoardAutopilot(deps: AutopilotDeps) {
                     if (next !== state && !next.refused) tick()
                 })
         }
-        const stops = [watchAutopilot(tick), watchTurn(tick), watchTaskOperation(tick)]
-        let cancelled = false
-        void watchBoard(tick).then(unlisten => {
-            if (cancelled) unlisten()
-            else stops.push(unlisten)
-        })
+        const stops = [
+            watchAutopilot(tick),
+            watchTurn(tick),
+            watchTaskOperation(tick),
+            watchProjectChange('board', tick)
+        ]
         tick()
         return () => {
-            cancelled = true
             for (const stop of stops) stop()
         }
     }, [])

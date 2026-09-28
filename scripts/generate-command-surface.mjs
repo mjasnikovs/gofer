@@ -196,7 +196,7 @@ async function catalogue() {
         return {file, source: sources.get(file)}
     }
     return await Promise.all(
-        commands.map(async ({command, handler, module, params, result}) => {
+        commands.map(async ({command, handler, module, params, result, reparsesScripts}) => {
             const {file, source} = await sourceOf(module)
             const declared = module ? 'static func' : 'func'
             const signature = source.match(
@@ -206,12 +206,17 @@ async function catalogue() {
                 throw new Error(
                     `${path} binds ${command} to ${handler}, which ${file} does not define`
                 )
+            if (reparsesScripts !== undefined && reparsesScripts !== true)
+                throw new Error(
+                    `${path} marks ${command} reparsesScripts ${reparsesScripts}; leave it out instead`
+                )
             return {
                 command,
                 handler,
                 module,
                 params,
                 result,
+                reparsesScripts: reparsesScripts === true,
                 takesParams: signature.trim().length > 0
             }
         })
@@ -437,6 +442,13 @@ function gdRuntimeCommands(names) {
 
 function rustMutating(names) {
     return `pub const MUTATING_COMMANDS: [&str; ${names.length}] = [\n${names
+        .map(name => `    "${name}",\n`)
+        .join('')}];\n`
+}
+
+function rustReparsing(commands) {
+    const names = commands.filter(entry => entry.reparsesScripts).map(entry => entry.command)
+    return `pub(crate) const REPARSING_COMMANDS: [&str; ${names.length}] = [\n${names
         .map(name => `    "${name}",\n`)
         .join('')}];\n`
 }
@@ -1137,6 +1149,12 @@ export async function generateSurfaces() {
             path: 'src-tauri/src/protocol_v2.rs',
             comment: '//',
             regions: [{name: 'mutating-commands', body: rustMutating(mutating)}]
+        },
+        {
+            path: 'src-tauri/src/project_sync.rs',
+            comment: '//',
+            rustfmt: true,
+            regions: [{name: 'reparsing-commands', body: rustReparsing(commands)}]
         },
         {
             path: 'src-tauri/src/tool_params.rs',

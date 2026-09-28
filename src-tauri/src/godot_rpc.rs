@@ -31,7 +31,7 @@ const CANCEL_ID_PREFIX: &str = "cancel-";
 /// A cancellation is fire-and-forget, so this only bounds how long the addon may hold it.
 const CANCEL_TIMEOUT_MS: u64 = 5_000;
 const CONNECT_TIMEOUT_MS: u64 = 30_000;
-const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 60_000;
+pub(crate) const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 60_000;
 const MAX_RECONNECT_ATTEMPTS: usize = 3;
 const RECONNECT_BACKOFF_MS: u64 = 500;
 /// How often the accept loop looks up from the socket to check the deadline and the stop signal.

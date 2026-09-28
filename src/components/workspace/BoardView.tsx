@@ -1,4 +1,4 @@
-import {useCallback, useEffect, useRef, useState, useSyncExternalStore} from 'react'
+import {useEffect, useRef, useState, useSyncExternalStore} from 'react'
 import type {KeyboardEvent, ReactNode} from 'react'
 import {Banner} from '@astryxdesign/core/Banner'
 import {Button} from '@astryxdesign/core/Button'
@@ -24,14 +24,12 @@ import {
     createCard,
     deleteCard,
     editCard,
-    listCards,
     moveCard,
     postCardToGofer,
     readCard,
     readCardTemplate,
     storeCardAttachments,
-    toBoardError,
-    watchBoard
+    toBoardError
 } from '../../services/board'
 import {isTauri} from '../../services/desktop'
 import {
@@ -47,6 +45,7 @@ import type {Card, CardDetail, CardStatus} from '../../models/board'
 import type {CommandError} from '../../models/errors'
 import type {PendingChange} from '../../models/app'
 import {useAttachmentPool} from '../../hooks/useAttachmentPool'
+import {useProjectValue} from '../../hooks/useProjectValue'
 import type {AttachmentPool} from '../../hooks/useAttachmentPool'
 import {useFileMentionTrigger} from '../../hooks/useFileMentionTrigger'
 import {useOpenCenterTab} from '../../hooks/useCenterTab'
@@ -66,54 +65,14 @@ const STATUS_OPTIONS = CARD_STATUSES.map(status => ({
 }))
 
 export function BoardView() {
-    const [cards, setCards] = useState<readonly Card[]>()
+    const read = useProjectValue('board')
     const [template, setTemplate] = useState('')
-    const [error, setError] = useState<CommandError>()
-    const [isLoading, setIsLoading] = useState(true)
-    const [reads, setReads] = useState(0)
+    const [templateError, setTemplateError] = useState<CommandError>()
     const [openId, setOpenId] = useState<string>()
     const [isAdding, setIsAdding] = useState(false)
+    const error = read.failure === undefined ? undefined : toBoardError(read.failure)
 
-    const refresh = useCallback(() => {
-        setReads(count => count + 1)
-    }, [])
-
-    useEffect(() => {
-        let cancelled = false
-        void Promise.all([listCards(), readCardTemplate()])
-            .then(([rows, starter]) => {
-                if (cancelled) return
-                setCards(rows)
-                setTemplate(starter.template)
-                setError(undefined)
-            })
-            .catch((failure: unknown) => {
-                if (cancelled) return
-                setError(toBoardError(failure))
-                setCards(undefined)
-            })
-            .finally(() => {
-                if (!cancelled) setIsLoading(false)
-            })
-        return () => {
-            cancelled = true
-        }
-    }, [reads])
-
-    useEffect(() => {
-        let stop: (() => void) | undefined
-        let cancelled = false
-        void watchBoard(refresh).then(unlisten => {
-            if (cancelled) unlisten()
-            else stop = unlisten
-        })
-        return () => {
-            cancelled = true
-            stop?.()
-        }
-    }, [refresh])
-
-    const all = cards ?? []
+    const all = read.value ?? []
     const autopilot = useSyncExternalStore(watchAutopilot, autopilotState, autopilotState)
     const autoStatus = autopilotStatus(autopilot)
 
@@ -166,11 +125,25 @@ export function BoardView() {
                             size='sm'
                         />
                     }
-                    clickAction={() => {
-                        setIsAdding(true)
+                    clickAction={async () => {
+                        try {
+                            setTemplate((await readCardTemplate()).template)
+                            setTemplateError(undefined)
+                            setIsAdding(true)
+                        } catch (failure) {
+                            setTemplateError(toBoardError(failure))
+                        }
                     }}
                 />
             </HStack>
+            {templateError !== undefined && (
+                <Banner
+                    container='section'
+                    status='error'
+                    title='The card template could not be read'
+                    description={`${templateError.message} (${templateError.code})`}
+                />
+            )}
             <Divider />
             <StackItem
                 size='fill'
@@ -178,7 +151,7 @@ export function BoardView() {
             >
                 <PanelState
                     label='board'
-                    isLoading={isLoading}
+                    isLoading={read.isLoading}
                     error={error}
                     isEmpty={false}
                     emptyTitle='Nothing on the board'
@@ -197,11 +170,10 @@ export function BoardView() {
             {openId !== undefined && (
                 <CardDialog
                     id={openId}
-                    version={reads}
+                    board={read.value}
                     onClose={() => {
                         setOpenId(undefined)
                     }}
-                    onChanged={refresh}
                 />
             )}
             {isAdding && (
@@ -210,7 +182,6 @@ export function BoardView() {
                     onClose={() => {
                         setIsAdding(false)
                     }}
-                    onCreated={refresh}
                 />
             )}
         </VStack>
@@ -349,10 +320,9 @@ function CardFields({
 type NewCardDialogProps = Readonly<{
     template: string
     onClose: () => void
-    onCreated: () => void
 }>
 
-function NewCardDialog({template, onClose, onCreated}: NewCardDialogProps) {
+function NewCardDialog({template, onClose}: NewCardDialogProps) {
     const [title, setTitle] = useState('')
     const [body, setBody] = useState(template)
     const [failure, setFailure] = useState<string>()
@@ -364,7 +334,6 @@ function NewCardDialog({template, onClose, onCreated}: NewCardDialogProps) {
         try {
             const attachments = await storeCardAttachments(pictures.attachments, new Set())
             await createCard(title, body, 'backlog', attachments)
-            onCreated()
             onClose()
         } catch (error) {
             setFailure(toBoardError(error).message)
@@ -445,17 +414,16 @@ function NewCardDialog({template, onClose, onCreated}: NewCardDialogProps) {
 
 type CardDialogProps = Readonly<{
     id: string
-    /** Bumped by the board whenever anything changed, so an open card hears about it too. */
-    version: number
+    /** The board as last read: a fresh read means this card may have changed too. */
+    board: readonly Card[] | undefined
     onClose: () => void
-    onChanged: () => void
 }>
 
 function sameIds(left: readonly {id: string}[], right: readonly {id: string}[]): boolean {
     return left.length === right.length && left.every((one, index) => one.id === right[index]?.id)
 }
 
-function CardDialog({id, version, onClose, onChanged}: CardDialogProps) {
+function CardDialog({id, board, onClose}: CardDialogProps) {
     const openTask = useOpenTask()
     const openTab = useOpenCenterTab()
     const [detail, setDetail] = useState<CardDetail>()
@@ -490,14 +458,13 @@ function CardDialog({id, version, onClose, onChanged}: CardDialogProps) {
         return () => {
             cancelled = true
         }
-    }, [id, version, seededFor, restore])
+    }, [id, board, seededFor, restore])
 
     const act = async (work: () => Promise<unknown>) => {
         setIsBusy(true)
         setFailure(undefined)
         try {
             await work()
-            onChanged()
         } catch (error) {
             setFailure(toBoardError(error).message)
         } finally {
@@ -517,7 +484,6 @@ function CardDialog({id, version, onClose, onChanged}: CardDialogProps) {
         setFailure(undefined)
         try {
             await deleteCard(id)
-            onChanged()
             onClose()
         } catch (error) {
             setFailure(toBoardError(error).message)
@@ -531,7 +497,6 @@ function CardDialog({id, version, onClose, onChanged}: CardDialogProps) {
         setFailure(undefined)
         try {
             const chat = await postCardToGofer(id, bringChanges)
-            onChanged()
             onClose()
             openTab?.('chat')
             if (chat.taskId !== undefined && openTask) openTask(chat.taskId)

@@ -23,6 +23,7 @@ export function ChatColumn() {
         attachmentPreviews,
         isScrolledUp,
         isStreaming,
+        activity,
         messages,
         scrollRef,
         scrollToBottom,
@@ -80,6 +81,7 @@ export function ChatColumn() {
                     <ChatConversation
                         attachmentPreviews={attachmentPreviews}
                         isStreaming={isStreaming}
+                        activity={activity}
                         messages={messages}
                         scrollRef={scrollRef}
                         onRetry={retry}

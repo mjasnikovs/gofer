@@ -1,4 +1,4 @@
-import {useCallback, useEffect, useState} from 'react'
+import {useCallback, useState} from 'react'
 import PencilSquareIcon from '@heroicons/react/24/outline/PencilSquareIcon'
 import TrashIcon from '@heroicons/react/24/outline/TrashIcon'
 import {Banner} from '@astryxdesign/core/Banner'
@@ -24,46 +24,49 @@ import {
 import {toCommandError} from '../../utils/command-error'
 import type {CommandError} from '../../models/errors'
 import type {Skill, SkillsResponse} from '../../models/skills'
+import {useSourceValue} from '../../hooks/useProjectValue'
+import type {ValueSource} from '../../hooks/useProjectValue'
 import {PanelState} from './PanelState'
 import {SkillEditor} from './SkillEditor'
 
 type OpenSkill = Readonly<{name: string; text: string}>
 
+// Nothing inside Gofer writes the skills folder behind this view, so an edit to it came from another
+// program, and coming back to the window is when it can have happened.
+const SKILLS: ValueSource<SkillsResponse> = {
+    read: listSkills,
+    watch: changed => {
+        window.addEventListener('focus', changed)
+        return () => {
+            window.removeEventListener('focus', changed)
+        }
+    }
+}
+
 export function SkillsView() {
-    const [response, setResponse] = useState<SkillsResponse>()
-    const [error, setError] = useState<CommandError>()
-    const [isLoading, setIsLoading] = useState(true)
+    const read = useSourceValue(SKILLS)
+    const [writeError, setWriteError] = useState<CommandError>()
     const [open, setOpen] = useState<OpenSkill>()
     const [busy, setBusy] = useState<string>()
     const [deleting, setDeleting] = useState<Skill>()
+    const response = read.value
+    const error = read.failure === undefined ? writeError : toCommandError(read.failure)
+    const {changed} = read
 
-    const run = useCallback(async (work: () => Promise<SkillsResponse>) => {
-        try {
-            setResponse(await work())
-            setError(undefined)
-        } catch (failure: unknown) {
-            setError(toCommandError(failure))
-        }
-    }, [])
-
-    useEffect(() => {
-        let cancelled = false
-        void listSkills()
-            .then(answer => {
-                if (cancelled) return
-                setResponse(answer)
-                setError(undefined)
-            })
-            .catch((failure: unknown) => {
-                if (!cancelled) setError(toCommandError(failure))
-            })
-            .finally(() => {
-                if (!cancelled) setIsLoading(false)
-            })
-        return () => {
-            cancelled = true
-        }
-    }, [])
+    // A write answers with the folder, but a focus listing started before it can answer after it;
+    // asking once the write is done is what puts a read behind it.
+    const run = useCallback(
+        async (work: () => Promise<SkillsResponse>) => {
+            try {
+                await work()
+                setWriteError(undefined)
+                changed()
+            } catch (failure: unknown) {
+                setWriteError(toCommandError(failure))
+            }
+        },
+        [changed]
+    )
 
     const add = useCallback(
         async (folder: boolean) => {
@@ -86,9 +89,9 @@ export function SkillsView() {
         setBusy(name)
         try {
             setOpen({name, text: await readSkill(name)})
-            setError(undefined)
+            setWriteError(undefined)
         } catch (failure: unknown) {
-            setError(toCommandError(failure))
+            setWriteError(toCommandError(failure))
         } finally {
             setBusy(undefined)
         }
@@ -98,15 +101,16 @@ export function SkillsView() {
         if (!open) return
         setBusy(open.name)
         try {
-            setResponse(await writeSkill(open.name, open.text))
-            setError(undefined)
+            await writeSkill(open.name, open.text)
+            setWriteError(undefined)
+            changed()
             setOpen(undefined)
         } catch (failure: unknown) {
-            setError(toCommandError(failure))
+            setWriteError(toCommandError(failure))
         } finally {
             setBusy(undefined)
         }
-    }, [open])
+    }, [open, changed])
 
     if (open)
         return (
@@ -196,7 +200,7 @@ export function SkillsView() {
             >
                 <PanelState
                     label='skills'
-                    isLoading={isLoading}
+                    isLoading={read.isLoading}
                     {...(error
                         && !response && {
                             error: {code: error.code, message: error.message, retryable: false}
@@ -215,9 +219,9 @@ export function SkillsView() {
                                 status='error'
                                 title='That did not work'
                                 description={`${error.message} (${error.code})`}
-                                isDismissable
+                                isDismissable={read.failure === undefined}
                                 onDismiss={() => {
-                                    setError(undefined)
+                                    setWriteError(undefined)
                                 }}
                             />
                         )}

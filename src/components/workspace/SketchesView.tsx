@@ -8,24 +8,26 @@ import {SegmentedControl, SegmentedControlItem} from '@astryxdesign/core/Segment
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {Text} from '@astryxdesign/core/Text'
 import {Token} from '@astryxdesign/core/Token'
-import {
-    listProjectSketches,
-    readProjectSketch,
-    toSketchError
-} from '../../services/project-sketches'
+import {readProjectSketch, toSketchError} from '../../services/project-sketches'
+import {useProjectValue} from '../../hooks/useProjectValue'
 import {describeBlocked} from '../../services/sketch-regions'
 import {SKETCH_CANVAS, sketchMessage} from '../../models/sketch'
 import {useChatReferences} from '../../hooks/useChatReferences'
 import {PanelState} from './PanelState'
 import {SketchFrame} from './SketchFrame'
 import type {ProjectSketch, SketchHtml} from '../../models/sketch'
-import type {CommandError} from '../../models/errors'
 
 const PREVIEW_LENGTH = 110
 
 const SPARE = 300
 
 type SketchFilter = 'all' | 'approved'
+
+// A sketch is replaced under its own id when the agent keeps a new revision, so what was read for it
+// is only good for the row it was read under.
+function revisionOf(sketch: ProjectSketch): string {
+    return `${sketch.id}@${String(sketch.savedAt)}`
+}
 
 function preview(question: string): string {
     const line = question.replace(/\s+/gu, ' ').trim()
@@ -34,62 +36,40 @@ function preview(question: string): string {
 
 export function SketchesView() {
     const references = useChatReferences()
-    const [sketches, setSketches] = useState<readonly ProjectSketch[]>()
-    const [error, setError] = useState<CommandError>()
-    const [isLoading, setIsLoading] = useState(true)
+    const read = useProjectValue('sketches')
     const [filter, setFilter] = useState<SketchFilter>('all')
     const [openId, setOpenId] = useState<string>()
     const [html, setHtml] = useState<ReadonlyMap<string, SketchHtml>>(() => new Map())
-    const [readFailure, setReadFailure] = useState<{id: string; reason: string}>()
+    const [readFailure, setReadFailure] = useState<{revision: string; reason: string}>()
     const [blocked, setBlocked] = useState<readonly string[]>([])
     const [zoomed, setZoomed] = useState<ProjectSketch>()
-    const [reads, setReads] = useState(0)
-
+    const all = read.value ?? []
+    const opened = all.find(sketch => sketch.id === openId)
+    const openRevision = opened === undefined ? undefined : revisionOf(opened)
     useEffect(() => {
-        let cancelled = false
-        void listProjectSketches()
-            .then(rows => {
-                if (cancelled) return
-                setSketches(rows)
-                setError(undefined)
-            })
-            .catch((failure: unknown) => {
-                if (cancelled) return
-                setError(toSketchError(failure))
-                setSketches(undefined)
-            })
-            .finally(() => {
-                if (!cancelled) setIsLoading(false)
-            })
-        return () => {
-            cancelled = true
-        }
-    }, [reads])
-
-    useEffect(() => {
-        if (openId === undefined || html.has(openId)) return
+        if (openId === undefined || openRevision === undefined || html.has(openRevision)) return
         let cancelled = false
         void readProjectSketch(openId)
             .then(body => {
-                if (!cancelled) setHtml(previous => new Map(previous).set(openId, body))
+                if (!cancelled) setHtml(previous => new Map(previous).set(openRevision, body))
             })
             .catch((failure: unknown) => {
                 if (cancelled) return
                 const {message, code} = toSketchError(failure)
-                setReadFailure({id: openId, reason: `${message} (${code})`})
+                setReadFailure({revision: openRevision, reason: `${message} (${code})`})
             })
         return () => {
             cancelled = true
         }
-    }, [openId, html])
+    }, [openId, openRevision, html])
 
+    const {reload} = read
     const refresh = useCallback(() => {
-        setIsLoading(true)
         setHtml(new Map())
         setReadFailure(undefined)
         setBlocked([])
-        setReads(count => count + 1)
-    }, [])
+        reload()
+    }, [reload])
 
     const open = useCallback((value: string | string[]) => {
         const chosen = Array.isArray(value) ? value[0] : value
@@ -102,7 +82,6 @@ export function SketchesView() {
         setBlocked(previous => (previous.includes(uri) ? previous : [...previous, uri]))
     }, [])
 
-    const all = sketches ?? []
     const approved = all.filter(sketch => sketch.isApproved)
     const shown = filter === 'approved' ? approved : all
     const refused = describeBlocked(blocked)
@@ -145,7 +124,7 @@ export function SketchesView() {
                 <Button
                     label='Refresh'
                     size='sm'
-                    isDisabled={isLoading}
+                    isDisabled={read.isLoading}
                     clickAction={refresh}
                 />
             </HStack>
@@ -156,8 +135,8 @@ export function SketchesView() {
             >
                 <PanelState
                     label='saved sketches'
-                    isLoading={isLoading}
-                    error={error}
+                    isLoading={read.isLoading}
+                    error={read.failure === undefined ? undefined : toSketchError(read.failure)}
                     isEmpty={shown.length === 0}
                     emptyTitle={filter === 'approved' ? 'Nothing agreed yet' : 'No sketches yet'}
                     emptyDescription={
@@ -219,8 +198,10 @@ export function SketchesView() {
                                 {openId === sketch.id && (
                                     <SketchBody
                                         sketch={sketch}
-                                        {...(html.get(sketch.id) && {html: html.get(sketch.id)})}
-                                        {...(readFailure?.id === sketch.id && {
+                                        {...(html.get(revisionOf(sketch)) && {
+                                            html: html.get(revisionOf(sketch))
+                                        })}
+                                        {...(readFailure?.revision === revisionOf(sketch) && {
                                             failure: readFailure.reason
                                         })}
                                         refused={refused}
@@ -255,7 +236,7 @@ export function SketchesView() {
                         padding={4}
                     >
                         <SketchFrame
-                            html={html.get(zoomed.id)?.shown ?? ''}
+                            html={html.get(revisionOf(zoomed))?.shown ?? ''}
                             canvasSize={SKETCH_CANVAS}
                             spare={160}
                             onBlocked={noteBlocked}

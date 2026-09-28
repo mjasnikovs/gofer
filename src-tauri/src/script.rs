@@ -8,12 +8,11 @@
 //!
 //! Saving is deliberately two operations in one command: the workspace write is the authority for
 //! what is on disk, and `didSave` carries the document text because Godot reads `text` from those
-//! parameters. Godot's own `didSave` handler reloads the script and refreshes its exports, so only
-//! non-script files ask the addon to rescan.
+//! parameters. Every write is then told to [`crate::project_sync`], scripts included: `didSave`
+//! reloads a script and refreshes its exports, and never registers its `class_name`.
 
 use crate::files::{FileError, FileStamp, Workspace};
 use crate::godot_lsp::{self, LspClient, LspError, PlannedFile, WorkspaceSymbol};
-use crate::godot_rpc::CallRequest;
 use crate::godot_session;
 use lsp_types::{
     CompletionItem, CompletionResponse, Diagnostic, DocumentHighlight, DocumentSymbolResponse,
@@ -21,7 +20,6 @@ use lsp_types::{
     PublishDiagnosticsParams, Range, SignatureHelp, Url,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,9 +33,8 @@ const DIAGNOSTICS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// How long a diagnostics pull waits for the server's first publication for a document, and the
 /// ceiling a caller may ask for. Godot answers from the editor's main loop in 100 ms slices, so a
 /// freshly opened document is routinely a few slices ahead of its diagnostics.
-const DEFAULT_DIAGNOSTICS_WAIT_MS: u64 = 5_000;
+pub(crate) const DEFAULT_DIAGNOSTICS_WAIT_MS: u64 = 5_000;
 const MAX_DIAGNOSTICS_WAIT_MS: u64 = 30_000;
-const SCRIPT_EXTENSION: &str = ".gd";
 
 /// One open script buffer as the renderer first receives it.
 #[derive(Clone, Debug, Serialize)]
@@ -424,6 +421,7 @@ pub fn update_document(request: UpdateScriptRequest) -> Result<ScriptStamp, LspE
 /// the saved text. A file the renderer never opened is opened first, so the notification is legal.
 pub fn save_document(request: SaveScriptRequest) -> Result<ScriptStamp, LspError> {
     let saved = write_and_synchronize(request)?;
+    crate::project_sync::written_without_waiting(vec![saved.path.clone()]);
     Ok(ScriptStamp {
         path: saved.path,
         hash: Some(saved.hash),
@@ -468,7 +466,6 @@ fn write_and_synchronize(request: SaveScriptRequest) -> Result<SynchronizedSave,
         client.open_document(&uri, &request.text)?
     };
     client.save_document(&uri, &request.text)?;
-    request_rescan(&request.path);
     Ok(SynchronizedSave {
         path: request.path,
         uri,
@@ -503,7 +500,7 @@ pub fn save_outside_the_language_server(
             request.expected_hash.as_deref(),
         )
         .map_err(file_error)?;
-    request_rescan(&request.path);
+    written(std::slice::from_ref(&request.path));
     Ok(SavedScript {
         path: request.path,
         hash: stamp.hash,
@@ -543,21 +540,24 @@ pub fn edit_outside_the_language_server(
         return Err(refused_together(refusals));
     }
     let stamps = godot_lsp::commit_planned_edit(workspace, &planned)?;
+    written(
+        &stamps
+            .iter()
+            .map(|stamp| stamp.path.clone())
+            .collect::<Vec<_>>(),
+    );
     Ok(request
         .files
         .iter()
         .zip(stamps)
-        .map(|(file, stamp)| {
-            request_rescan(&stamp.path);
-            EditedScript {
-                path: stamp.path,
-                hash: stamp.hash,
-                bytes: stamp.bytes,
-                version: 0,
-                replaced: file.edits.len(),
-                diagnostics: Vec::new(),
-                published: false,
-            }
+        .map(|(file, stamp)| EditedScript {
+            path: stamp.path,
+            hash: stamp.hash,
+            bytes: stamp.bytes,
+            version: 0,
+            replaced: file.edits.len(),
+            diagnostics: Vec::new(),
+            published: false,
         })
         .collect())
 }
@@ -587,6 +587,7 @@ pub struct SavedScript {
 /// the caller's next question is always whether it parses.
 pub fn save_and_publish(request: SaveScriptRequest) -> Result<SavedScript, LspError> {
     let saved = write_and_synchronize(request)?;
+    written(std::slice::from_ref(&saved.path));
     published_save(
         saved,
         Duration::from_millis(DEFAULT_DIAGNOSTICS_WAIT_MS),
@@ -1052,18 +1053,21 @@ pub fn edit_documents(request: EditScriptRequest) -> Result<Vec<EditedScript>, L
         return Err(refused_together(refusals));
     }
     let stamps = godot_lsp::commit_planned_edit(&workspace, &planned)?;
-    let mut synchronized = Vec::with_capacity(planned.len());
-    for ((file, plan), stamp) in request.files.iter().zip(&planned).zip(stamps) {
-        let uri = godot_lsp::file_uri(&workspace, &plan.path)?;
-        let version = if client.is_open(&uri) {
-            client.change_document(&uri, &plan.updated_text)?
-        } else {
-            client.open_document(&uri, &plan.updated_text)?
-        };
-        client.save_document(&uri, &plan.updated_text)?;
-        request_rescan(&plan.path);
-        synchronized.push((uri, stamp, version, file.edits.len()));
-    }
+    let on_disk: Vec<String> = planned.iter().map(|plan| plan.path.clone()).collect();
+    let synchronized = reporting_written(&on_disk, written, || {
+        let mut synchronized = Vec::with_capacity(planned.len());
+        for ((file, plan), stamp) in request.files.iter().zip(&planned).zip(stamps) {
+            let uri = godot_lsp::file_uri(&workspace, &plan.path)?;
+            let version = if client.is_open(&uri) {
+                client.change_document(&uri, &plan.updated_text)?
+            } else {
+                client.open_document(&uri, &plan.updated_text)?
+            };
+            client.save_document(&uri, &plan.updated_text)?;
+            synchronized.push((uri, stamp, version, file.edits.len()));
+        }
+        Ok(synchronized)
+    })?;
     collect_published(
         synchronized,
         Duration::from_millis(DEFAULT_DIAGNOSTICS_WAIT_MS),
@@ -1361,25 +1365,27 @@ pub fn call(request: ScriptRequest) -> Result<ScriptResponse, LspError> {
 pub fn apply_rename(request: ApplyRenameRequest) -> Result<Vec<ScriptStamp>, LspError> {
     let (client, workspace) = connection()?;
     let stamps = godot_lsp::commit_planned_edit(&workspace, &request.files)?;
-    let mut result = Vec::with_capacity(stamps.len());
-    for (file, stamp) in request.files.iter().zip(stamps) {
-        let uri = godot_lsp::file_uri(&workspace, &file.path)?;
-        let version = if client.is_open(&uri) {
-            let version = client.change_document(&uri, &file.updated_text)?;
-            client.save_document(&uri, &file.updated_text)?;
-            version
-        } else {
-            0
-        };
-        request_rescan(&file.path);
-        result.push(ScriptStamp {
-            path: file.path.clone(),
-            hash: Some(stamp.hash),
-            bytes: Some(stamp.bytes),
-            version,
-        });
-    }
-    Ok(result)
+    let on_disk: Vec<String> = request.files.iter().map(|file| file.path.clone()).collect();
+    reporting_written(&on_disk, written, || {
+        let mut result = Vec::with_capacity(stamps.len());
+        for (file, stamp) in request.files.iter().zip(stamps) {
+            let uri = godot_lsp::file_uri(&workspace, &file.path)?;
+            let version = if client.is_open(&uri) {
+                let version = client.change_document(&uri, &file.updated_text)?;
+                client.save_document(&uri, &file.updated_text)?;
+                version
+            } else {
+                0
+            };
+            result.push(ScriptStamp {
+                path: file.path.clone(),
+                hash: Some(stamp.hash),
+                bytes: Some(stamp.bytes),
+                version,
+            });
+        }
+        Ok(result)
+    })
 }
 
 /// Streams published diagnostics until the renderer unsubscribes or the session ends.
@@ -1475,20 +1481,27 @@ fn active_session() -> Option<(u16, String)> {
     godot_session::current_info().map(|info| (info.lsp_port, info.worktree))
 }
 
-/// Godot's own `didSave` handler reloads a script and refreshes its exports, so only other
-/// resources need the editor filesystem told. Best effort: a save must not fail because the addon
-/// is busy importing.
-fn request_rescan(path: &str) {
-    if path.ends_with(SCRIPT_EXTENSION) {
-        return;
-    }
-    let Some(rpc) = godot_session::rpc_session() else {
-        return;
-    };
-    let _ = rpc.call(CallRequest::new(
-        "resource.rescan",
-        json!({"paths": [path]}),
-    ));
+fn written(paths: &[String]) {
+    crate::project_sync::changed(crate::project_sync::Change::Written(paths));
+}
+
+/// Runs what follows a write to disk and reports the written files whether or not it succeeded:
+/// a file the language server was never told about is still on disk for the editor to register.
+fn reporting_written<T>(
+    on_disk: &[String],
+    report: impl FnOnce(&[String]),
+    after: impl FnOnce() -> Result<T, LspError>,
+) -> Result<T, LspError> {
+    let outcome = after();
+    report(on_disk);
+    outcome
+}
+
+/// The language server's publications, for a test that waits on one rather than asking.
+#[cfg(all(test, feature = "godot-acceptance"))]
+pub(crate) fn published_diagnostics()
+-> Result<std::sync::mpsc::Receiver<PublishDiagnosticsParams>, LspError> {
+    Ok(connection()?.0.subscribe_diagnostics())
 }
 
 /// A rename plan, or the refusal an empty one has to be.
@@ -1601,6 +1614,7 @@ fn lock_poisoned() -> LspError {
 mod tests {
     use super::*;
     use lsp_types::{LocationLink, Position, Range, Url};
+    use serde_json::json;
     use std::fs;
 
     fn workspace(root: &std::path::Path) -> Workspace {
@@ -1619,6 +1633,22 @@ mod tests {
             old_text: old_text.to_owned(),
             new_text: new_text.to_owned(),
         }
+    }
+
+    /// `commit_planned_edit` wrote both files before the server was told about either, so a
+    /// failure on the second still leaves both on disk for the editor to register.
+    #[test]
+    fn every_file_on_disk_is_reported_when_the_server_fails_partway() {
+        let on_disk = ["scripts/coin.gd".to_owned(), "scripts/holder.gd".to_owned()];
+        let mut reported = Vec::new();
+        let failed = reporting_written(
+            &on_disk,
+            |paths| reported.extend_from_slice(paths),
+            || Err::<(), _>(LspError::new("document_not_open", "holder.gd")),
+        )
+        .expect_err("the server's failure is the caller's answer");
+        assert_eq!(failed.code, "document_not_open");
+        assert_eq!(reported, on_disk);
     }
 
     /// A silent server costs the batch one wait however many files are in it.

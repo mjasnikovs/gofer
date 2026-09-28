@@ -15,8 +15,11 @@ pub struct Memories<'a> {
 
 impl Memories<'_> {
     pub fn upsert(&self, request: &UpsertMemoryRequest) -> Result<MemoryRecord, CommandError> {
-        self.upsert_record(request)
-            .map_err(CommandError::or_coded("memory_not_saved"))
+        let record = self
+            .upsert_record(request)
+            .map_err(CommandError::or_coded("memory_not_saved"))?;
+        self.storage.announce(ProjectValue::Memories);
+        Ok(record)
     }
 
     fn upsert_record(&self, request: &UpsertMemoryRequest) -> Result<MemoryRecord, CommandError> {
@@ -266,7 +269,9 @@ impl Memories<'_> {
     /// pressed Delete on something the list showed them.
     pub fn delete(&self, id: &str) -> Result<(), CommandError> {
         self.delete_record(id)
-            .map_err(CommandError::or_coded("memory_not_deleted"))
+            .map_err(CommandError::or_coded("memory_not_deleted"))?;
+        self.storage.announce(ProjectValue::Memories);
+        Ok(())
     }
 
     fn delete_record(&self, id: &str) -> Result<(), CommandError> {

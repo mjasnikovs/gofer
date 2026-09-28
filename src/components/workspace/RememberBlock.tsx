@@ -5,8 +5,9 @@ import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {Text} from '@astryxdesign/core/Text'
 import {Token} from '@astryxdesign/core/Token'
 import {deleteProjectMemory, setMemoryStates} from '../../services/project-memory'
-import {forgetMemoryList, useRememberedFact} from '../../hooks/useRememberedFact'
+import {PROJECT_VALUES, useStoredValue} from '../../hooks/useProjectValue'
 import {isRetrievable} from '../../models/memory'
+import type {ProjectMemory} from '../../models/memory'
 import type {ToolActivity} from '../../models/chat'
 
 const REMEMBER_SURFACE = 'gofer-remember-surface'
@@ -29,7 +30,12 @@ function Line({children}: Readonly<{children: string}>) {
 // reopened. Nothing here blocks the turn: the memory is already filed as a candidate, and a
 // candidate is never given to another turn, so leaving the card alone is the same as saying no.
 export function RememberBlock({tool}: Readonly<{tool: ToolActivity}>) {
-    const {memory, isLoaded} = useRememberedFact(tool.id)
+    const pick = useCallback(
+        (rows: readonly ProjectMemory[] | undefined) =>
+            rows?.find(row => row.provenance['callId'] === tool.id),
+        [tool.id]
+    )
+    const {value: memory, isLoading} = useStoredValue(PROJECT_VALUES.memories, pick, sameFact)
     const [isSaving, setIsSaving] = useState(false)
 
     const keep = useCallback(() => {
@@ -39,7 +45,6 @@ export function RememberBlock({tool}: Readonly<{tool: ToolActivity}>) {
             .catch(() => undefined)
             .finally(() => {
                 setIsSaving(false)
-                forgetMemoryList()
             })
     }, [memory])
 
@@ -50,11 +55,10 @@ export function RememberBlock({tool}: Readonly<{tool: ToolActivity}>) {
             .catch(() => undefined)
             .finally(() => {
                 setIsSaving(false)
-                forgetMemoryList()
             })
     }, [memory])
 
-    if (!isLoaded) return null
+    if (isLoading) return null
 
     return (
         <Card
@@ -101,5 +105,15 @@ export function RememberBlock({tool}: Readonly<{tool: ToolActivity}>) {
                 }
             </VStack>
         </Card>
+    )
+}
+
+function sameFact(left: ProjectMemory | undefined, right: ProjectMemory | undefined): boolean {
+    if (!left || !right) return left === right
+    return (
+        left.id === right.id
+        && left.state === right.state
+        && left.kind === right.kind
+        && left.content === right.content
     )
 }

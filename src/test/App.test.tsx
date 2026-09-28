@@ -814,6 +814,46 @@ describe('Workspace', () => {
         expect(screen.queryByRole('status', {name: 'Working'})).not.toBeInTheDocument()
     })
 
+    it('stops saying it is trying again once the retry answers', async () => {
+        let endTurn: (() => void) | undefined
+        backend({
+            send_ai_message: async args => {
+                const stream = streamOf(args)
+                for (const event of [
+                    {
+                        type: 'retry-scheduled',
+                        attempt: 1,
+                        maxAttempts: 10,
+                        delayMs: 1_000,
+                        errorMessage: 'overloaded'
+                    },
+                    {type: 'retry-start', attempt: 1, maxAttempts: 10},
+                    {type: 'text-delta', delta: 'Hmm, mutating dict entries'}
+                ]) {
+                    stream.onmessage({requestId: 1, event})
+                }
+                await new Promise<void>(resolve => {
+                    endTurn = resolve
+                })
+            }
+        })
+        render(<Workspace />)
+
+        await flush()
+
+        await userEvent.type(
+            screen.getByRole('combobox', {name: 'Message input'}),
+            'Build the level{enter}'
+        )
+
+        expect(await screen.findByRole('status', {name: 'Working'})).toBeInTheDocument()
+        expect(screen.queryByText(/Trying again/)).not.toBeInTheDocument()
+
+        await act(async () => {
+            endTurn?.()
+        })
+    })
+
     it('lets a running call be its own indicator', async () => {
         backend({
             send_ai_message: async args => {

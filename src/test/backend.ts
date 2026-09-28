@@ -26,6 +26,7 @@ import type {MemoryEdit, MemoryState, ProjectMemory} from '../models/memory'
 import type {FileDiff, TaskChanges} from '../models/changes'
 import {NO_CHANGES} from '../models/changes'
 import type {ProjectSketch, SketchHtml} from '../models/sketch'
+import type {ProjectValue} from '../models/project-changes'
 import type {Card, CardComment, CardStatus, CardEdit, CardTemplate} from '../models/board'
 import type {Skill, SkillsResponse} from '../models/skills'
 import type {BriefRun} from '../models/brief'
@@ -103,6 +104,8 @@ export type Backend = Readonly<{
     state: BackendState
     log: BackendLog
     publishSessionState: (state: GodotSessionState) => void
+    /** What the project's storage says after a write nobody here made. */
+    publishProjectChange: (what: ProjectValue) => void
     publishSceneChanged: (scene: string) => void
     publishDiagnostics: (path: string, diagnostics: readonly unknown[]) => void
     publishFileChanges: (changes: readonly WorkspaceFileChange[]) => void
@@ -287,6 +290,25 @@ interface Channels {
 
 function skillsResponse(state: BackendState): SkillsResponse {
     return {skills: [...state.skills.values()].map(one => one.skill), warnings: []}
+}
+
+// What the project's storage announces on each write the fake answers, as the Ledger does.
+const LEDGER_WRITES: Partial<Record<DesktopCommand, readonly ProjectValue[]>> = {
+    save_project_memory: ['memories'],
+    delete_project_memory: ['memories'],
+    set_memory_states: ['memories'],
+    judge_project_memory: ['memories'],
+    sweep_project_memory: ['memories'],
+    card_create: ['board'],
+    card_move: ['board'],
+    card_edit: ['board'],
+    card_comment: ['board'],
+    card_delete: ['board'],
+    card_post_to_gofer: ['board'],
+    merge_task_branch: ['changes', 'board'],
+    resolve_task_merge: ['changes'],
+    abandon_task_merge: ['changes'],
+    delete_chat_task: ['board', 'memories']
 }
 
 export function installBackend(fake: DesktopFake, options: BackendOptions = {}): Backend {
@@ -819,16 +841,26 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
         }
     }
 
+    const publishProjectChange = (what: ProjectValue) => {
+        fake.emit('project-changed', {what})
+    }
+
     fake.invoke.mockImplementation(async (command, arguments_) => {
         const override = options.answers?.[command as DesktopCommand]
-        if (override) return await override(arguments_ as never, () => respond(command, arguments_))
-        return respond(command, arguments_)
+        const answer =
+            override ?
+                await override(arguments_ as never, () => respond(command, arguments_))
+            :   respond(command, arguments_)
+        for (const what of LEDGER_WRITES[command as DesktopCommand] ?? [])
+            publishProjectChange(what)
+        return answer
     })
 
     return {
         state,
         log,
         publishSessionState,
+        publishProjectChange,
         publishSceneChanged(scene) {
             state.scene = scene
             channels.session?.onmessage({

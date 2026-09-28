@@ -1,7 +1,7 @@
 import {useCallback, useEffect, useRef, useState, useSyncExternalStore} from 'react'
 import {schedule} from '../services/clock'
 import {compactAiContext, sendAiMessage} from '../services/ai-stream'
-import {invoke, isTauri, listen} from '../services/desktop'
+import {invoke, isTauri, watchEvent} from '../services/desktop'
 import {createTurnRunner} from '../services/turn'
 import {setTurnRunning} from '../services/turn-activity'
 import {commandErrorMessage} from '../utils/command-error'
@@ -123,17 +123,13 @@ export function useConversation({taskId, onError, onTasksChanged}: ConversationO
         void load()
         // The door writes an outside agent's calls into this chat; between turns the window
         // reads them back, so the user watches the work where they watch the model's.
-        let unlisten: (() => void) | undefined
-        void listen('chat-changed', event => {
+        const stop = watchEvent('chat-changed', event => {
             if (event.payload.taskId !== taskId || runner.state().isStreaming) return
             void load()
-        }).then(stop => {
-            if (isCancelled) stop()
-            else unlisten = stop
         })
         return () => {
             isCancelled = true
-            unlisten?.()
+            stop()
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [runner])
@@ -164,6 +160,7 @@ export function useConversation({taskId, onError, onTasksChanged}: ConversationO
         messages: state.messages,
         taskId: state.taskId,
         isStreaming: state.isStreaming,
+        activity: state.activity,
         turnError: state.error,
         isChatLoaded,
         handBack: state.handBack,

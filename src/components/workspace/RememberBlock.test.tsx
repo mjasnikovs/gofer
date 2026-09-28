@@ -2,7 +2,6 @@ import {afterEach, beforeEach, expect, it} from 'vitest'
 import {cleanup, render, screen} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {RememberBlock} from './RememberBlock'
-import {forgetMemoryList} from '../../hooks/useRememberedFact'
 import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../../test/desktop-driver'
 import {flush} from '../../test/flush'
 import {installBackend} from '../../test/backend'
@@ -33,20 +32,18 @@ const WAITING: ProjectMemory = {
 
 beforeEach(() => {
     installDesktopFake(tauri)
-    forgetMemoryList()
 })
 
 afterEach(() => {
     cleanup()
     removeDesktopFake()
-    forgetMemoryList()
 })
 
 async function open(rows: readonly ProjectMemory[] = [WAITING]) {
     const server = installBackend(tauri, {memories: rows})
     render(<RememberBlock tool={CALL} />)
     await flush()
-    return {stored: () => server.state.memories}
+    return {server, stored: () => server.state.memories}
 }
 
 it('asks whether the fact the model wrote is worth keeping', async () => {
@@ -84,4 +81,16 @@ it('a memory that is already gone reads as one that was never kept', async () =>
 
     expect(screen.queryByRole('button', {name: 'Keep'})).toBeNull()
     expect(screen.getByText('Not kept. No later turn will be given it.')).toBeVisible()
+})
+
+// A sweep started in the memory tab keeps judging after the user goes back to the chat, and a
+// broken verdict deletes the memory under a card that still says it was kept.
+it('stops saying it was kept once the memory is deleted under it', async () => {
+    const {server} = await open([{...WAITING, state: 'confirmed'}])
+    expect(screen.getByText('Kept. Later turns can be given it.')).toBeVisible()
+
+    server.state.memories = []
+    server.publishProjectChange('memories')
+
+    expect(await screen.findByText('Not kept. No later turn will be given it.')).toBeVisible()
 })

@@ -41,8 +41,8 @@ use crate::script_answers::{
 use crate::session_output::logs_domain;
 use crate::tool_params::{self, Operation, Sharing};
 use crate::tool_paths::{
-    a_path_that_climbs_out, as_the_worktree_names_them, declares_a_path, is_goferns_own, is_under,
-    named_directory, paths_named, reject_outside_paths,
+    a_path_that_climbs_out, as_the_worktree_names_them, is_goferns_own, is_under, named_directory,
+    reject_outside_paths,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -240,14 +240,6 @@ pub(crate) fn probe(domain: &str) -> Result<Value, ToolFailure> {
 }
 
 /// Arms a save over a file the worker's own `read` tool showed the model.
-///
-/// The router records a hash for every file it shows and fills `expectedHash` from that record,
-/// and a `read` runs in the worker, showing the file without the router seeing it. 94 of 195 live
-/// runs read a script that way, and every `file_conflict` a save ever met was over a file the model
-/// had been shown exactly so — one turn sent the same save twice into "a plain read does not arm a
-/// save" and gave up on the operation. The hash is taken from the disk now rather than sent: the
-/// read answered these bytes a moment ago, and a file that changes in between is a conflict the
-/// save should meet.
 fn note_a_read<R: Runtime>(app: &AppHandle<R>, params: &Value) -> Result<Value, ToolFailure> {
     let Some(path) = params.get("path").and_then(Value::as_str) else {
         return Err(ToolFailure::new(
@@ -255,16 +247,9 @@ fn note_a_read<R: Runtime>(app: &AppHandle<R>, params: &Value) -> Result<Value, 
             "noted_read names the path the read showed",
         ));
     };
-    let path = path.strip_prefix("res://").unwrap_or(path);
     let workspace = crate::active_workspace(app)?;
-    if workspace.resolve(path)?.is_dir() {
-        return Ok(json!({"noted": false}));
-    }
-    let hash = workspace.hash_of(path)?;
-    if let Some(hash) = &hash {
-        crate::read_ledger::remember(workspace.root(), path, hash);
-    }
-    Ok(json!({"noted": hash.is_some()}))
+    let noted = crate::read_ledger::note_a_read(&workspace, path)?;
+    Ok(json!({"noted": noted}))
 }
 
 /// Who is calling: the worker in a turn, or an agent at the door with no turn and no dialog.
@@ -443,7 +428,7 @@ fn route<R: Runtime>(
             .map_err(|failure| entry.blamed(index, entries.len(), failure))?;
 
         if entry.domain.name == "godot_runtime" {
-            refuse_a_second_game(entry.operation.op, crate::debug::holds_a_game())
+            refuse_a_second_game(entry.operation.op)
                 .map_err(|failure| entry.blamed(index, entries.len(), failure))?;
         }
 
@@ -667,46 +652,6 @@ fn edited_scripts_and_shaders<R: Runtime>(
         })?);
     }
     Ok(answered)
-}
-
-/// Tells the editor's filesystem about GDScript this call just wrote.
-///
-/// `godot_script` writes through the language server, which is a different door from every other
-/// write in this router: `create_texture`, `create_shape` and the scene commands all end in
-/// `EditorFileSystem.update_file`, and a script never did. The consequence is not the file being
-/// invisible — the server reads it perfectly well — it is that **a `class_name` written this
-/// session does not exist for anything else**.
-///
-/// Measured against the pinned 4.7.2, in this order:
-///
-/// * save `coin.gd` declaring `class_name Coin`, then save a script typing `Coin` →
-///   `Could not find type "Coin" in the current scope.`
-/// * reopen the second script, which re-reads it from disk and re-parses → still refused.
-/// * a whole-project `rescan` with no path → still refused, and it reported no paths at all.
-/// * `rescan` naming `coin.gd` → the next script typing `Coin` saves with **no diagnostics**.
-///
-/// So the missing step is naming the file, and `resource.rescan` is where that already lives. It
-/// is `update_file` for a `.gd`: nothing about a script is importable, so `_import_batch` registers
-/// it and returns without waiting for anything.
-///
-/// The failure is swallowed on purpose. The write has already happened and is already answered; a
-/// caller told the save failed would write it again, and the thing that went wrong is a
-/// registration it cannot do anything about. What it costs is the state this function exists to
-/// prevent, which is where the project was before it.
-fn told_the_editor_about<R: Runtime>(app: &AppHandle<R>, paths: Vec<String>) {
-    if paths.is_empty() {
-        return;
-    }
-    let _ = godot_session_api::call_godot(
-        app,
-        CallGodotRequest {
-            command: "resource.rescan".to_owned(),
-            params: json!({"paths": paths}),
-            expected_revision: None,
-            expected_scene: None,
-            timeout_ms: None,
-        },
-    );
 }
 
 /// Runs one operation, and starts the editor session if the only thing wrong was that there is
@@ -1195,17 +1140,14 @@ fn uids_under(root: &std::path::Path, relative: &str) -> std::collections::HashS
 /// stop arrives on its own socket, after the editor's answer.
 fn a_launch_stopped_where_it_was_asked_to(command: &str) -> Option<Value> {
     if !matches!(command, "runtime.run" | "runtime.restart")
-        || crate::debug::armed_breakpoints().is_empty()
+        || crate::game_run::now().armed().is_empty()
     {
         return None;
     }
-    let deadline = std::time::Instant::now() + crate::godot_dap::SETTLE_TIMEOUT;
-    // The adapter's reader sets this flag; the event itself is await_stop's to take.
-    while !crate::godot_dap::debuggee_is_stopped() && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-    crate::godot_dap::debuggee_is_at_a_breakpoint()
-        .then(|| json!({"running": true, "stoppedAt": "breakpoint"}))
+    // The adapter's reader notes the halt; the event itself is await_stop's to take.
+    (crate::game_run::halt_within(crate::godot_dap::SETTLE_TIMEOUT)
+        == Some(crate::game_run::Halt::AtABreakpoint))
+    .then(|| json!({"running": true, "stoppedAt": "breakpoint"}))
 }
 
 /// The routing itself, apart from the ledger that watches it.
@@ -1239,24 +1181,8 @@ fn route_one<R: Runtime>(
                     .and_then(|frame| the_frame_written_to(app, frame, &save_to)),
                 None => rpc(app, command, params).map_err(Into::into),
             };
-            // A script that preloads a scene this call just wrote keeps its "does not exist"
-            // diagnostic until the server parses it again: a live turn read that error twice
-            // over a file the game was already running.
-            if answered.is_ok()
-                && matches!(
-                    command,
-                    "project.set_autoload"
-                        | "project.remove_autoload"
-                        | "scene.create"
-                        | "scene.save"
-                        | "scene.save_as"
-                        | "resource.rescan"
-                        | "resource.create_texture"
-                        | "resource.create_shape"
-                        | "resource.create_tileset"
-                )
-            {
-                crate::script::reparse_open_documents();
+            if answered.is_ok() {
+                crate::project_sync::changed(crate::project_sync::Change::Answered(command));
             }
             let answered = match answered {
                 Err(failure) if failure.code == "runtime_broke" && op != "stop" => {
@@ -1267,7 +1193,7 @@ fn route_one<R: Runtime>(
             if domain.name == "godot_runtime" {
                 // The adapter's own terminated event says the same, on another socket, later.
                 if answered.is_ok() && op == "stop" {
-                    crate::debug::note_the_game_is_gone();
+                    crate::game_run::note(crate::game_run::Transition::GameEnded);
                 }
                 return answered
                     .map_err(crate::session_diagnosis::carrying_the_error_that_ended_the_game);
@@ -1275,7 +1201,12 @@ fn route_one<R: Runtime>(
             Ok(answered?)
         }
         tool_params::Answers::Rust => {
-            through_the_read_ledger(app, operation, params, |params| match domain.name {
+            let root = || {
+                crate::active_workspace(app)
+                    .ok()
+                    .map(|workspace| workspace.root().to_owned())
+            };
+            crate::read_ledger::through(operation, root, params, |params| match domain.name {
                 "godot_session" => session_domain(app, op),
                 "godot_resource" => resource_domain(app, op, params),
                 "godot_script" => script_domain(app, op, params),
@@ -1403,129 +1334,6 @@ const SESSION_START_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// extra tick is a caller kept waiting for nothing.
 const SESSION_START_POLL: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// Everything the read ledger asks of one file-touching operation, in one wrapper.
-///
-/// Five steps used to be re-enacted per arm: fill in `expectedHash` on the way in, reconcile the
-/// answer on the way out, forget a path that is gone, carry a moved path's record with it, and drop
-/// a record that outlived its file when the refusal says there is nothing there. No arm enacted all
-/// five. `script_domain`'s save enacted three, `resource_domain`'s delete two and its move one, and
-/// every other file-touching arm one — and not one omission failed a test, because each step is
-/// invisible except through the next call that is refused for it.
-///
-/// So the router applies it, and a new domain arm inherits the whole ritual without knowing any of
-/// it exists. Which operations it covers is the operation's own row: one that declares a path is
-/// one that touches a file, and one that declares a [`tool_params::Kind::Hash`] parameter is one
-/// the ledger can fill in — a gated destructive operation added later is held to the hash its own
-/// row asks for, rather than to whichever arm remembered to ask.
-///
-/// The other end of it is [`crate::read_ledger::reconcile`], which reads what became of the file
-/// out of the answer instead of being told twice.
-fn through_the_read_ledger<R: Runtime>(
-    app: &AppHandle<R>,
-    operation: &Operation,
-    params: Value,
-    run: impl FnOnce(Value) -> Result<Value, ToolFailure>,
-) -> Result<Value, ToolFailure> {
-    if !touches_a_file(operation) {
-        return run(params);
-    }
-    let params = if operation
-        .params
-        .iter()
-        .any(|param| param.kind == tool_params::Kind::Hash)
-    {
-        with_remembered_hash(app, params)
-    } else {
-        params
-    };
-    let named = paths_named(operation, &params);
-    match run(params) {
-        Ok(answer) => Ok(reconciled(app, answer)),
-        Err(failure) => {
-            for path in &named {
-                forget_a_vanished_file(app, path, &failure);
-            }
-            Err(failure)
-        }
-    }
-}
-
-/// Whether an operation names a file at all, which is what the ledger keys on.
-///
-/// Read off the parameters rather than listed: `under` counts, because a listing is the read that
-/// fills the ledger for every file it reports.
-fn touches_a_file(operation: &Operation) -> bool {
-    fn anywhere(params: &[tool_params::Param]) -> bool {
-        params
-            .iter()
-            .any(|param| declares_a_path(param) || anywhere(param.entry))
-    }
-    anywhere(operation.params)
-}
-
-/// Fills in `expectedHash` from what this agent was last told about the file it names.
-///
-/// A hash the caller passed itself is left alone: the renderer holds its own buffer and its own
-/// token, and this is not the place to overrule it. A path with no record is left alone too, which
-/// is what an unread file already meant — `Workspace::write` reads that as "creating this file" and
-/// says so plainly if the file is in fact already there.
-fn with_remembered_hash<R: Runtime>(app: &AppHandle<R>, params: Value) -> Value {
-    let mut params = params;
-    let Some(object) = params.as_object_mut() else {
-        return params;
-    };
-    if object.contains_key("expectedHash") {
-        return params;
-    }
-    let Some(path) = object
-        .get("path")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-    else {
-        return params;
-    };
-    let Ok(workspace) = crate::active_workspace(app) else {
-        return params;
-    };
-    if let Some(hash) = crate::read_ledger::recall(workspace.root(), &path) {
-        object.insert("expectedHash".to_owned(), json!(hash));
-    }
-    params
-}
-
-/// Reconciles an answer with the read ledger and hands back what the model may see.
-///
-/// One step where the path/hash pairs are produced. Every file-touching arm goes through it, so a
-/// new one cannot enact half of the ritual the way `apply_rename` did — see `crate::read_ledger`.
-///
-/// A workspace that cannot be read is not a reason to hand the model a hash, so the bookkeeping is
-/// stripped either way and only the recording is skipped.
-fn reconciled<R: Runtime>(app: &AppHandle<R>, answer: Value) -> Value {
-    match crate::active_workspace(app) {
-        Ok(workspace) => crate::read_ledger::reconcile(workspace.root(), answer),
-        Err(_) => crate::read_ledger::reconcile(std::path::Path::new(""), answer),
-    }
-}
-
-/// Drops the ledger's record when a refusal reports the file as gone.
-///
-/// The record outlived the file — deleted, moved, or reverted outside the router — and the caller
-/// can neither see the hash nor clear it, because `expectedHash` is hidden from the tool.
-/// Left in place, the router would attach the same dead record to the next save and refuse it
-/// identically, with no call the model could make to escape. Forgetting here is what makes
-/// `save it again to create the file` a true sentence rather than a loop.
-fn forget_a_vanished_file<R: Runtime>(app: &AppHandle<R>, path: &str, failure: &ToolFailure) {
-    if failure.code != "file_conflict" {
-        return;
-    }
-    if !failure.details["actualHash"].is_null() {
-        return;
-    }
-    if let Ok(workspace) = crate::active_workspace(app) {
-        crate::read_ledger::forget(workspace.root(), path);
-    }
-}
-
 fn resource_domain<R: Runtime>(
     app: &AppHandle<R>,
     op: &str,
@@ -1555,7 +1363,8 @@ fn resource_domain<R: Runtime>(
             let request: files::MovePathRequest = from_params(params)?;
             let workspace = crate::active_workspace(app)?;
             let also_moved = workspace.move_path(&request.from, &request.to)?;
-            tell_the_editor_the_worktree_moved(app);
+            // An asset imported from either end outlives the move until the editor walks.
+            crate::project_sync::changed(crate::project_sync::Change::Moved);
             let still_referenced_by = files_naming(workspace.root(), &request.from, &request.to);
             Ok(json!({
                 "from": request.from,
@@ -1569,7 +1378,7 @@ fn resource_domain<R: Runtime>(
             let request: files::DeletePathRequest = from_params(params)?;
             let workspace = crate::active_workspace(app)?;
             let also_removed = workspace.delete(&request.path, request.expected_hash.as_deref())?;
-            tell_the_editor_the_worktree_moved(app);
+            crate::project_sync::changed(crate::project_sync::Change::Moved);
             Ok(json!({"path": request.path, "deleted": true, "alsoRemoved": also_removed}))
         }
         other => Err(ToolFailure::new(
@@ -1577,24 +1386,6 @@ fn resource_domain<R: Runtime>(
             format!("godot_resource.{other} has no desktop handler"),
         )),
     }
-}
-
-/// Rescans the project after a move or a delete, because both go straight to disk and the editor
-/// is otherwise never told.
-///
-/// An asset the editor has already imported does not stop existing when its file does: the import
-/// it wrote under `.godot/imported` is still there, so `load` still answers with the old pixels.
-/// A tileset was built from a texture that had been deleted, and one built from the path a file was
-/// moved *away* from, both reported as successes — a scene authored against a resource that is not
-/// in the project. The destination of a move has the opposite problem: nothing has imported it yet,
-/// so it cannot be loaded at all until something scans.
-///
-/// A project walk rather than the two named paths: either end of a move can be a directory, and
-/// these two operations are rare and already gated behind the user's approval. Best effort — a
-/// worktree edit must not fail because no editor is bound to it.
-fn tell_the_editor_the_worktree_moved<R: Runtime>(app: &AppHandle<R>) {
-    let _ = rpc(app, "resource.rescan", json!({}));
-    crate::script::reparse_open_documents();
 }
 
 /// Keeps this domain to the files it is for: GDScript, and the shaders no other tool writes.
@@ -1730,10 +1521,6 @@ fn script_domain<R: Runtime>(
         }
         "save" => {
             require_script_path(&params)?;
-            let path = params
-                .get("path")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
             let request: script::SaveScriptRequest = from_params(params)?;
             let saved = if script::is_outside_the_language_server(&request.path) {
                 let workspace = crate::active_workspace(app)?;
@@ -1743,7 +1530,6 @@ fn script_domain<R: Runtime>(
             } else {
                 to_value(script::save_and_publish(request)?)
             };
-            told_the_editor_about(app, path.into_iter().collect());
             Ok(saved)
         }
         "close" => {
@@ -1769,20 +1555,14 @@ fn script_domain<R: Runtime>(
             for file in &request.files {
                 require_script_path(&json!({"path": file.path}))?;
             }
-            let written: Vec<String> = request.files.iter().map(|file| file.path.clone()).collect();
-            let edited = json!({"files": to_value(edited_scripts_and_shaders(app, request)?)});
-            told_the_editor_about(app, written);
-            Ok(edited)
+            Ok(json!({"files": to_value(edited_scripts_and_shaders(app, request)?)}))
         }
         "apply_rename" => {
             let request: script::ApplyRenameRequest = from_params(params)?;
             for file in &request.files {
                 require_script_path(&json!({"path": file.path}))?;
             }
-            let written: Vec<String> = request.files.iter().map(|file| file.path.clone()).collect();
-            let renamed = json!({"files": to_value(script::apply_rename(request)?)});
-            told_the_editor_about(app, written);
-            Ok(renamed)
+            Ok(json!({"files": to_value(script::apply_rename(request)?)}))
         }
         "diagnostics" => {
             let paths = named_scripts(&params)?;
@@ -1810,27 +1590,16 @@ fn script_domain<R: Runtime>(
     }
 }
 
-/// Refuses a launch the debugger already made, before the editor is asked to make a second one.
-///
-/// `runtime.run` guards on `EditorInterface.is_playing_scene()`, and a game the debug adapter
-/// started is not a scene the editor is playing — so the guard passed and `play_main_scene()` ran
-/// on top of it. What came back was `runtime_not_running: The game started and then stopped before
-/// it was ready`, which is not what happened and gives the caller nowhere to go. A live debugging
-/// turn met it twice and spent the seven calls between them trying to launch the project from the
-/// shell, every one refused by the workspace rule.
-fn refuse_a_second_game(op: &str, debugger_holds_a_game: bool) -> Result<(), ToolFailure> {
-    if !matches!(op, "run" | "restart") || !debugger_holds_a_game {
-        return Ok(());
-    }
-    Err(ToolFailure {
-        code: "already_running".to_owned(),
-        message: "The debugger is already running this game. Read it where it is with \
-                  debug.stack_trace, debug.scopes and debug.variables, or end it with \
-                  debug.terminate. runtime.run would start a second one beside it."
-            .to_owned(),
-        retryable: false,
-        details: json!({"op": op}),
-    })
+/// `runtime.run` guards on the editor's `is_playing_scene()`, which a game the adapter launched is not.
+fn refuse_a_second_game(op: &str) -> Result<(), ToolFailure> {
+    crate::game_run::now()
+        .refuse_a_second_game(crate::game_run::Starter::Runtime(op))
+        .map_err(|refused| ToolFailure {
+            code: refused.code.to_owned(),
+            message: refused.message.to_owned(),
+            retryable: false,
+            details: json!({"op": op}),
+        })
 }
 
 fn debug_domain(op: &str, params: Value) -> Result<Value, ToolFailure> {
@@ -1889,95 +1658,19 @@ fn rpc<R: Runtime>(
     command: &str,
     mut params: Value,
 ) -> Result<Value, crate::godot_rpc::RpcError> {
-    let held = remembered_revision(app);
-    let (expected_revision, expected_scene) = match take_u64(&mut params, "expectedRevision") {
-        Some(revision) => (Some(revision), None),
-        None => (
-            held.as_ref().map(|held| held.revision),
-            held.map(|held| held.scene),
-        ),
-    };
-    let timeout_ms = take_u64(&mut params, "timeoutMs");
     let request = CallGodotRequest {
         command: command.to_owned(),
+        expected_revision: take_u64(&mut params, "expectedRevision"),
+        expected_scene: None,
+        timeout_ms: take_u64(&mut params, "timeoutMs"),
         params,
-        expected_revision,
-        expected_scene,
-        timeout_ms,
     };
-    let response = match godot_session_api::call_godot(app, request.clone()) {
-        Ok(answered) => answered,
-        Err(refusal) => {
-            let revision =
-                the_revision_a_first_mutation_was_refused_for(&refusal, expected_revision)
-                    .ok_or(refusal)?;
-            godot_session_api::call_godot(
-                app,
-                CallGodotRequest {
-                    expected_revision: Some(revision),
-                    ..request
-                },
-            )?
-        }
-    };
-    let mut result = response.result;
-    if let (Some(revision), Some(object)) = (response.revision, result.as_object_mut()) {
-        object.insert("revision".to_owned(), json!(revision));
-    }
-    record_revision(app, &result);
-    Ok(result)
-}
-
-/// The revision to retry at, when the router had none to supply and the addon refused for it.
-///
-/// A mutation is checked against the revision of the read it followed. The first call of a session
-/// follows no read: the ledger is in memory and empty, so the router supplies nothing and the addon
-/// refuses. The catalog tells the model the router holds that number and to never read the tree for
-/// it, so the model's only way out is the read the same sentence forbids — a refusal and a whole
-/// `scene.get_tree`, measured at 719 tool tokens and 2.6 seconds on a live turn whose first act was
-/// `scene.create`.
-///
-/// Only when the router supplied nothing. A revision it did supply, or one the caller passed, is a
-/// read this turn really made, and a conflict against it is the concurrent edit the guard exists to
-/// catch — retrying that would overwrite whatever moved the scene on.
-fn the_revision_a_first_mutation_was_refused_for(
-    refusal: &crate::godot_rpc::RpcError,
-    supplied: Option<u64>,
-) -> Option<u64> {
-    if supplied.is_some() || refusal.code != "revision_conflict" {
-        return None;
-    }
-    refusal
-        .details
-        .get("currentRevision")
-        .and_then(Value::as_u64)
-}
-
-/// The revision the last answer reported, for a call that named none.
-///
-/// A caller that passed its own is left alone, exactly as `expectedHash` is: the renderer holds a
-/// view the router has no business overruling. Every addon answer that carries a revision is
-/// recorded, so this is the number the agent's own last read or write answered with.
-fn remembered_revision<R: Runtime>(
-    app: &AppHandle<R>,
-) -> Option<crate::read_ledger::SceneRevision> {
-    let workspace = crate::active_workspace(app).ok()?;
-    crate::read_ledger::recall_revision(workspace.root())
-}
-
-/// Records the revision an answer carries. A mutation reports it on the envelope and a read reports
-/// it in the body; both have been merged into one object by the time this runs.
-fn record_revision<R: Runtime>(app: &AppHandle<R>, answer: &Value) {
-    let Some(revision) = answer.get("revision").and_then(Value::as_u64) else {
-        return;
-    };
-    let scene = answer
-        .get("scene")
-        .and_then(Value::as_str)
-        .filter(|scene| !scene.is_empty());
-    if let Ok(workspace) = crate::active_workspace(app) {
-        crate::read_ledger::remember_revision(workspace.root(), scene, revision);
-    }
+    let workspace = crate::active_workspace(app).ok();
+    crate::read_ledger::through_the_editor(
+        workspace.as_ref().map(files::Workspace::root),
+        request,
+        |request| godot_session_api::call_godot(app, request),
+    )
 }
 
 fn take_u64(params: &mut Value, key: &str) -> Option<u64> {
@@ -2923,6 +2616,7 @@ mod tests {
     /// now makes for itself fails there rather than launching an editor.
     #[test]
     fn a_session_that_cannot_be_started_says_why_it_could_not() {
+        let _no_editor = crate::godot_session::no_editor_bound();
         let app = unattended_app();
         let failure = dispatch(
             app.handle(),
@@ -2943,6 +2637,7 @@ mod tests {
 
     #[test]
     fn a_gated_operation_stops_before_its_handler_runs() {
+        let _no_editor = crate::godot_session::no_editor_bound();
         let app = unattended_app();
 
         let failure = dispatch(
@@ -3209,6 +2904,7 @@ mod tests {
     /// merely two steps long.
     #[test]
     fn a_repeated_operation_is_refused_and_a_two_step_list_is_not() {
+        let _no_editor = crate::godot_session::no_editor_bound();
         let failure = gate("godot_scene", &["open", "open"]).expect_err("one scene is open");
         assert_eq!(failure.code, "op_repeated");
         assert_eq!(failure.details["opIndex"], json!(1));
@@ -3361,30 +3057,6 @@ mod tests {
         );
     }
 
-    /// A launch the debugger already made is refused before the editor is asked for a second one.
-    ///
-    /// `runtime.run` guards on `is_playing_scene()`, which a debug-adapter launch does not set, so
-    /// the editor started a second game beside the first and answered `runtime_not_running: The
-    /// game started and then stopped before it was ready`. A live debugging turn met that twice and
-    /// spent the seven calls in between trying to launch the project from the shell.
-    #[test]
-    fn a_game_the_debugger_started_is_not_launched_again() {
-        for op in ["run", "restart"] {
-            let refused = super::refuse_a_second_game(op, true)
-                .expect_err("a second game must be refused while the debugger holds one");
-            assert_eq!(refused.code, "already_running");
-            assert!(refused.message.contains("debug.terminate"), "{refused:?}");
-            assert!(
-                refused.message.contains("debug.stack_trace"),
-                "and says the game can be read where it is: {refused:?}"
-            );
-            assert!(super::refuse_a_second_game(op, false).is_ok());
-        }
-        for op in ["stop", "get_state", "get_tree", "capture", "input", "wait"] {
-            assert!(super::refuse_a_second_game(op, true).is_ok(), "{op}");
-        }
-    }
-
     /// Every distinct `ops` shape a model wrote across real work, and not one refused.
     ///
     /// `fixtures/recorded-tool-calls.json` is 712 calls from a live project reduced to their
@@ -3448,6 +3120,7 @@ mod tests {
     /// nothing between the model and the addon knew the user had asked for that warning.
     #[test]
     fn a_rule_the_user_enforced_is_refused_at_the_router() {
+        let _no_editor = crate::godot_session::no_editor_bound();
         let app = unattended_app();
         let enforcing = crate::settings::GodotSettings::default();
         let relaxed = crate::settings::GodotSettings {
@@ -3671,57 +3344,30 @@ mod tests {
             .expect("the current hash deletes it");
     }
 
-    /// A backend that approves whatever the router asks it, so a gated call reaches its handler.
+    /// A backend with a window that approves every prompt it is shown.
     ///
-    /// The gate is the reason the destructive pair had never been driven through the router at all:
-    /// the one test that exercised the ledger against a delete called `Workspace::delete` directly,
-    /// which is the one path where the router's own bookkeeping cannot be observed.
+    /// The prompt is registered before it is emitted, so the listener can answer it on the spot.
     fn approving_app() -> tauri::App<tauri::test::MockRuntime> {
         use tauri::Listener;
         crate::approvals::open();
-        let app = tauri::test::mock_builder()
-            .build(crate::app_context())
-            .expect("build mock Tauri app");
-        tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+        let app = unattended_app();
+        let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
             .build()
             .expect("build mock webview");
-        let window = app
-            .get_webview_window("main")
-            .expect("the window that was just built");
-        window.listen("ai-approval-request", move |event| {
+        window.listen("ai-approval-request", |event| {
             let prompt: Value = serde_json::from_str(event.payload()).expect("an approval prompt");
             let id = prompt["approvalId"]
                 .as_str()
-                .expect("a prompt carries its id")
-                .to_owned();
-            std::thread::spawn(move || {
-                for _ in 0..400 {
-                    if crate::approvals::respond(&id, true).is_ok() {
-                        return;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-            });
+                .expect("a prompt carries its id");
+            crate::approvals::respond(id, true).expect("the prompt is waiting");
         });
         app
     }
 
-    /// The same call named either way lands identically and leaves the same ledger behind.
-    ///
-    /// This is the live defect the table test above cannot see. `resource_domain` never normalised
-    /// its paths, and nothing failed: `files::validate_relative` strips `res://` as well, so
-    /// `delete {"path": "res://levels/level.tscn"}` reached the right file. What it did not reach
-    /// was the read ledger, which is keyed on the string the caller wrote — so `recall` missed, no
-    /// `expectedHash` was attached, and the file was deleted **unguarded**. The hash guard that
-    /// `listing_records_the_hashes_a_delete_of_a_non_script_file_is_held_to` exists to prove was
-    /// absent for the spelling a model reaches for first, and `forget` then forgot nothing, so the
-    /// record outlived the file.
-    ///
-    /// `move` was the same shape from the other end: the record neither followed the file nor was
-    /// dropped, which is exactly the stale-hash-after-a-rename state `read_ledger::reconcile` was
-    /// written to prevent.
+    /// The ledger is keyed on the worktree's spelling, so a `res://` delete that reached it
+    /// unnormalised found no record and ran unguarded.
     #[test]
-    fn a_resource_path_is_held_to_the_same_hash_and_ledger_as_a_worktree_path() {
+    fn a_resource_spelled_delete_of_a_changed_file_is_refused_by_the_hash_it_was_listed_with() {
         let _gate = crate::approvals::serialize_gate_tests();
         let directory = TempDir::new().expect("temporary application data");
         let workspace_path = directory.path().join("workspace");
@@ -3732,24 +3378,16 @@ mod tests {
         let app = approving_app();
         app.manage(crate::storage::StorageSlot::new(Ok(storage)));
         let workspace = crate::active_workspace(app.handle()).expect("the task worktree");
-        let root = workspace.root().to_owned();
-        crate::read_ledger::forget_worktree(&root);
 
         let scene = "[gd_scene format=3]\n\n[node name=\"Level\" type=\"Node2D\"]\n";
         let stamp = workspace
             .write("levels/level.tscn", scene, None)
             .expect("write the scene");
-
         dispatch(
             app.handle(),
             call("godot_resource", "list", json!({"hashes": true})),
         )
         .expect("list the worktree with hashes");
-        assert_eq!(
-            crate::read_ledger::recall(&root, "levels/level.tscn").as_deref(),
-            Some(stamp.hash.as_str())
-        );
-
         workspace
             .write(
                 "levels/level.tscn",
@@ -3757,6 +3395,7 @@ mod tests {
                 Some(&stamp.hash),
             )
             .expect("someone edits the scene");
+
         let refused = dispatch(
             app.handle(),
             call(
@@ -3766,62 +3405,9 @@ mod tests {
             ),
         )
         .expect_err("a scene that changed since it was listed must not be deleted");
-        assert_eq!(refused.code, "file_conflict");
-        assert!(
-            workspace_path.join("levels/level.tscn").exists(),
-            "the refused delete must have left the file where it is"
-        );
-
-        dispatch(
-            app.handle(),
-            call("godot_resource", "list", json!({"hashes": true})),
-        )
-        .expect("list the worktree again");
-        dispatch(
-            app.handle(),
-            call(
-                "godot_resource",
-                "delete",
-                json!({"path": "res://levels/level.tscn"}),
-            ),
-        )
-        .expect("the hash the second listing recorded deletes it");
-        assert!(
-            !workspace_path.join("levels/level.tscn").exists(),
-            "the approved delete removes the file"
-        );
-        assert!(
-            crate::read_ledger::recall(&root, "levels/level.tscn").is_none(),
-            "a record for a file that is gone is a claim about nothing"
-        );
-
-        let stamp = workspace
-            .write("levels/level.tscn", scene, None)
-            .expect("write the scene again");
-        dispatch(
-            app.handle(),
-            call("godot_resource", "list", json!({"hashes": true})),
-        )
-        .expect("list the worktree once more");
-        dispatch(
-            app.handle(),
-            call(
-                "godot_resource",
-                "move",
-                json!({"from": "res://levels/level.tscn", "to": "res://levels/one.tscn"}),
-            ),
-        )
-        .expect("move the scene");
-        assert!(
-            crate::read_ledger::recall(&root, "levels/level.tscn").is_none(),
-            "the record must not outlive the path the file left"
-        );
-        assert_eq!(
-            crate::read_ledger::recall(&root, "levels/one.tscn").as_deref(),
-            Some(stamp.hash.as_str()),
-            "the content did not change, only where it lives, so the record follows the file"
-        );
-        crate::read_ledger::forget_worktree(&root);
+        assert_eq!(refused.code, "file_conflict", "{}", refused.message);
+        assert!(workspace_path.join("levels/level.tscn").exists());
+        crate::read_ledger::forget_worktree(workspace.root());
     }
 
     /// A read the worker made arms the save the router later checks, as the router's own would.
@@ -3860,87 +3446,7 @@ mod tests {
             Some(files::hash_text(script).as_str()),
             "the record is keyed the way a save names the file, scheme off"
         );
-
-        let listing = dispatch(
-            app.handle(),
-            ToolRequest {
-                tool: crate::read_ledger::NOTED_READ_TOOL.to_owned(),
-                params: json!({"path": "scripts"}),
-            },
-        )
-        .expect("a directory read is not a file shown");
-        assert_eq!(listing["noted"], false, "{listing}");
-        assert!(
-            crate::read_ledger::recall(workspace.root(), "scripts").is_none(),
-            "a directory holds no hash to arm a save with"
-        );
         crate::read_ledger::forget_worktree(workspace.root());
-    }
-
-    /// A record that outlives its file must not refuse every save of that path forever.
-    ///
-    /// The file goes away outside the router — the Godot editor deletes it, a checkout reverts it —
-    /// and the ledger still holds the hash the agent's last read answered with. The router attaches
-    /// it, the write is refused because there is nothing there to match, and the refusal tells the
-    /// agent to save again. Without this the next save carries the same dead record and is refused
-    /// the same way, and the agent cannot see or clear the parameter that is stopping it.
-    #[test]
-    fn a_record_that_outlived_its_file_is_dropped_so_the_next_save_creates_it() {
-        let directory = TempDir::new().expect("temporary application data");
-        let workspace_path = directory.path().join("workspace");
-        std::fs::create_dir(&workspace_path).expect("create workspace");
-        let storage =
-            crate::storage::ProjectStorage::open(&directory.path().join("data"), &workspace_path)
-                .expect("open project storage");
-        let app = unattended_app();
-        app.manage(crate::storage::StorageSlot::new(Ok(storage)));
-
-        let workspace = crate::active_workspace(app.handle()).expect("the task worktree");
-        let stamp = workspace
-            .write("hud.gd", "extends Node\n", None)
-            .expect("write the script");
-        crate::read_ledger::remember(workspace.root(), "hud.gd", &stamp.hash);
-
-        workspace
-            .write("hud.gd", "extends Node2D\n", Some(&stamp.hash))
-            .expect("someone edits the script");
-        let changed = ToolFailure::from(
-            workspace
-                .write("hud.gd", "extends Control\n", Some(&stamp.hash))
-                .expect_err("a stale record is refused"),
-        );
-        forget_a_vanished_file(app.handle(), "hud.gd", &changed);
-        assert_eq!(
-            crate::read_ledger::recall(workspace.root(), "hud.gd").as_deref(),
-            Some(stamp.hash.as_str()),
-            "a file that merely changed keeps its record"
-        );
-
-        std::fs::remove_file(workspace_path.join("hud.gd")).expect("the file goes away outside us");
-        let gone = ToolFailure::from(
-            workspace
-                .write("hud.gd", "extends Control\n", Some(&stamp.hash))
-                .expect_err("there is nothing there to match"),
-        );
-        assert!(
-            gone.message.contains("Save it again to create the file"),
-            "the refusal has to name the call that works: {}",
-            gone.message
-        );
-        forget_a_vanished_file(app.handle(), "hud.gd", &gone);
-        assert!(
-            crate::read_ledger::recall(workspace.root(), "hud.gd").is_none(),
-            "a record for a file that is gone is a claim about nothing"
-        );
-
-        let params = with_remembered_hash(app.handle(), json!({"path": "hud.gd"}));
-        assert!(
-            params.get("expectedHash").is_none(),
-            "the router must attach nothing once the record is dropped: {params}"
-        );
-        workspace
-            .write("hud.gd", "extends Control\n", None)
-            .expect("saving again creates the file");
     }
 
     #[test]

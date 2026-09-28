@@ -32,13 +32,6 @@ export function messageParts(message: Message): readonly MessagePart[] {
     return parts
 }
 
-export function withoutActivity(message: Message): Message {
-    if (message.activity === undefined) return message
-    const {activity, ...rest} = message
-    void activity
-    return rest
-}
-
 export function settleRunningTools(message: Message, reason: string): Message {
     if (!message.tools?.some(tool => tool.status === 'running' || tool.status === 'pending')) {
         return message
@@ -70,9 +63,7 @@ export function settleStoredChat(messages: readonly Message[]): readonly Message
     return messages.map(message =>
         message.status === 'streaming' ?
             {
-                ...withoutActivity(
-                    settleRunningTools(message, 'Gofer stopped before this call finished.')
-                ),
+                ...settleRunningTools(message, 'Gofer stopped before this call finished.'),
                 status: 'aborted' as const
             }
         :   message
@@ -329,23 +320,14 @@ export function applyStreamEvent(message: Message, event: AiStreamEvent): Messag
                 })
             }
         }
-        case 'compaction-start':
-            return {...message, activity: compactionActivity(event.tokens, event.contextWindow)}
-        // A manual compaction has no assistant message of its own to change; the runner reads
-        // compact-done off the stream and stamps the divider itself.
-        case 'compaction-end':
-        case 'compact-done':
-            return withoutActivity(message)
         case 'done': {
             const thinking = streamedOr(message.thinking, event.thinking)
             return {
-                ...withoutActivity(
-                    withFallbackText(
-                        event.stopReason === 'aborted' ?
-                            settleRunningTools(message, 'Stopped before it finished.')
-                        :   message,
-                        event.text
-                    )
+                ...withFallbackText(
+                    event.stopReason === 'aborted' ?
+                        settleRunningTools(message, 'Stopped before it finished.')
+                    :   message,
+                    event.text
                 ),
                 usage: event.usage,
                 context: event.usage.totalTokens,
@@ -372,34 +354,53 @@ export function applyStreamEvent(message: Message, event: AiStreamEvent): Messag
                     :   [...points.slice(0, at), point, ...points.slice(at + 1)]
             }
         }
-        case 'turn-state':
-            return message
-        case 'context-rebuilt':
-            return {...message, activity: rebuiltActivity(event.messages)}
-        case 'retry-scheduled':
-            return {
-                ...message,
-                activity: retryWaitActivity(
-                    event.attempt,
-                    event.maxAttempts,
-                    event.delayMs,
-                    event.errorMessage
-                )
-            }
-        case 'retry-start':
-            return {...message, activity: retryActivity(event.attempt, event.maxAttempts)}
         case 'aborted':
             return {
-                ...withoutActivity(
-                    withFallbackText(
-                        settleRunningTools(message, 'Stopped before it finished.'),
-                        'Generation stopped.'
-                    )
+                ...withFallbackText(
+                    settleRunningTools(message, 'Stopped before it finished.'),
+                    'Generation stopped.'
                 ),
                 status: 'aborted'
             }
-        // Not an amendment to one assistant message: the runner splits the timeline on it.
+        // Not amendments to one assistant message. The runner owns what the turn is doing
+        // (turnActivity), and it splits the timeline on a steer.
+        case 'compaction-start':
+        case 'compaction-end':
+        case 'compact-done':
+        case 'context-rebuilt':
+        case 'retry-scheduled':
+        case 'retry-start':
+        case 'turn-state':
         case 'steered':
             return message
+    }
+}
+
+/** The caption under the spinner. It names the step the turn is stuck in, so the first sign of
+ * any other progress ends it; only bookkeeping leaves it standing. */
+export function turnActivity(
+    previous: string | undefined,
+    event: AiStreamEvent
+): string | undefined {
+    switch (event.type) {
+        case 'compaction-start':
+            return compactionActivity(event.tokens, event.contextWindow)
+        case 'context-rebuilt':
+            return rebuiltActivity(event.messages)
+        case 'retry-scheduled':
+            return retryWaitActivity(
+                event.attempt,
+                event.maxAttempts,
+                event.delayMs,
+                event.errorMessage
+            )
+        case 'retry-start':
+            return retryActivity(event.attempt, event.maxAttempts)
+        case 'turn-state':
+        case 'usage':
+        case 'tool-cost':
+            return previous
+        default:
+            return undefined
     }
 }

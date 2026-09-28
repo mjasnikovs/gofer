@@ -37,6 +37,7 @@ use uuid::Uuid;
 
 use crate::git;
 use crate::paths;
+use crate::project_changes::{ChangeNotifier, Notifier, ProjectValue};
 use crate::task_switch::Switch;
 
 const LEGACY_CATALOG_FILE_NAME: &str = "catalog.sqlite";
@@ -911,6 +912,7 @@ pub struct ProjectStorage {
     workspace_path: PathBuf,
     write_lock: Arc<Mutex<()>>,
     checkout_lock: Arc<Mutex<()>>,
+    notifier: Notifier,
 }
 
 thread_local! {
@@ -994,6 +996,7 @@ impl ProjectStorage {
             workspace_path: canonical_path,
             write_lock: Arc::new(Mutex::new(())),
             checkout_lock: Arc::new(Mutex::new(())),
+            notifier: Notifier::default(),
         };
         let project = storage.connection()?;
         migrate_project(&project)?;
@@ -1002,6 +1005,16 @@ impl ProjectStorage {
         let _ = storage.base_branch();
         let _ = storage.ensure_active_task(&project);
         Ok(storage)
+    }
+
+    /// The same database, telling `notifier` of every write a screen could be showing.
+    pub fn announcing_to(mut self, notifier: Arc<dyn ChangeNotifier>) -> Self {
+        self.notifier = Notifier::to(notifier);
+        self
+    }
+
+    fn announce(&self, what: ProjectValue) {
+        self.notifier.changed(what);
     }
 
     fn insert_task(
@@ -2084,5 +2097,114 @@ mod tests {
 
         git_text(&workspace, &["branch", "stray"]);
         assert_eq!(storage.base_branch().expect("a base"), "main");
+    }
+
+    /// Every write a screen draws announces what it changed, from the Ledger rather than from
+    /// whoever asked for it. A write no screen draws, like an embedding, announces nothing.
+    #[test]
+    fn every_write_a_screen_draws_announces_what_it_changed() {
+        use crate::project_changes::{ProjectValue::*, RecordingNotifier};
+        let directory = TempDir::new().expect("temporary directory");
+        let workspace = committed_repository(directory.path());
+        let heard = Arc::new(RecordingNotifier::default());
+        let storage = ProjectStorage::open(&directory.path().join("data"), &workspace)
+            .expect("storage")
+            .announcing_to(heard.clone());
+        let switch = storage.switch_with_no_turn_to_refuse(&NOTHING_TO_STOP);
+        let task = storage.tasks().active().expect("read").expect("a task");
+        let said = |write: &str, announced: &[ProjectValue]| {
+            assert_eq!(heard.take(), announced, "{write}");
+        };
+
+        storage
+            .sketches()
+            .keep(&kept("question-1-run", "Dock", "<p>a</p>", "<p>a</p>"))
+            .expect("keep");
+        said("a sketch kept", &[Sketches]);
+        fs::remove_file(directory.path().join("data/sketches/question-1-run.html"))
+            .expect("lose the markup");
+        storage.project().run_maintenance().expect("upkeep");
+        said("a sketch upkeep removed", &[Sketches]);
+        storage.project().run_maintenance().expect("upkeep");
+        said("upkeep that removed nothing", &[]);
+
+        let memory = storage
+            .memory()
+            .upsert(&UpsertMemoryRequest {
+                id: None,
+                task_id: Some(task.clone()),
+                kind: "fact".to_owned(),
+                state: "candidate".to_owned(),
+                content: "Signals are connected in code.".to_owned(),
+                provenance: serde_json::json!({"source": "model"}),
+                superseded_by: None,
+            })
+            .expect("remember");
+        said("a memory stored", &[Memories]);
+        storage
+            .memory()
+            .save_embedding(&SaveMemoryEmbeddingRequest {
+                memory_id: memory.id.clone(),
+                model: MEMORY_EMBEDDING_MODEL.to_owned(),
+                vector: vec![
+                    1.0 / (MEMORY_EMBEDDING_DIMENSIONS as f32).sqrt();
+                    MEMORY_EMBEDDING_DIMENSIONS
+                ],
+            })
+            .expect("embed");
+        said("an embedding", &[]);
+        storage.memory().delete(&memory.id).expect("forget");
+        said("a memory forgotten", &[Memories]);
+
+        let board = storage.board();
+        let card = board
+            .create(
+                &NewCard {
+                    title: "Jump".to_owned(),
+                    body: String::new(),
+                    owner: "user".to_owned(),
+                    status: CardStatus::Backlog,
+                    attachments: Vec::new(),
+                },
+                Actor::User,
+            )
+            .expect("create");
+        said("a card made", &[Board]);
+        board
+            .move_to(&card.id, CardStatus::Ready, Actor::User)
+            .expect("move");
+        said("a card moved", &[Board]);
+        let edit = CardEdit {
+            title: Some("Jump higher".to_owned()),
+            body: None,
+            owner: None,
+            attachments: None,
+        };
+        board.edit(&card.id, &edit, Actor::User).expect("edit");
+        said("a card edited", &[Board]);
+        board
+            .comment(&card.id, "user", "Soon", Actor::User)
+            .expect("comment");
+        said("a card commented on", &[Board]);
+        board.hand_to_task(&card.id, &task).expect("hand over");
+        said("a card handed to a task", &[Board]);
+
+        storage
+            .tasks()
+            .resolve_conflicts(&task, &switch)
+            .expect("resolve");
+        said("the project brought into a task", &[Changes]);
+        fs::write(workspace.join("player.gd"), "extends Node\n").expect("task work");
+        storage.tasks().merge(&task, &switch).expect("merge");
+        said("a task merged", &[Changes, Board]);
+
+        let other = storage.tasks().create(&switch).expect("another task");
+        said("a task made", &[]);
+        let other = other.task_id.expect("its id");
+        storage.tasks().delete(&other, &switch).expect("delete");
+        said("a task deleted", &[Board, Memories]);
+
+        board.delete(&card.id).expect("delete the card");
+        said("a card deleted", &[Board]);
     }
 }

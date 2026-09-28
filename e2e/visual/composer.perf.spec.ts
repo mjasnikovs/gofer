@@ -63,6 +63,10 @@ test('typing costs the same whatever is in the conversation @interaction', async
     const long = await typingCost(context, LONG_CHAT)
 
     const budget = Math.max(short, NOISE_FLOOR_MS) * ALLOWED_SLOPE
+    test.info().annotations.push({
+        type: 'layout per keystroke',
+        description: `${short.toFixed(3)}ms short, ${long.toFixed(3)}ms long, budget ${budget.toFixed(3)}ms`
+    })
     expect(
         long,
         `a keystroke costs ${long.toFixed(2)}ms of layout with ${String(LONG_CHAT)} messages and `

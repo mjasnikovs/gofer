@@ -1,5 +1,5 @@
 //! The project board's three doors: the window's commands, the worker's `board` tool, and the
-//! one event that tells the window something changed through any of them.
+//! agent door. The Ledger tells the window when a write through any of them changed the board.
 //!
 //! Like `remember`, deliberately not a [`crate::ai_tools::CATALOG`] domain: the catalogue is
 //! Godot domains with an addon handler, and this is a host operation over the Ledger.
@@ -20,16 +20,9 @@ pub const BOARD_TOOL: &str = "board";
 pub const WORKER_OWNER: &str = "gofer";
 const USER_OWNER: &str = "user";
 
-/// Fired after any write through any door, with no payload: the window refetches.
-pub const CHANGED_EVENT: &str = "board-changed";
-
 /// Fired when a task was made or moved onto by something other than the window — the door
 /// opening a card's task — so the task list refetches.
 pub const TASKS_EVENT: &str = "tasks-changed";
-
-pub(crate) fn announce_change<R: Runtime>(app: &AppHandle<R>) {
-    let _ = app.emit_to(MAIN_WINDOW, CHANGED_EVENT, ());
-}
 
 pub(crate) fn announce_tasks_change<R: Runtime>(app: &AppHandle<R>) {
     let _ = app.emit_to(MAIN_WINDOW, TASKS_EVENT, ());
@@ -264,10 +257,6 @@ fn board_tool_as<R: Runtime>(
         Some(reference) => board.resolve(&reference),
         None => own.clone().ok_or_else(no_card_for_task),
     };
-    let reads = matches!(
-        call,
-        BoardCall::List | BoardCall::Template | BoardCall::Read { .. }
-    );
     let actor = writer.actor();
     let answer = match call {
         BoardCall::List => tool_list(&board.list()?, own.as_ref()),
@@ -308,9 +297,6 @@ fn board_tool_as<R: Runtime>(
             tool_card(&board.edit(&target(id)?.id, &edit, actor)?, own.as_ref())
         }
     };
-    if !reads {
-        announce_change(app);
-    }
     Ok(answer)
 }
 
@@ -389,11 +375,9 @@ pub(crate) fn card_create(
         status,
         attachments,
     };
-    let created = crate::workspace::project_storage(&app)?
+    crate::workspace::project_storage(&app)?
         .board()
-        .create(&card, Actor::User)?;
-    announce_change(&app);
-    Ok(created)
+        .create(&card, Actor::User)
 }
 
 #[tauri::command(async)]
@@ -402,12 +386,9 @@ pub(crate) fn card_move(
     id: String,
     status: CardStatus,
 ) -> Result<CardRecord, CommandError> {
-    let moved =
-        crate::workspace::project_storage(&app)?
-            .board()
-            .move_to(&id, status, Actor::User)?;
-    announce_change(&app);
-    Ok(moved)
+    crate::workspace::project_storage(&app)?
+        .board()
+        .move_to(&id, status, Actor::User)
 }
 
 #[tauri::command(async)]
@@ -416,21 +397,15 @@ pub(crate) fn card_edit(
     id: String,
     edit: CardEdit,
 ) -> Result<CardRecord, CommandError> {
-    let edited = crate::workspace::project_storage(&app)?
+    crate::workspace::project_storage(&app)?
         .board()
-        .edit(&id, &edit, Actor::User)?;
-    announce_change(&app);
-    Ok(edited)
+        .edit(&id, &edit, Actor::User)
 }
 
 /// Only the window deletes: a card is the user's ask, and no tool gets to lose one.
 #[tauri::command(async)]
 pub(crate) fn card_delete(app: AppHandle, id: String) -> Result<(), CommandError> {
-    crate::workspace::project_storage(&app)?
-        .board()
-        .delete(&id)?;
-    announce_change(&app);
-    Ok(())
+    crate::workspace::project_storage(&app)?.board().delete(&id)
 }
 
 #[tauri::command(async)]
@@ -439,14 +414,9 @@ pub(crate) fn card_comment(
     id: String,
     body: String,
 ) -> Result<crate::storage::CardComment, CommandError> {
-    let comment = crate::workspace::project_storage(&app)?.board().comment(
-        &id,
-        USER_OWNER,
-        &body,
-        Actor::User,
-    )?;
-    announce_change(&app);
-    Ok(comment)
+    crate::workspace::project_storage(&app)?
+        .board()
+        .comment(&id, USER_OWNER, &body, Actor::User)
 }
 
 /// Opens a task for a card and hands the card to it.
@@ -474,9 +444,7 @@ pub(crate) fn card_post_to_gofer(
             "A finished card is not posted again",
         ));
     }
-    let chat = open_task_for_card(&app, &storage, &id, bring_changes)?;
-    announce_change(&app);
-    Ok(chat)
+    open_task_for_card(&app, &storage, &id, bring_changes)
 }
 
 /// Makes a task for a card and hands the card to it: the one way a card gets a branch.

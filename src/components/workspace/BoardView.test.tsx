@@ -247,17 +247,6 @@ describe('the board', () => {
         expect(within(lane('Doing')).getByText('Fix the ladder')).toBeInTheDocument()
     })
 
-    it('redraws when the backend says the board changed', async () => {
-        const {state} = backend([card()])
-        await open()
-
-        state.cards = [...state.cards, card({id: 'card-3', number: 3, title: 'Add a double jump'})]
-        const announce = tauri.listen.mock.calls.findLast(call => call[0] === 'board-changed')?.[1]
-        expect(announce).toBeDefined()
-        announce?.({payload: undefined as never})
-        await flushUntil(() => screen.queryByText('Add a double jump') !== null)
-    })
-
     it('adds a card from the dialog', async () => {
         backend([])
         await open()
@@ -432,8 +421,49 @@ describe('the board', () => {
         expect(created).toMatchObject({body: TEMPLATE})
     })
 
+    it('starts a new card from the template saved while the board stayed open', async () => {
+        let stored = TEMPLATE
+        backend([], {read_card_template: () => ({template: stored, defaultTemplate: TEMPLATE})})
+        await open()
+
+        stored = 'GOAL\n\nNEW HEADING\n'
+        await userEvent.click(screen.getByRole('button', {name: 'New card'}))
+        await flush()
+        await userEvent.type(screen.getByLabelText(/Title/u), 'Add a double jump')
+        await userEvent.click(screen.getByRole('button', {name: 'Add card'}))
+        await flushUntil(() => calls().includes('card_create'))
+
+        const created = tauri.invoke.mock.calls.find(call => call[0] === 'card_create')?.[1]
+        expect(created).toMatchObject({body: stored})
+    })
+
+    it('keeps the board on screen when the template cannot be read, and drops the failure once it can', async () => {
+        let isBroken = true
+        backend([card()], {
+            read_card_template: (_, answer) => {
+                if (isBroken)
+                    throw new CommandFailure('board_unavailable', 'The template file is locked')
+                return answer()
+            }
+        })
+        await open()
+        const user = userEvent.setup()
+
+        await user.click(screen.getByRole('button', {name: 'New card'}))
+
+        expect(await screen.findByText(/The template file is locked/u)).toBeVisible()
+        expect(within(lane('Ready')).getByText('Make the hero jump higher')).toBeVisible()
+
+        isBroken = false
+        await user.click(screen.getByRole('button', {name: 'New card'}))
+
+        expect(await screen.findByLabelText(/Title/u)).toBeVisible()
+        expect(screen.queryByText(/The template file is locked/u)).toBeNull()
+    })
+
     it('shows a comment another agent leaves while the card is open', async () => {
-        const {state} = backend([DOING])
+        const server = backend([DOING])
+        const {state} = server
         await open()
 
         await userEvent.click(screen.getByText('Fix the ladder'))
@@ -443,8 +473,7 @@ describe('the board', () => {
             ...state.comments,
             {...COMMENT, id: 'comment-2', body: 'Done, the ladder holds.'}
         ]
-        const announce = tauri.listen.mock.calls.findLast(call => call[0] === 'board-changed')?.[1]
-        announce?.({payload: undefined as never})
+        server.publishProjectChange('board')
         await flushUntil(() => screen.queryByText('Done, the ladder holds.') !== null)
     })
 })

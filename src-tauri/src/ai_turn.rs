@@ -3164,8 +3164,11 @@ mod tests {
     /// A test used to assign to five statics by hand and put them back at the bottom, with no RAII
     /// — so a failing assertion left the process dirty for whatever ran next. Beginning a turn is
     /// what production does, and dropping it is what puts everything back, including on a panic.
+    ///
+    /// The caller holds [`crate::approvals::serialize_gate_tests`], which every test that takes
+    /// the provider bit holds too, so the bit is free here.
     fn a_turn(request_id: u64, stream: &tauri::ipc::Channel<AiStreamPayload>) -> AiTurn {
-        AiTurn::begin(request_id, stream.clone()).expect("no other turn is running")
+        AiTurn::begin(request_id, stream.clone()).expect("no other test holds the provider bit")
     }
 
     #[test]

@@ -12,7 +12,6 @@ import {Token} from '@astryxdesign/core/Token'
 import {
     deleteProjectMemory,
     judgeProjectMemory,
-    listProjectMemory,
     saveProjectMemory,
     setMemoryStates,
     stopMemoryJudge,
@@ -21,6 +20,7 @@ import {
     watchMemoryJudge,
     watchMemorySweep
 } from '../../services/project-memory'
+import {useProjectValue} from '../../hooks/useProjectValue'
 import {
     MEMORY_KINDS,
     checkSummary,
@@ -80,9 +80,8 @@ function draftOf(memory: ProjectMemory): MemoryEdit {
 }
 
 export function MemoryView() {
-    const [memories, setMemories] = useState<readonly ProjectMemory[]>()
-    const [error, setError] = useState<CommandError>()
-    const [isLoading, setIsLoading] = useState(true)
+    const read = useProjectValue('memories')
+    const [writeError, setWriteError] = useState<CommandError>()
     const [filter, setFilter] = useState<MemoryFilter>('all')
     const [openId, setOpenId] = useState<string>()
     const [draft, setDraft] = useState<MemoryEdit>()
@@ -91,107 +90,69 @@ export function MemoryView() {
     const [sweeping, setSweeping] = useState<Sweeping>()
     const sweepRequest = useRef<number>(undefined)
     const [judgeFailure, setJudgeFailure] = useState<{memoryId: string; reason: string}>()
-
-    const [reads, setReads] = useState(0)
-
-    useEffect(() => {
-        let cancelled = false
-        void listProjectMemory()
-            .then(rows => {
-                if (cancelled) return
-                setMemories(rows)
-                setError(undefined)
-            })
-            .catch((failure: unknown) => {
-                if (cancelled) return
-                setError(toMemoryError(failure))
-                setMemories(undefined)
-            })
-            .finally(() => {
-                if (!cancelled) setIsLoading(false)
-            })
-        return () => {
-            cancelled = true
-        }
-    }, [reads])
+    const memories = read.value
+    const error = read.failure === undefined ? writeError : toMemoryError(read.failure)
+    const {reload} = read
 
     const recheck = useCallback(() => {
-        setIsLoading(true)
-        setReads(count => count + 1)
-    }, [])
+        setWriteError(undefined)
+        reload()
+    }, [reload])
 
-    useEffect(() => {
-        let stop: (() => void) | undefined
-        let cancelled = false
-        void watchMemoryJudge(event => {
-            if (event.type === 'judge-step')
-                setJudging(current =>
-                    current?.memoryId === event.memoryId ?
-                        {...current, line: event.line ?? current.line}
-                    :   current
-                )
-            if (event.type === 'judge-verdict') setReads(count => count + 1)
-            if (event.type === 'judge-failed' || event.type === 'judge-stopped') {
-                if (event.type === 'judge-failed')
-                    setJudgeFailure(current =>
+    useEffect(
+        () =>
+            watchMemoryJudge(event => {
+                if (event.type === 'judge-step')
+                    setJudging(current =>
                         current?.memoryId === event.memoryId ?
-                            current
-                        :   {
-                                memoryId: event.memoryId,
-                                reason: event.reason ?? 'the judge stopped'
-                            }
+                            {...current, line: event.line ?? current.line}
+                        :   current
                     )
-                setJudging(current => (current?.memoryId === event.memoryId ? undefined : current))
-            }
-        }).then(unlisten => {
-            if (cancelled) unlisten()
-            else stop = unlisten
-        })
-        return () => {
-            cancelled = true
-            stop?.()
-        }
-    }, [])
+                if (event.type === 'judge-failed' || event.type === 'judge-stopped') {
+                    if (event.type === 'judge-failed')
+                        setJudgeFailure(current =>
+                            current?.memoryId === event.memoryId ?
+                                current
+                            :   {
+                                    memoryId: event.memoryId,
+                                    reason: event.reason ?? 'the judge stopped'
+                                }
+                        )
+                    setJudging(current =>
+                        current?.memoryId === event.memoryId ? undefined : current
+                    )
+                }
+            }),
+        []
+    )
 
-    useEffect(() => {
-        let stop: (() => void) | undefined
-        let cancelled = false
-        void watchMemorySweep(event => {
-            setSweeping(current =>
-                current === undefined ? current : {...current, done: event.done, total: event.total}
-            )
-            if (event.type !== 'sweep-progress') return
-            const memoryId = event.memoryId
-            if (memoryId === undefined) return
-            setJudgeFailure(undefined)
-            setJudging(current => {
-                const requestId = current?.requestId ?? sweepRequest.current
-                return requestId === undefined ? current : (
-                        {memoryId, requestId, line: 'starting the sub-agent…'}
+    useEffect(
+        () =>
+            watchMemorySweep(event => {
+                setSweeping(current =>
+                    current === undefined ? current : (
+                        {...current, done: event.done, total: event.total}
                     )
-            })
-        }).then(unlisten => {
-            if (cancelled) unlisten()
-            else stop = unlisten
-        })
-        return () => {
-            cancelled = true
-            stop?.()
-        }
-    }, [])
+                )
+                if (event.type !== 'sweep-progress') return
+                const memoryId = event.memoryId
+                if (memoryId === undefined) return
+                setJudgeFailure(undefined)
+                setJudging(current => {
+                    const requestId = current?.requestId ?? sweepRequest.current
+                    return requestId === undefined ? current : (
+                            {memoryId, requestId, line: 'starting the sub-agent…'}
+                        )
+                })
+            }),
+        []
+    )
 
     const judge = useCallback((memory: ProjectMemory) => {
         const requestId = Date.now()
         setJudgeFailure(undefined)
         setJudging({memoryId: memory.id, requestId, line: 'starting the sub-agent…'})
         void judgeProjectMemory({requestId, memoryId: memory.id})
-            .then(judged => {
-                setMemories(rows =>
-                    judged === undefined ?
-                        (rows ?? []).filter(row => row.id !== memory.id)
-                    :   (rows ?? []).map(row => (row.id === judged.id ? judged : row))
-                )
-            })
             .catch((failure: unknown) => {
                 setJudgeFailure(current =>
                     current?.memoryId === memory.id ?
@@ -224,12 +185,11 @@ export function MemoryView() {
         setIsSaving(true)
         void saveProjectMemory(draft)
             .then(saved => {
-                setMemories(rows => (rows ?? []).map(row => (row.id === saved.id ? saved : row)))
                 setDraft(draftOf(saved))
-                setError(undefined)
+                setWriteError(undefined)
             })
             .catch((failure: unknown) => {
-                setError(toMemoryError(failure))
+                setWriteError(toMemoryError(failure))
             })
             .finally(() => {
                 setIsSaving(false)
@@ -240,13 +200,12 @@ export function MemoryView() {
         setIsSaving(true)
         void deleteProjectMemory(id)
             .then(() => {
-                setMemories(rows => (rows ?? []).filter(row => row.id !== id))
                 setOpenId(undefined)
                 setDraft(undefined)
-                setError(undefined)
+                setWriteError(undefined)
             })
             .catch((failure: unknown) => {
-                setError(toMemoryError(failure))
+                setWriteError(toMemoryError(failure))
             })
             .finally(() => {
                 setIsSaving(false)
@@ -275,16 +234,15 @@ export function MemoryView() {
             setJudging({memoryId: first, requestId, line: 'starting the sub-agent…'})
         void sweepProjectMemory({requestId, memoryIds})
             .then(() => {
-                setError(undefined)
+                setWriteError(undefined)
             })
             .catch((failure: unknown) => {
-                setError(toMemoryError(failure))
+                setWriteError(toMemoryError(failure))
             })
             .finally(() => {
                 sweepRequest.current = undefined
                 setSweeping(undefined)
                 setJudging(current => (current?.requestId === requestId ? undefined : current))
-                setReads(count => count + 1)
             })
     }, [unjudged])
 
@@ -293,13 +251,11 @@ export function MemoryView() {
         if (ids.length === 0) return
         setIsSaving(true)
         void setMemoryStates(ids, 'confirmed')
-            .then(moved => {
-                const byId = new Map(moved.map(row => [row.id, row]))
-                setMemories(rows => (rows ?? []).map(row => byId.get(row.id) ?? row))
-                setError(undefined)
+            .then(() => {
+                setWriteError(undefined)
             })
             .catch((failure: unknown) => {
-                setError(toMemoryError(failure))
+                setWriteError(toMemoryError(failure))
             })
             .finally(() => {
                 setIsSaving(false)
@@ -370,7 +326,7 @@ export function MemoryView() {
                         <Button
                             label='Recheck'
                             size='sm'
-                            isDisabled={isLoading}
+                            isDisabled={read.isLoading}
                             clickAction={recheck}
                         />
                         <Button
@@ -381,7 +337,7 @@ export function MemoryView() {
                             }
                             size='sm'
                             variant='primary'
-                            isDisabled={isLoading || unjudged.length === 0 || Boolean(judging)}
+                            isDisabled={read.isLoading || unjudged.length === 0 || Boolean(judging)}
                             clickAction={sweep}
                         />
                     </>
@@ -420,7 +376,7 @@ export function MemoryView() {
             >
                 <PanelState
                     label='project memory'
-                    isLoading={isLoading}
+                    isLoading={read.isLoading}
                     error={error}
                     isEmpty={shown.length === 0}
                     emptyTitle={

@@ -151,6 +151,7 @@ export function Workspace({
         clearTurnError,
         isChatLoaded,
         isStreaming,
+        activity,
         handBack,
         takeHandBack,
         start,
@@ -584,6 +585,7 @@ export function Workspace({
         () => ({
             attachmentPreviews,
             isStreaming: isBusy,
+            activity,
             messages,
             scrollRef: setMessageScroll,
             isScrolledUp: chatScroll.isScrolledUp,
@@ -594,6 +596,7 @@ export function Workspace({
             startWithoutPlan
         }),
         [
+            activity,
             attachmentPreviews,
             briefState,
             chatScroll.isScrolledUp,

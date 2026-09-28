@@ -21,6 +21,7 @@ function conversation(tool: ToolActivity) {
         <ChatConversation
             attachmentPreviews={{}}
             isStreaming
+            activity={undefined}
             messages={[message]}
             scrollRef={createRef<HTMLElement>()}
             onRetry={() => undefined}
@@ -83,6 +84,7 @@ describe('ChatConversation', () => {
             <ChatConversation
                 attachmentPreviews={{}}
                 isStreaming={false}
+                activity={undefined}
                 messages={[message]}
                 scrollRef={createRef<HTMLElement>()}
                 onRetry={() => undefined}
@@ -110,6 +112,7 @@ describe('ChatConversation', () => {
             <ChatConversation
                 attachmentPreviews={{}}
                 isStreaming={false}
+                activity={undefined}
                 messages={[message]}
                 scrollRef={createRef<HTMLElement>()}
                 onRetry={() => undefined}
@@ -134,6 +137,7 @@ describe('ChatConversation', () => {
             <ChatConversation
                 attachmentPreviews={{'a-1': 'blob:ravine'}}
                 isStreaming={false}
+                activity={undefined}
                 messages={[message]}
                 scrollRef={createRef<HTMLElement>()}
                 onRetry={() => undefined}
@@ -206,6 +210,7 @@ describe('verification points', () => {
             <ChatConversation
                 attachmentPreviews={{}}
                 isStreaming={false}
+                activity={undefined}
                 messages={[message]}
                 scrollRef={createRef<HTMLElement>()}
                 onRetry={() => undefined}
@@ -282,6 +287,7 @@ describe('verification points', () => {
             <ChatConversation
                 attachmentPreviews={{}}
                 isStreaming
+                activity={undefined}
                 messages={[message]}
                 scrollRef={createRef<HTMLElement>()}
                 onRetry={() => undefined}

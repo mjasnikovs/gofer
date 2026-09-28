@@ -6,6 +6,7 @@ import type {Message} from '../models/chat'
 export type ChatColumn = Readonly<{
     attachmentPreviews: Readonly<Record<string, string>>
     isStreaming: boolean
+    activity: string | undefined
     messages: readonly Message[]
     scrollRef: Ref<HTMLElement>
     isScrolledUp: boolean

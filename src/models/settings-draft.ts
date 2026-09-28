@@ -137,6 +137,7 @@ export type SettingsAction =
     | Readonly<{type: 'prompt-typed'; value: string}>
     | Readonly<{type: 'prompt-restored'}>
     | Readonly<{type: 'prompt-saved'; prompt: AgentPrompt}>
+    | Readonly<{type: 'prompt-reloaded'; prompt: AgentPrompt}>
     | Readonly<{type: 'template-typed'; value: string}>
     | Readonly<{type: 'template-restored'}>
     | Readonly<{type: 'template-saved'; template: CardTemplate}>
@@ -536,6 +537,14 @@ export function reduce(
                     title: 'Agent prompt saved',
                     description: 'The agent is told this before every turn in this project.'
                 })
+            }
+
+        case 'prompt-reloaded':
+            return {
+                ...state,
+                agentPrompt: agentPromptIsUnsaved(state) ? state.agentPrompt : action.prompt.prompt,
+                savedAgentPrompt: action.prompt.prompt,
+                defaultAgentPrompt: action.prompt.defaultPrompt
             }
 
         case 'template-typed':

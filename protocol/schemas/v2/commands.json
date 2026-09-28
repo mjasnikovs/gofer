@@ -138,12 +138,14 @@
         },
         {
             "command": "project.set_autoload",
-            "handler": "_project_set_autoload"
+            "handler": "_project_set_autoload",
+            "reparsesScripts": true
         },
         {
             "command": "project.remove_autoload",
             "handler": "remove_autoload",
-            "module": "project_config"
+            "module": "project_config",
+            "reparsesScripts": true
         },
         {
             "command": "project.list_input_actions",
@@ -222,15 +224,18 @@
         },
         {
             "command": "scene.create",
-            "handler": "_scene_create"
+            "handler": "_scene_create",
+            "reparsesScripts": true
         },
         {
             "command": "scene.save",
-            "handler": "_scene_save"
+            "handler": "_scene_save",
+            "reparsesScripts": true
         },
         {
             "command": "scene.save_as",
-            "handler": "_scene_save_as"
+            "handler": "_scene_save_as",
+            "reparsesScripts": true
         },
         {
             "command": "scene.reload",
@@ -348,19 +353,23 @@
         },
         {
             "command": "resource.rescan",
-            "handler": "_resource_rescan"
+            "handler": "_resource_rescan",
+            "reparsesScripts": true
         },
         {
             "command": "resource.create_tileset",
-            "handler": "_resource_create_tileset"
+            "handler": "_resource_create_tileset",
+            "reparsesScripts": true
         },
         {
             "command": "resource.create_texture",
-            "handler": "_resource_create_texture"
+            "handler": "_resource_create_texture",
+            "reparsesScripts": true
         },
         {
             "command": "resource.create_shape",
-            "handler": "_resource_create_shape"
+            "handler": "_resource_create_shape",
+            "reparsesScripts": true
         },
         {
             "command": "resource.describe_tileset",
@@ -375,5 +384,6 @@
             }
         }
     ],
+    "$reparsesScriptsComment": "`reparsesScripts` marks a command whose success writes something a script can name — a scene, an autoload, a resource — so the language server is asked to parse every open script again. A script that preloads a scene the call just wrote otherwise keeps its \"does not exist\" diagnostic, and a live turn read that error twice over a file the game was already running.",
     "$moduleComment": "`module` names the addon script a handler lives in, and its absence means `plugin.gd`. A handler outside the plugin class is a `static func` in a preloadable script, which is what puts it in the one-second headless suite rather than behind an editor boot; the dispatch table calls it through the preload constant of the same name."
 }

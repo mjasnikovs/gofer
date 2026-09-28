@@ -140,6 +140,20 @@ describe('the sketches panel', () => {
         expect(log.sketchReads).toEqual(['question-1-run', 'question-1-run'])
     })
 
+    it('reads an open layout again when the agent keeps a new revision under its id', async () => {
+        const server = backend([sketch()])
+        await open()
+        await userEvent.click(screen.getByText('Centered overlay'))
+        expect(await screen.findByRole('button', {name: 'Send to chat'})).toBeEnabled()
+
+        server.state.sketches = [sketch({savedAt: 1_700_000_001_000})]
+        server.state.sketchHtml = {shown: '<p>redrawn</p>', source: null}
+        server.publishProjectChange('sketches')
+
+        expect(await screen.findByText(/saved before Gofer kept the markup/u)).toBeVisible()
+        expect(server.log.sketchReads).toEqual(['question-1-run', 'question-1-run'])
+    })
+
     it('sends a builder the markup and never the inlined copy', async () => {
         const paste = vi.fn()
         backend()

@@ -10,6 +10,7 @@
 //! and stopping a process, and where the only thing holding it there was the log buffer it reads.
 
 use crate::ai_tools::ToolFailure;
+use crate::game_run::GameRun;
 use crate::godot_session::{
     LogEntry, LogQuery, LogSeverity, SessionState, current_info, current_state, editor_has_exited,
     game_launch_cursor, newest_logs, now_millis, read_logs,
@@ -48,9 +49,8 @@ pub(crate) struct SessionFacts {
     crash: Option<String>,
     /// The session's last error lines, oldest first, the engine's own chatter already dropped.
     errors: Vec<String>,
-    debugger_holds_a_game: bool,
-    /// The files that still hold a breakpoint this session set.
-    armed_breakpoints: Vec<String>,
+    /// Whether the debugger holds the game, and the breakpoints the editor still holds.
+    game: GameRun,
     /// Whether `project.godot` has stopped registering the runtime helper.
     helper_missing: bool,
 }
@@ -62,8 +62,7 @@ impl SessionFacts {
             editor_is_running: an_editor_is_still_running(),
             crash: a_crash_line_from_this_call(),
             errors: last_session_errors(CARRIED_ERROR_LINES),
-            debugger_holds_a_game: crate::debug::holds_a_game(),
-            armed_breakpoints: crate::debug::armed_breakpoints(),
+            game: crate::game_run::now(),
             helper_missing: current_info().is_some_and(|info| {
                 crate::addon::runtime_helper_missing(std::path::Path::new(&info.worktree))
             }),
@@ -286,9 +285,8 @@ static PROCESS_AWAITING_OPS: LazyLock<Vec<String>> = LazyLock::new(|| {
 /// in the corpus took, in one percent of the calls. `R01-backwards` spent eight in a row against a
 /// breakpoint it had set itself, then tried to run the game again three times.
 ///
-/// Both facts are needed and neither is enough. `holds_a_game` says the debugger started this game
-/// and not whether it is halted; `debuggee_is_stopped` says the adapter's last word was a stop and
-/// not whose game it was about. Together they are the one case where waiting cannot help.
+/// Both facts are needed and neither is enough: that the debugger started this game, and that the
+/// adapter's last word was a stop. Together they are the one case where waiting cannot help.
 ///
 /// `capture` was in this list and should never have been. A break stops the scene tree, not the
 /// renderer: measured at a live breakpoint on 4.7.2, a capture answered in 140ms with a real PNG,
@@ -300,21 +298,13 @@ static PROCESS_AWAITING_OPS: LazyLock<Vec<String>> = LazyLock::new(|| {
 /// Retryable, because it is: the call is right and the game is in the wrong state for it, which is
 /// exactly what `godot_debug continue` fixes.
 pub(crate) fn a_game_the_debugger_has_halted(op: &str) -> Result<(), ToolFailure> {
-    refusing_a_halted_game(
-        op,
-        crate::debug::holds_a_game(),
-        crate::godot_dap::debuggee_is_stopped(),
-    )
+    refusing_a_halted_game(op, &crate::game_run::now())
 }
 
 /// The decision itself. Kept apart from the rest of [`SessionFacts`] because this runs before every
 /// runtime call, where gathering the others would cost a project-file read per call.
-fn refusing_a_halted_game(
-    op: &str,
-    debugger_holds_a_game: bool,
-    debuggee_is_stopped: bool,
-) -> Result<(), ToolFailure> {
-    if !debugger_holds_a_game || !debuggee_is_stopped {
+fn refusing_a_halted_game(op: &str, game: &GameRun) -> Result<(), ToolFailure> {
+    if !game.debugger_game_is_halted() {
         return Ok(());
     }
     if !PROCESS_AWAITING_OPS.iter().any(|held_op| held_op == op) {
@@ -347,7 +337,7 @@ fn refusing_a_halted_game(
 /// sentence says exactly that much: it names the call that lets a stopped game run on and leaves
 /// the reader to look. Nothing here can be wrong about a game the debugger never started.
 fn the_debugger_holds_the_game(facts: &SessionFacts) -> Option<String> {
-    facts.debugger_holds_a_game.then(|| {
+    facts.game.debugger_holds_a_game().then(|| {
         "This game was launched by the debugger, and a game stopped at a breakpoint answers \
          nothing until it runs on. If one is set, debug.continue is what lets this call through; \
          debug.stack_trace says where it is stopped."
@@ -421,7 +411,8 @@ fn the_games_own_scripts_did_not_compile(facts: &SessionFacts) -> Option<String>
 /// says so more precisely; this is the other case, where the debugger has let go and the breakpoint
 /// has not.
 fn a_breakpoint_is_still_armed(facts: &SessionFacts) -> Option<String> {
-    if facts.armed_breakpoints.is_empty() {
+    let armed = facts.game.armed_files();
+    if armed.is_empty() {
         return None;
     }
     Some(format!(
@@ -429,7 +420,7 @@ fn a_breakpoint_is_still_armed(facts: &SessionFacts) -> Option<String> {
          session, so it hands them to the next game it plays — including one runtime.run \
          starts — and a game stopped at one draws no frame. Clear it with debug.set_breakpoints \
          and an empty lines list for that file, then run again.",
-        facts.armed_breakpoints.join(", ")
+        armed.join(", ")
     ))
 }
 
@@ -664,6 +655,7 @@ fn is_a_thumbnail_the_headless_editor_cannot_draw(entry: &LogEntry) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game_run::{Halt, Transition};
     use crate::godot_session::{
         ExternalEditor, LogSource, MAX_LOG_PAGE, REQUIRED_ENGINE_VERSION, SESSION_TEST_LOCK,
         SessionInfo, append_log, backdate_logs, bind, clear_logs,
@@ -701,8 +693,7 @@ mod tests {
             editor_is_running: true,
             crash: None,
             errors: Vec::new(),
-            debugger_holds_a_game: false,
-            armed_breakpoints: Vec::new(),
+            game: GameRun::default(),
             helper_missing: false,
         }
     }
@@ -1294,7 +1285,7 @@ mod tests {
     fn a_timeout_against_the_debuggers_own_game_names_the_call_that_frees_it() {
         let held = explaining(
             &SessionFacts {
-                debugger_holds_a_game: true,
+                game: GameRun::default().after(Transition::DebuggerStartedAGame),
                 ..a_session_with_nothing_wrong()
             },
             addon_failure("runtime_timeout", "The game did not answer in time"),
@@ -1329,7 +1320,11 @@ mod tests {
     /// started and let run answers a frame like any other.
     #[test]
     fn a_frame_awaiting_call_against_a_halted_game_is_refused_at_once() {
-        let refused = refusing_a_halted_game("input", true, true)
+        let launched = GameRun::default().after(Transition::DebuggerStartedAGame);
+        let halted = launched
+            .clone()
+            .after(Transition::Halted(Halt::AtABreakpoint));
+        let refused = refusing_a_halted_game("input", &halted)
             .expect_err("a halted game cannot answer a call that waits for a frame");
         assert_eq!(refused.code, "game_halted");
         assert!(refused.retryable, "continue is what makes this call work");
@@ -1344,10 +1339,13 @@ mod tests {
             refused.message
         );
 
-        assert!(refusing_a_halted_game("inspect_node", true, true).is_ok());
-        assert!(refusing_a_halted_game("get_tree", true, true).is_ok());
-        assert!(refusing_a_halted_game("input", true, false).is_ok());
-        assert!(refusing_a_halted_game("input", false, true).is_ok());
+        assert!(refusing_a_halted_game("inspect_node", &halted).is_ok());
+        assert!(refusing_a_halted_game("get_tree", &halted).is_ok());
+        assert!(refusing_a_halted_game("input", &launched).is_ok());
+        let not_the_debuggers = GameRun::default().after(Transition::Halted(Halt::AtABreakpoint));
+        assert!(refusing_a_halted_game("input", &not_the_debuggers).is_ok());
+        let resumed = halted.after(Transition::Resumed);
+        assert!(refusing_a_halted_game("input", &resumed).is_ok());
     }
 
     /// A breakpoint the editor still holds is named when a runtime call cannot be answered.
@@ -1358,7 +1356,10 @@ mod tests {
     #[test]
     fn a_timeout_with_a_breakpoint_still_set_names_the_file_holding_it() {
         let armed = SessionFacts {
-            armed_breakpoints: vec!["scripts/hud.gd".to_owned()],
+            game: GameRun::default().after(Transition::BreakpointsSet {
+                path: "scripts/hud.gd",
+                lines: &[4],
+            }),
             ..a_session_with_nothing_wrong()
         };
 
@@ -1379,7 +1380,7 @@ mod tests {
 
         let held = explaining(
             &SessionFacts {
-                debugger_holds_a_game: true,
+                game: armed.game.clone().after(Transition::DebuggerStartedAGame),
                 ..armed
             },
             addon_failure("runtime_timeout", "The game did not answer in time"),

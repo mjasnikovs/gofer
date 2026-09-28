@@ -344,7 +344,6 @@ describe('createTurnRunner', () => {
         expect(message.status).toBe('complete')
         expect(message.tools?.[0]?.status).toBe('error')
         expect(message.tools?.[0]?.output).toBe('The turn ended before this call finished.')
-        expect(message.activity).toBeUndefined()
     })
 
     it('drops the caption a long step was showing when the turn ends', async () => {
@@ -355,7 +354,24 @@ describe('createTurnRunner', () => {
         runner.start('go')
         await idle()
 
-        expect(reply(runner.state()).activity).toBeUndefined()
+        expect(runner.state().activity).toBeUndefined()
+    })
+
+    it('ends the retry caption when the retried request starts answering', async () => {
+        const captions: (string | undefined)[] = []
+        const {runner, idle} = harness({
+            during: play => {
+                play({type: 'retry-start', attempt: 1, maxAttempts: 10})
+                captions.push(runner.state().activity)
+                play({type: 'text-delta', delta: 'Hmm, mutating dict entries'})
+                captions.push(runner.state().activity)
+            }
+        })
+
+        runner.start('go')
+        await idle()
+
+        expect(captions).toEqual(['Trying again (1 of 10)', undefined])
     })
 
     it('ignores events from a turn that is no longer the one running', async () => {

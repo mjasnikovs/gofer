@@ -177,7 +177,8 @@ pub(crate) fn open_project_storage(
     if let Ok(legacy_root) = app.path().app_data_dir() {
         storage::migrate_legacy_data(&legacy_root, &workspace, &data_root)?;
     }
-    ProjectStorage::open(&data_root, &workspace)
+    let window = std::sync::Arc::new(crate::project_changes::WindowNotifier(app.clone()));
+    Ok(ProjectStorage::open(&data_root, &workspace)?.announcing_to(window))
 }
 
 /// Where this workspace's own data lives: `.gofer` beside the files it belongs to.

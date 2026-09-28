@@ -33,8 +33,18 @@
 //! record cannot fall behind a change the router did not see. What it still guards is the original
 //! case: an answer the agent never received — a timeout, a killed turn — leaves the record behind
 //! the editor, and the next mutation is refused rather than applied to a scene that moved on.
+//!
+//! The router asks three things of it: [`note_a_read`] for a file the worker showed, [`through`]
+//! around every file-touching call, and [`through_the_editor`] around every addon call. Every rule
+//! about filling, recording and forgetting lives behind those.
 
-use serde_json::Value;
+use crate::ai_tools::ToolFailure;
+use crate::files::{FileError, Workspace};
+use crate::godot_rpc::RpcError;
+use crate::godot_session_api::{CallGodotRequest, CallGodotResponse};
+use crate::tool_params::{self, Operation};
+use crate::tool_paths::{declares_a_path, paths_named};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -42,36 +52,96 @@ use std::sync::{Mutex, OnceLock};
 /// The host call the worker's `read` tool makes after showing the model a whole file.
 pub const NOTED_READ_TOOL: &str = "noted_read";
 
-/// Every path this agent has read, and the hash it was given for it.
-fn ledger() -> &'static Mutex<HashMap<(PathBuf, String), String>> {
-    static LEDGER: OnceLock<Mutex<HashMap<(PathBuf, String), String>>> = OnceLock::new();
-    LEDGER.get_or_init(|| Mutex::new(HashMap::new()))
+/// Arms a save over a file the worker's own `read` tool showed the model; answers whether it did.
+///
+/// A `read` runs in the worker, out of the router's sight: 94 of 195 live runs read a script that
+/// way, and every `file_conflict` a save ever met was over a file shown exactly so. The hash is
+/// taken from the disk: the read answered these bytes a moment ago, and a file that changes in
+/// between is a conflict the save should meet.
+pub(crate) fn note_a_read(workspace: &Workspace, path: &str) -> Result<bool, FileError> {
+    let path = path.strip_prefix("res://").unwrap_or(path);
+    if workspace.resolve(path)?.is_dir() {
+        return Ok(false);
+    }
+    let hash = workspace.hash_of(path)?;
+    if let Some(hash) = &hash {
+        remember(workspace.root(), path, hash);
+    }
+    Ok(hash.is_some())
 }
 
-/// Records what a read — or a write, which answers with the hash it just stored — reported.
-pub fn remember(root: &Path, path: &str, hash: &str) {
-    if hash.is_empty() {
-        return;
+/// Runs one file-touching call: fills `expectedHash` on the way in, records and strips what the
+/// answer says on the way out, and drops a record the refusal says outlived its file.
+///
+/// Which calls it covers is the operation's own row: one that declares a path touches a file, and
+/// one that declares a [`tool_params::Kind::Hash`] parameter is one the ledger fills. `root` is
+/// asked only for those; with none, the answer is still stripped and nothing is recorded.
+pub(crate) fn through(
+    operation: &Operation,
+    root: impl FnOnce() -> Option<PathBuf>,
+    params: Value,
+    run: impl FnOnce(Value) -> Result<Value, ToolFailure>,
+) -> Result<Value, ToolFailure> {
+    if !touches_a_file(operation.params) {
+        return run(params);
     }
-    if let Ok(mut held) = ledger().lock() {
-        held.insert((root.to_owned(), path.to_owned()), hash.to_owned());
+    let root = root();
+    let params = match &root {
+        Some(root) if fills_a_hash(operation) => with_remembered_hash(root, params),
+        _ => params,
+    };
+    let named = paths_named(operation, &params);
+    match run(params) {
+        Ok(answer) => Ok(reconcile(root.as_deref(), answer)),
+        Err(failure) => {
+            if let Some(root) = &root {
+                for path in &named {
+                    forget_a_vanished_file(root, path, &failure);
+                }
+            }
+            Err(failure)
+        }
     }
 }
 
-/// The hash this agent was last given for a file, if it has ever been told.
-pub fn recall(root: &Path, path: &str) -> Option<String> {
-    ledger()
-        .lock()
-        .ok()?
-        .get(&(root.to_owned(), path.to_owned()))
-        .cloned()
-}
-
-/// Drops one path, for a delete or a move that makes the record a claim about nothing.
-pub fn forget(root: &Path, path: &str) {
-    if let Ok(mut held) = ledger().lock() {
-        held.remove(&(root.to_owned(), path.to_owned()));
+/// Sends one addon call under the scene-revision guard, through `send`, the editor's port.
+///
+/// A call that names no revision is given the one the last answer reported, with the scene it
+/// counted. A caller that named its own is left alone: the renderer holds a view the router has no
+/// business overruling. The answer's revision is merged into its body and recorded.
+pub(crate) fn through_the_editor(
+    root: Option<&Path>,
+    request: CallGodotRequest,
+    mut send: impl FnMut(CallGodotRequest) -> Result<CallGodotResponse, RpcError>,
+) -> Result<Value, RpcError> {
+    let request = match (request.expected_revision, root.and_then(recall_revision)) {
+        (None, Some(held)) => CallGodotRequest {
+            expected_revision: Some(held.revision),
+            expected_scene: Some(held.scene),
+            ..request
+        },
+        _ => request,
+    };
+    let supplied = request.expected_revision;
+    let response = match send(request.clone()) {
+        Ok(answered) => answered,
+        Err(refusal) => {
+            let revision =
+                the_revision_a_first_mutation_was_refused_for(&refusal, supplied).ok_or(refusal)?;
+            send(CallGodotRequest {
+                expected_revision: Some(revision),
+                ..request
+            })?
+        }
+    };
+    let mut result = response.result;
+    if let (Some(revision), Some(object)) = (response.revision, result.as_object_mut()) {
+        object.insert("revision".to_owned(), json!(revision));
     }
+    if let Some(root) = root {
+        record_revision(root, &result);
+    }
+    Ok(result)
 }
 
 /// Drops the remembered revision alone. A fresh editor counts from zero, so a revision remembered
@@ -94,26 +164,92 @@ pub fn forget_worktree(root: &Path) {
     }
 }
 
+/// The hash this agent was last given for a file, if it has ever been told.
+pub(crate) fn recall(root: &Path, path: &str) -> Option<String> {
+    ledger()
+        .lock()
+        .ok()?
+        .get(&(root.to_owned(), path.to_owned()))
+        .cloned()
+}
+
+/// Every path this agent has read, and the hash it was given for it.
+fn ledger() -> &'static Mutex<HashMap<(PathBuf, String), String>> {
+    static LEDGER: OnceLock<Mutex<HashMap<(PathBuf, String), String>>> = OnceLock::new();
+    LEDGER.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn remember(root: &Path, path: &str, hash: &str) {
+    if hash.is_empty() {
+        return;
+    }
+    if let Ok(mut held) = ledger().lock() {
+        held.insert((root.to_owned(), path.to_owned()), hash.to_owned());
+    }
+}
+
+fn forget(root: &Path, path: &str) {
+    if let Ok(mut held) = ledger().lock() {
+        held.remove(&(root.to_owned(), path.to_owned()));
+    }
+}
+
+/// Read off the parameters rather than listed: `under` counts, because a listing is the read that
+/// fills the ledger for every file it reports.
+fn touches_a_file(params: &[tool_params::Param]) -> bool {
+    params
+        .iter()
+        .any(|param| declares_a_path(param) || touches_a_file(param.entry))
+}
+
+fn fills_a_hash(operation: &Operation) -> bool {
+    operation
+        .params
+        .iter()
+        .any(|param| param.kind == tool_params::Kind::Hash)
+}
+
+/// A hash the caller passed itself is left alone, and so is a path with no record — which is what
+/// an unread file already meant: `Workspace::write` reads that as "creating this file".
+fn with_remembered_hash(root: &Path, params: Value) -> Value {
+    let mut params = params;
+    let Some(object) = params.as_object_mut() else {
+        return params;
+    };
+    if object.contains_key("expectedHash") {
+        return params;
+    }
+    let hash = object
+        .get("path")
+        .and_then(Value::as_str)
+        .and_then(|path| recall(root, path));
+    if let Some(hash) = hash {
+        object.insert("expectedHash".to_owned(), json!(hash));
+    }
+    params
+}
+
+/// Drops a record when a refusal reports its file as gone.
+///
+/// The caller can neither see the hash nor clear it, because `expectedHash` is hidden from the
+/// tool; left in place, the next save carries the same dead record and is refused identically.
+fn forget_a_vanished_file(root: &Path, path: &str, failure: &ToolFailure) {
+    if failure.code == "file_conflict" && failure.details["actualHash"].is_null() {
+        forget(root, path);
+    }
+}
+
 /// Records every path/hash pair in an answer, and takes the bookkeeping back out of it.
 ///
-/// One step where the pairs are produced, rather than a five-part ritual re-enacted per router arm.
-/// Every operation that touches a file answers with the same two shapes — one stamp, or a `files`
-/// list of them — so this is the whole of "the ledger is up to date and the model never sees a
-/// hash", and an operation cannot forget half of it.
+/// Every operation that touches a file answers with one stamp, or a `files` list of them, so this
+/// is the whole of "the ledger is up to date and the model never sees a hash". `apply_rename` once
+/// left the ledger holding hashes for files it had just rewritten, and the next save over a renamed
+/// file was refused `file_conflict` with no call the model could make to escape.
 ///
-/// It used to be prose. `apply_rename` did not enact it at all: a rename left the ledger holding
-/// hashes for files it had just rewritten, and the model cannot clear them — `expectedHash` is
-/// hidden from the signature — so the next save over a renamed file was refused `file_conflict`
-/// with no call it could make to escape.
-///
-/// `version` goes too. It is the language server's document counter, which no operation accepts as
-/// a parameter at all: a field a caller cannot pass anywhere is context it pays for and cannot
-/// spend. The renderer's own Tauri commands still get both — Monaco holds a buffer and a token, and
-/// an agent holds neither.
-/// A stamp says what a file now holds. The other two things an answer can say about a file are
-/// that it is gone and that it has moved, and both are read here for the same reason: an arm that
-/// enacts half the ritual is the failure this function exists to make unreachable.
-pub fn reconcile(root: &Path, answer: Value) -> Value {
+/// `version` goes too: it is the language server's document counter, which no operation accepts.
+/// A stamp says what a file now holds; an answer can also say a file is gone or has moved, and
+/// both are read here for the same reason.
+fn reconcile(root: Option<&Path>, answer: Value) -> Value {
     let mut answer = answer;
     if let Value::Array(entries) = &mut answer {
         for entry in entries.iter_mut() {
@@ -129,16 +265,11 @@ pub fn reconcile(root: &Path, answer: Value) -> Value {
 
 /// Takes a deleted file's record out, and carries a moved file's record with it.
 ///
-/// Read off the answer rather than enacted by the arm that produced it. `godot_resource delete`
-/// answers `{path, deleted: true}` and `move` answers `{from, to, moved: true}`, so the answer
-/// already carries everything the ledger needs — and an arm that has to say it a second time is an
-/// arm that can forget to. Both said it by hand, and both said it about the string the caller
-/// wrote: `res://levels/level.tscn` reached neither record, because a record is keyed on the path
-/// the read was answered under.
-///
-/// The content did not change when a file moved, only where it lives, so the record follows it.
-fn what_became_of_the_file(root: &Path, answer: &Value) {
-    let Some(fields) = answer.as_object() else {
+/// Read off the answer, keyed on the path the answer names rather than the string the caller
+/// wrote: `res://levels/level.tscn` once reached neither record. The content did not change when a
+/// file moved, only where it lives, so the record follows it.
+fn what_became_of_the_file(root: Option<&Path>, answer: &Value) {
+    let (Some(root), Some(fields)) = (root, answer.as_object()) else {
         return;
     };
     if fields.get("deleted").and_then(Value::as_bool) == Some(true)
@@ -159,10 +290,9 @@ fn what_became_of_the_file(root: &Path, answer: &Value) {
     }
 }
 
-/// One stamp, or the `files` list an operation answers with. Nothing deeper: the shapes a file
-/// operation answers with are flat by design, and a recursive walk would strip `hash` out of a
-/// diagnostic or a search hit that happens to carry one.
-fn reconcile_in_place(root: &Path, entry: &mut Value) {
+/// One stamp, or the `files` list an operation answers with. Nothing deeper: a recursive walk
+/// would strip `hash` out of a diagnostic or a search hit that happens to carry one.
+fn reconcile_in_place(root: Option<&Path>, entry: &mut Value) {
     let Some(fields) = entry.as_object_mut() else {
         return;
     };
@@ -175,10 +305,9 @@ fn reconcile_in_place(root: &Path, entry: &mut Value) {
     let stamp = fields
         .get("path")
         .and_then(Value::as_str)
-        .zip(fields.get("hash").and_then(Value::as_str))
-        .map(|(path, hash)| (path.to_owned(), hash.to_owned()));
-    if let Some((path, hash)) = stamp {
-        remember(root, &path, &hash);
+        .zip(fields.get("hash").and_then(Value::as_str));
+    if let (Some(root), Some((path, hash))) = (root, stamp) {
+        remember(root, path, hash);
     }
     fields.remove("hash");
     fields.remove("version");
@@ -186,14 +315,13 @@ fn reconcile_in_place(root: &Path, entry: &mut Value) {
 
 /// Which scene a remembered revision counts, and what it was last reported to be at.
 ///
-/// The pair is the point. A revision on its own says nothing about which scene it belongs to, and
-/// the addon resets its counter to zero every time the edited scene changes — so a remembered zero
-/// for one scene matched a freshly opened *different* scene exactly, and the agent's next mutation
-/// went out unguarded and landed in the scene the user had just opened. Nothing said so.
+/// The pair is the point. The addon resets its counter to zero every time the edited scene
+/// changes, so a remembered bare zero for one scene matched a freshly opened *different* scene
+/// exactly, and the agent's next mutation landed in the scene the user had just opened.
 #[derive(Clone, Debug, PartialEq)]
-pub struct SceneRevision {
-    pub scene: String,
-    pub revision: u64,
+struct SceneRevision {
+    scene: String,
+    revision: u64,
 }
 
 /// The scene and revision each worktree's editor was last reported at.
@@ -202,13 +330,22 @@ fn revisions() -> &'static Mutex<HashMap<PathBuf, SceneRevision>> {
     REVISIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Records the revision an answer reported, and the scene it counted.
-///
-/// An answer that names no scene keeps the scene already remembered: a mutation reports its
-/// revision on the envelope and names nothing, which is not the same as there being no scene.
-pub fn remember_revision(root: &Path, scene: Option<&str>, revision: u64) {
+fn recall_revision(root: &Path) -> Option<SceneRevision> {
+    revisions().lock().ok()?.get(root).cloned()
+}
+
+/// Records the revision an answer carries. A mutation reports it on the envelope and names no
+/// scene, which keeps the scene already remembered rather than meaning there is none.
+fn record_revision(root: &Path, answer: &Value) {
+    let Some(revision) = answer.get("revision").and_then(Value::as_u64) else {
+        return;
+    };
+    let named = answer
+        .get("scene")
+        .and_then(Value::as_str)
+        .filter(|scene| !scene.is_empty());
     if let Ok(mut held) = revisions().lock() {
-        let scene = scene
+        let scene = named
             .map(str::to_owned)
             .or_else(|| held.get(root).map(|held| held.scene.clone()))
             .unwrap_or_default();
@@ -216,134 +353,151 @@ pub fn remember_revision(root: &Path, scene: Option<&str>, revision: u64) {
     }
 }
 
-/// The scene and revision this agent was last told about, if it has ever been told.
-pub fn recall_revision(root: &Path) -> Option<SceneRevision> {
-    revisions().lock().ok()?.get(root).cloned()
+/// The revision to retry at, when nothing was supplied and the addon refused for it.
+///
+/// The first call of a session follows no read, so nothing is supplied and the addon refuses; the
+/// catalog tells the model never to read the tree for that number. A revision that *was* supplied
+/// is a read this turn really made, and a conflict against it is the concurrent edit the guard
+/// exists to catch — retrying that would overwrite whatever moved the scene on.
+fn the_revision_a_first_mutation_was_refused_for(
+    refusal: &RpcError,
+    supplied: Option<u64>,
+) -> Option<u64> {
+    if supplied.is_some() || refusal.code != "revision_conflict" {
+        return None;
+    }
+    refusal
+        .details
+        .get("currentRevision")
+        .and_then(Value::as_u64)
 }
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn a_session_start_forgets_the_revision_and_keeps_the_hashes() {
-        let root = std::env::temp_dir().join("ledger-forget-revision");
-        super::remember(&root, "a.gd", "hash-a");
-        super::remember_revision(&root, Some("res://main.tscn"), 13);
-        super::forget_revision(&root);
-        assert_eq!(super::recall_revision(&root), None);
-        assert_eq!(super::recall(&root, "a.gd").as_deref(), Some("hash-a"));
-        super::forget_worktree(&root);
-    }
-
     use super::*;
+    use tempfile::TempDir;
 
-    fn root(name: &str) -> PathBuf {
-        PathBuf::from(format!("/tmp/gofer-read-ledger/{name}"))
+    fn operation(domain: &str, op: &str) -> &'static Operation {
+        tool_params::operation_of(domain, op).expect("a catalogue operation")
+    }
+
+    /// A worktree of its own, so no other test's records can answer for it.
+    fn worktree() -> TempDir {
+        TempDir::new().expect("a temporary worktree")
+    }
+
+    /// Runs a listing that answers `answer`, the way any file-touching arm answers.
+    fn answered(root: &Path, answer: Value) -> Value {
+        through(
+            operation("godot_resource", "list"),
+            || Some(root.to_owned()),
+            json!({}),
+            |_| Ok(answer),
+        )
+        .expect("a listing that answers")
+    }
+
+    /// The `expectedHash` a delete naming these parameters is sent with.
+    fn hash_a_delete_is_sent(root: &Path, params: Value) -> Option<Value> {
+        let mut sent = None;
+        through(
+            operation("godot_resource", "delete"),
+            || Some(root.to_owned()),
+            params,
+            |params| {
+                sent = params.get("expectedHash").cloned();
+                Ok(json!({}))
+            },
+        )
+        .expect("a delete that answers");
+        sent
+    }
+
+    fn told(root: &Path, path: &str) -> Option<Value> {
+        hash_a_delete_is_sent(root, json!({"path": path}))
     }
 
     #[test]
-    fn a_path_answers_with_the_hash_it_was_last_told() {
-        let tree = root("told");
-        assert_eq!(recall(&tree, "a.gd"), None);
-        remember(&tree, "a.gd", "aaaa");
-        assert_eq!(recall(&tree, "a.gd").as_deref(), Some("aaaa"));
-        remember(&tree, "a.gd", "bbbb");
-        assert_eq!(recall(&tree, "a.gd").as_deref(), Some("bbbb"));
+    fn a_save_is_held_to_the_hash_its_file_was_last_answered_with() {
+        let tree = worktree();
+        assert_eq!(
+            told(tree.path(), "a.gd"),
+            None,
+            "an unread file is held to nothing"
+        );
+        answered(tree.path(), json!({"path": "a.gd", "hash": "aaaa"}));
+        assert_eq!(told(tree.path(), "a.gd"), Some(json!("aaaa")));
+        answered(tree.path(), json!({"path": "a.gd", "hash": "bbbb"}));
+        assert_eq!(told(tree.path(), "a.gd"), Some(json!("bbbb")));
+    }
+
+    /// The renderer holds its own buffer and token, and the ledger does not overrule it.
+    #[test]
+    fn a_hash_the_caller_passed_is_left_alone() {
+        let tree = worktree();
+        answered(tree.path(), json!({"path": "a.gd", "hash": "aaaa"}));
+        assert_eq!(
+            hash_a_delete_is_sent(tree.path(), json!({"path": "a.gd", "expectedHash": "mine"})),
+            Some(json!("mine"))
+        );
     }
 
     /// Two worktrees hold the same relative paths, and one must never answer for the other.
     #[test]
     fn two_worktrees_keep_their_own_records() {
-        let (one, two) = (root("one"), root("two"));
-        remember(&one, "player.gd", "1111");
-        remember(&two, "player.gd", "2222");
-        assert_eq!(recall(&one, "player.gd").as_deref(), Some("1111"));
-        assert_eq!(recall(&two, "player.gd").as_deref(), Some("2222"));
-        forget_worktree(&one);
-        assert_eq!(recall(&one, "player.gd"), None);
-        assert_eq!(recall(&two, "player.gd").as_deref(), Some("2222"));
+        let (one, two) = (worktree(), worktree());
+        answered(one.path(), json!({"path": "player.gd", "hash": "1111"}));
+        answered(two.path(), json!({"path": "player.gd", "hash": "2222"}));
+        assert_eq!(told(one.path(), "player.gd"), Some(json!("1111")));
+        assert_eq!(told(two.path(), "player.gd"), Some(json!("2222")));
+        forget_worktree(one.path());
+        assert_eq!(told(one.path(), "player.gd"), None);
+        assert_eq!(told(two.path(), "player.gd"), Some(json!("2222")));
     }
 
-    /// A deleted file's record is a claim about nothing, and keeping it would refuse the save that
-    /// recreates the file — the one case where passing no hash is the whole point.
+    /// A workspace that cannot be read is no reason to hand the model a hash.
     #[test]
-    fn a_forgotten_path_reads_as_never_told() {
-        let tree = root("forgotten");
-        remember(&tree, "gone.gd", "cccc");
-        forget(&tree, "gone.gd");
-        assert_eq!(recall(&tree, "gone.gd"), None);
+    fn without_a_worktree_the_answer_is_still_stripped() {
+        let answer = through(
+            operation("godot_resource", "list"),
+            || None,
+            json!({}),
+            |_| Ok(json!({"path": "a.gd", "hash": "aaaa", "version": 2})),
+        )
+        .expect("a listing that answers");
+        assert_eq!(answer, json!({"path": "a.gd"}));
     }
 
-    /// One record per worktree, and a task that ends must not answer for the one that reuses its
-    /// directory — a stale number there refuses every mutation.
     #[test]
-    fn a_worktree_answers_with_the_revision_it_was_last_told() {
-        let (one, two) = (root("rev-one"), root("rev-two"));
-        assert_eq!(recall_revision(&one), None);
-        remember_revision(&one, Some("res://a.tscn"), 3);
-        remember_revision(&two, Some("res://b.tscn"), 11);
-        assert_eq!(recall_revision(&one).map(|held| held.revision), Some(3));
-        remember_revision(&one, Some("res://a.tscn"), 4);
-        assert_eq!(recall_revision(&one).map(|held| held.revision), Some(4));
-        assert_eq!(recall_revision(&two).map(|held| held.revision), Some(11));
-        forget_worktree(&one);
-        assert_eq!(recall_revision(&one), None);
-        assert_eq!(recall_revision(&two).map(|held| held.revision), Some(11));
-    }
-
-    /// Zero is the revision a freshly opened scene is at, so it has to survive being recorded —
-    /// an `unwrap_or_default` anywhere on this path reads it as "never told" and passes nothing.
-    #[test]
-    fn revision_zero_is_a_record_like_any_other() {
-        let tree = root("rev-zero");
-        remember_revision(&tree, Some("res://main.tscn"), 0);
-        assert_eq!(recall_revision(&tree).map(|held| held.revision), Some(0));
-    }
-
-    /// The regression this pair exists for: a revision has to say which scene it counts.
-    ///
-    /// The addon resets its counter to zero whenever the edited scene changes. A ledger holding a
-    /// bare `0` for `a.tscn` therefore matched a freshly opened `b.tscn` exactly, the mutation's
-    /// guard passed, and the change landed in the scene the user had just opened. Nothing said so.
-    #[test]
-    fn a_revision_carries_the_scene_it_counts() {
-        let tree = root("rev-scene");
-        remember_revision(&tree, Some("res://a.tscn"), 0);
-        let held = recall_revision(&tree).expect("a recorded revision");
-        assert_eq!(held.scene, "res://a.tscn");
-        assert_eq!(held.revision, 0);
-
-        remember_revision(&tree, None, 1);
-        let after = recall_revision(&tree).expect("a recorded revision");
-        assert_eq!(after.scene, "res://a.tscn");
-        assert_eq!(after.revision, 1);
-
-        remember_revision(&tree, Some("res://b.tscn"), 0);
-        let switched = recall_revision(&tree).expect("a recorded revision");
-        assert_eq!(switched.scene, "res://b.tscn");
-        assert_eq!(switched.revision, 0);
+    fn an_operation_that_names_no_file_is_left_alone() {
+        let answer = through(
+            operation("godot_session", "status"),
+            || unreachable!("no file is named, so no worktree is asked for"),
+            json!({}),
+            |_| Ok(json!({"hash": "not a file's"})),
+        )
+        .expect("an answer");
+        assert_eq!(answer, json!({"hash": "not a file's"}));
     }
 
     #[test]
     fn reconciling_records_every_stamp_and_hands_back_none_of_them() {
-        let tree = root("reconcile");
-        let answer = reconcile(
-            &tree,
-            serde_json::json!({"path": "player.gd", "hash": "aaaa", "version": 3, "bytes": 12}),
+        let tree = worktree();
+        let answer = answered(
+            tree.path(),
+            json!({"path": "player.gd", "hash": "aaaa", "version": 3, "bytes": 12}),
         );
 
-        assert_eq!(recall(&tree, "player.gd").as_deref(), Some("aaaa"));
-        assert_eq!(answer["path"], "player.gd");
-        assert_eq!(answer["bytes"], 12);
-        assert!(answer.get("hash").is_none(), "{answer}");
-        assert!(answer.get("version").is_none(), "{answer}");
+        assert_eq!(told(tree.path(), "player.gd"), Some(json!("aaaa")));
+        assert_eq!(answer, json!({"path": "player.gd", "bytes": 12}));
     }
 
     #[test]
     fn a_verdict_that_carries_no_hash_still_loses_its_document_counter() {
-        let tree = root("reconcile-diagnostics");
-        let answer = reconcile(
-            &tree,
-            serde_json::json!({
+        let tree = worktree();
+        let answer = answered(
+            tree.path(),
+            json!({
                 "path": "player.gd",
                 "version": 7,
                 "published": true,
@@ -357,21 +511,21 @@ mod tests {
         assert!(answer.get("version").is_none(), "{answer}");
     }
 
-    /// The other shape every file-touching operation answers with: a `files` list of the same
-    /// stamps. One rule over both, so a batched arm cannot leak what a single one does not.
+    /// One rule over a stamp and a `files` list, so a batched arm cannot leak what a single one
+    /// does not.
     #[test]
     fn reconciling_reaches_every_file_in_a_batch() {
-        let tree = root("reconcile-batch");
-        let answer = reconcile(
-            &tree,
-            serde_json::json!({"files": [
+        let tree = worktree();
+        let answer = answered(
+            tree.path(),
+            json!({"files": [
                 {"path": "a.gd", "hash": "1111", "version": 1},
                 {"path": "b.gd", "hash": "2222", "version": 2}
             ]}),
         );
 
-        assert_eq!(recall(&tree, "a.gd").as_deref(), Some("1111"));
-        assert_eq!(recall(&tree, "b.gd").as_deref(), Some("2222"));
+        assert_eq!(told(tree.path(), "a.gd"), Some(json!("1111")));
+        assert_eq!(told(tree.path(), "b.gd"), Some(json!("2222")));
         assert!(
             !answer.to_string().contains("hash"),
             "no answer the model reads may carry one: {answer}"
@@ -381,121 +535,340 @@ mod tests {
     /// A `list` with hashing off answers `null`, which is not a record and not a field either.
     #[test]
     fn reconciling_an_answer_with_no_hash_records_nothing() {
-        let tree = root("reconcile-none");
-        let answer = reconcile(
-            &tree,
-            serde_json::json!({"files": [{"path": "art.png", "bytes": 40, "hash": null}]}),
+        let tree = worktree();
+        let answer = answered(
+            tree.path(),
+            json!({"files": [{"path": "art.png", "bytes": 40, "hash": null}]}),
         );
 
-        assert_eq!(recall(&tree, "art.png"), None);
-        assert!(answer["files"][0].get("hash").is_none(), "{answer}");
-        assert_eq!(answer["files"][0]["bytes"], 40);
+        assert_eq!(told(tree.path(), "art.png"), None);
+        assert_eq!(answer, json!({"files": [{"path": "art.png", "bytes": 40}]}));
     }
 
     /// A file whose text was withheld leaves the ledger alone, so a later write is refused.
     ///
-    /// `godot_script open` stops carrying text once a batched call has spent its budget, and it
-    /// answers with the path so the model knows what it is missing. Answering with the hash as well
-    /// would record the file as read: the next `save` is handed that hash as its `expectedHash`,
-    /// the workspace finds it current, and a whole file is replaced out of text nobody was shown.
+    /// `godot_script open` stops carrying text once a batched call has spent its budget. Recording
+    /// its hash would let the next `save` replace a whole file out of text nobody was shown.
     #[test]
     fn a_file_answered_without_its_text_is_not_recorded_as_read() {
-        let tree = root("reconcile-withheld");
-        remember(&tree, "kept.gd", "an-older-hash");
+        let tree = worktree();
+        answered(
+            tree.path(),
+            json!({"path": "kept.gd", "hash": "an-older-hash"}),
+        );
 
-        let answer = reconcile(
-            &tree,
-            serde_json::json!({"files": [
+        let answer = answered(
+            tree.path(),
+            json!({"files": [
                 {"path": "kept.gd", "bytes": 12, "hash": "shown"},
                 {"path": "withheld.gd", "bytes": 900, "version": 3, "omitted": "no room left"},
             ]}),
         );
 
-        assert_eq!(recall(&tree, "kept.gd").as_deref(), Some("shown"));
-        assert_eq!(recall(&tree, "withheld.gd"), None);
+        assert_eq!(told(tree.path(), "kept.gd"), Some(json!("shown")));
+        assert_eq!(told(tree.path(), "withheld.gd"), None);
         assert_eq!(answer["files"][1]["omitted"], "no room left");
     }
 
-    /// A batch operation answers with a list of stamps rather than one, and every one is recorded.
     #[test]
     fn reconciling_reaches_every_entry_of_a_list_shaped_answer() {
-        let tree = root("reconcile-list");
-        let answer = reconcile(
-            &tree,
-            serde_json::json!([
+        let tree = worktree();
+        let answer = answered(
+            tree.path(),
+            json!([
                 {"path": "one.gd", "hash": "1111", "version": 1},
                 {"path": "two.gd", "hash": "2222"}
             ]),
         );
 
-        assert_eq!(recall(&tree, "one.gd").as_deref(), Some("1111"));
-        assert_eq!(recall(&tree, "two.gd").as_deref(), Some("2222"));
+        assert_eq!(told(tree.path(), "one.gd"), Some(json!("1111")));
+        assert_eq!(told(tree.path(), "two.gd"), Some(json!("2222")));
         assert!(!answer.to_string().contains("hash"), "{answer}");
     }
 
-    /// Not every answer is a stamp. One that is not an object is handed back untouched rather than
-    /// walked, because a recursive strip would take `hash` out of a search hit that carries one.
+    /// A recursive strip would take `hash` out of a search hit that carries one.
     #[test]
     fn an_answer_that_is_not_a_stamp_is_handed_back_as_it_is() {
-        let tree = root("reconcile-scalar");
-        assert_eq!(
-            reconcile(&tree, serde_json::json!("ok")),
-            serde_json::json!("ok")
-        );
-        assert_eq!(
-            reconcile(&tree, serde_json::json!([1, 2])),
-            serde_json::json!([1, 2])
-        );
+        let tree = worktree();
+        assert_eq!(answered(tree.path(), json!("ok")), json!("ok"));
+        assert_eq!(answered(tree.path(), json!([1, 2])), json!([1, 2]));
     }
 
-    /// A delete answers that the file is gone, and that is the whole of the arm's bookkeeping.
-    ///
-    /// Keeping the record would refuse the save that recreates the file — the one case where naming
-    /// no hash is the point — and the arm that used to say `forget` by hand said it about the
-    /// string the caller wrote, so a `res://` delete forgot nothing at all.
+    /// Keeping a deleted file's record would refuse the save that recreates it — the one case
+    /// where naming no hash is the point.
     #[test]
     fn a_deleted_file_loses_its_record_without_the_arm_saying_so() {
-        let tree = root("reconcile-deleted");
-        remember(&tree, "levels/level.tscn", "aaaa");
-        let answer = reconcile(
-            &tree,
-            serde_json::json!({"path": "levels/level.tscn", "deleted": true}),
+        let tree = worktree();
+        answered(
+            tree.path(),
+            json!({"path": "levels/level.tscn", "hash": "aaaa"}),
         );
-        assert_eq!(recall(&tree, "levels/level.tscn"), None);
+        let answer = answered(
+            tree.path(),
+            json!({"path": "levels/level.tscn", "deleted": true}),
+        );
+        assert_eq!(told(tree.path(), "levels/level.tscn"), None);
         assert_eq!(answer["deleted"], true);
     }
 
-    /// A move answers with both ends, so the record follows the file: the content did not change,
-    /// only where it lives. Left behind, it is a claim about a path that holds nothing and the next
-    /// save over the destination is refused a hash the model cannot see.
     #[test]
     fn a_moved_file_carries_its_record_to_where_it_went() {
-        let tree = root("reconcile-moved");
-        remember(&tree, "levels/level.tscn", "bbbb");
-        let answer = reconcile(
-            &tree,
-            serde_json::json!({"from": "levels/level.tscn", "to": "levels/one.tscn", "moved": true}),
+        let tree = worktree();
+        answered(
+            tree.path(),
+            json!({"path": "levels/level.tscn", "hash": "bbbb"}),
         );
-        assert_eq!(recall(&tree, "levels/level.tscn"), None);
-        assert_eq!(recall(&tree, "levels/one.tscn").as_deref(), Some("bbbb"));
+        let answer = answered(
+            tree.path(),
+            json!({"from": "levels/level.tscn", "to": "levels/one.tscn", "moved": true}),
+        );
+        assert_eq!(told(tree.path(), "levels/level.tscn"), None);
+        assert_eq!(told(tree.path(), "levels/one.tscn"), Some(json!("bbbb")));
         assert_eq!(answer["moved"], true);
     }
 
-    /// A path that was never read moves without inventing a record for where it landed.
     #[test]
     fn moving_an_unread_file_records_nothing_at_the_destination() {
-        let tree = root("reconcile-moved-unread");
-        reconcile(
-            &tree,
-            serde_json::json!({"from": "art/a.png", "to": "art/b.png", "moved": true}),
+        let tree = worktree();
+        answered(
+            tree.path(),
+            json!({"from": "art/a.png", "to": "art/b.png", "moved": true}),
         );
-        assert_eq!(recall(&tree, "art/b.png"), None);
+        assert_eq!(told(tree.path(), "art/b.png"), None);
     }
 
     #[test]
     fn an_empty_hash_is_not_a_record() {
-        let tree = root("empty");
-        remember(&tree, "b.gd", "");
-        assert_eq!(recall(&tree, "b.gd"), None);
+        let tree = worktree();
+        answered(tree.path(), json!({"path": "b.gd", "hash": ""}));
+        assert_eq!(told(tree.path(), "b.gd"), None);
+    }
+
+    /// A record that outlives its file must not refuse every save of that path forever.
+    ///
+    /// The file goes away outside the router — the editor deletes it, a checkout reverts it — and
+    /// the refusal tells the agent to save again. Without this the next save carries the same dead
+    /// record and is refused the same way, over a parameter the agent cannot see.
+    #[test]
+    fn a_record_that_outlived_its_file_is_dropped_so_the_next_save_creates_it() {
+        let tree = worktree();
+        let workspace = Workspace::open(tree.path()).expect("a workspace");
+        let save = |text: &str| {
+            through(
+                operation("godot_script", "save"),
+                || Some(workspace.root().to_owned()),
+                json!({"path": "hud.gd", "text": text}),
+                |params| {
+                    let expected = params.get("expectedHash").and_then(Value::as_str);
+                    let stamp = workspace
+                        .write("hud.gd", text, expected)
+                        .map_err(ToolFailure::from)?;
+                    Ok(json!({"path": stamp.path, "hash": stamp.hash}))
+                },
+            )
+        };
+        save("extends Node\n").expect("the first save creates the file");
+
+        std::fs::write(tree.path().join("hud.gd"), "extends Node2D\n").expect("someone edits it");
+        let changed = save("extends Control\n").expect_err("a file that changed is refused");
+        assert_eq!(changed.code, "file_conflict");
+        assert!(
+            save("extends Control\n").is_err(),
+            "a file that merely changed keeps its record"
+        );
+
+        std::fs::remove_file(tree.path().join("hud.gd")).expect("the file goes away outside us");
+        let gone = save("extends Control\n").expect_err("there is nothing there to match");
+        assert!(
+            gone.message.contains("Save it again to create the file"),
+            "the refusal has to name the call that works: {}",
+            gone.message
+        );
+        save("extends Control\n").expect("saving again creates the file");
+    }
+
+    #[test]
+    fn a_read_the_worker_made_arms_the_save_over_what_it_showed() {
+        let tree = worktree();
+        let workspace = Workspace::open(tree.path()).expect("a workspace");
+        let stamp = workspace
+            .write("scripts/player.gd", "extends Node2D\n", None)
+            .expect("write the script");
+        forget_worktree(workspace.root());
+
+        assert!(note_a_read(&workspace, "res://scripts/player.gd").expect("note the read"));
+        assert_eq!(
+            told(tree.path(), "scripts/player.gd"),
+            Some(json!(stamp.hash)),
+            "the record is keyed the way a save names the file, scheme off"
+        );
+        assert!(!note_a_read(&workspace, "scripts").expect("a directory is not a file shown"));
+        assert_eq!(told(tree.path(), "scripts"), None);
+    }
+
+    /// What the editor was sent, in order.
+    type Sent = std::rc::Rc<std::cell::RefCell<Vec<CallGodotRequest>>>;
+
+    /// An editor that answers each call with the next of `answers`, and keeps what it was sent.
+    fn editor(
+        answers: Vec<Result<CallGodotResponse, RpcError>>,
+    ) -> (
+        Sent,
+        impl FnMut(CallGodotRequest) -> Result<CallGodotResponse, RpcError>,
+    ) {
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut answers = answers.into_iter();
+        let seen = std::rc::Rc::clone(&sent);
+        (sent, move |request| {
+            seen.borrow_mut().push(request);
+            answers.next().expect("the editor was asked once too often")
+        })
+    }
+
+    fn at(revision: Option<u64>, result: Value) -> Result<CallGodotResponse, RpcError> {
+        Ok(CallGodotResponse {
+            id: "1".to_owned(),
+            result,
+            revision,
+        })
+    }
+
+    fn conflict(current: u64) -> Result<CallGodotResponse, RpcError> {
+        Err(RpcError {
+            details: json!({"currentRevision": current}),
+            ..RpcError::new("revision_conflict", "The scene moved on")
+        })
+    }
+
+    fn call(expected_revision: Option<u64>) -> CallGodotRequest {
+        CallGodotRequest {
+            command: "scene.add_node".to_owned(),
+            params: json!({}),
+            expected_revision,
+            expected_scene: None,
+            timeout_ms: None,
+        }
+    }
+
+    /// What the next call naming no revision is sent with.
+    fn expected_next(root: &Path) -> (Option<u64>, Option<String>) {
+        let (sent, send) = editor(vec![at(None, json!({}))]);
+        through_the_editor(Some(root), call(None), send).expect("an answer");
+        let request = sent.borrow()[0].clone();
+        (request.expected_revision, request.expected_scene)
+    }
+
+    #[test]
+    fn a_call_naming_no_revision_is_sent_the_one_the_last_answer_reported() {
+        let tree = worktree();
+        let (_, send) = editor(vec![at(
+            None,
+            json!({"scene": "res://a.tscn", "revision": 3}),
+        )]);
+        through_the_editor(Some(tree.path()), call(None), send).expect("a read");
+        assert_eq!(
+            expected_next(tree.path()),
+            (Some(3), Some("res://a.tscn".to_owned()))
+        );
+
+        let (sent, send) = editor(vec![at(Some(4), json!({}))]);
+        let answer = through_the_editor(Some(tree.path()), call(Some(9)), send)
+            .expect("a mutation at the caller's own revision");
+        assert_eq!(sent.borrow()[0].expected_revision, Some(9));
+        assert_eq!(sent.borrow()[0].expected_scene, None);
+        assert_eq!(
+            answer["revision"], 4,
+            "the envelope's revision is the model's to read"
+        );
+        assert_eq!(
+            expected_next(tree.path()),
+            (Some(4), Some("res://a.tscn".to_owned())),
+            "a mutation names no scene, which keeps the one remembered"
+        );
+    }
+
+    /// Zero is the revision a freshly opened scene is at, so it has to survive being recorded, and a
+    /// revision has to say which scene it counts: a bare zero for `a.tscn` matched a freshly opened
+    /// `b.tscn` exactly, and the mutation landed in the scene the user had just opened.
+    #[test]
+    fn a_revision_carries_the_scene_it_counts_from_zero() {
+        let tree = worktree();
+        for (scene, revision) in [("res://a.tscn", 0), ("res://b.tscn", 0)] {
+            let (_, send) = editor(vec![at(
+                None,
+                json!({"scene": scene, "revision": revision}),
+            )]);
+            through_the_editor(Some(tree.path()), call(None), send).expect("a read");
+            assert_eq!(
+                expected_next(tree.path()),
+                (Some(revision), Some(scene.to_owned()))
+            );
+        }
+    }
+
+    /// The first mutation of a session follows no read, so it is retried at the revision the
+    /// refusal names rather than sending the model to read the tree for a number.
+    #[test]
+    fn the_first_mutation_of_a_session_is_retried_at_the_revision_it_was_refused_for() {
+        let tree = worktree();
+        let (sent, send) = editor(vec![conflict(5), at(Some(6), json!({}))]);
+        let answer = through_the_editor(Some(tree.path()), call(None), send).expect("the retry");
+        let asked: Vec<Option<u64>> = sent.borrow().iter().map(|r| r.expected_revision).collect();
+        assert_eq!(asked, [None, Some(5)]);
+        assert_eq!(answer["revision"], 6);
+    }
+
+    /// A revision a read or a caller supplied is the guard doing its job, and is never retried.
+    #[test]
+    fn a_conflict_against_a_supplied_revision_is_not_retried() {
+        let tree = worktree();
+        let (sent, send) = editor(vec![conflict(5)]);
+        let refused = through_the_editor(Some(tree.path()), call(Some(2)), send)
+            .expect_err("the caller's own revision conflicts");
+        assert_eq!(refused.code, "revision_conflict");
+        assert_eq!(sent.borrow().len(), 1);
+
+        let (_, send) = editor(vec![at(
+            None,
+            json!({"scene": "res://a.tscn", "revision": 1}),
+        )]);
+        through_the_editor(Some(tree.path()), call(None), send).expect("a read");
+        let (sent, send) = editor(vec![conflict(5)]);
+        through_the_editor(Some(tree.path()), call(None), send)
+            .expect_err("the remembered revision conflicts");
+        assert_eq!(sent.borrow().len(), 1);
+    }
+
+    /// A fresh editor counts from zero, so a session start forgets the revision; the files did not
+    /// change because the editor did, so the hashes stay.
+    #[test]
+    fn a_session_start_forgets_the_revision_and_keeps_the_hashes() {
+        let tree = worktree();
+        answered(tree.path(), json!({"path": "a.gd", "hash": "hash-a"}));
+        let (_, send) = editor(vec![at(
+            None,
+            json!({"scene": "res://main.tscn", "revision": 13}),
+        )]);
+        through_the_editor(Some(tree.path()), call(None), send).expect("a read");
+
+        forget_revision(tree.path());
+        assert_eq!(expected_next(tree.path()), (None, None));
+        assert_eq!(told(tree.path(), "a.gd"), Some(json!("hash-a")));
+    }
+
+    /// A task that ends must not answer for the one that reuses its directory.
+    #[test]
+    fn a_worktree_forgotten_forgets_its_revision_and_no_other() {
+        let (one, two) = (worktree(), worktree());
+        for (tree, revision) in [(&one, 3), (&two, 11)] {
+            let (_, send) = editor(vec![at(
+                None,
+                json!({"scene": "res://a.tscn", "revision": revision}),
+            )]);
+            through_the_editor(Some(tree.path()), call(None), send).expect("a read");
+        }
+        forget_worktree(one.path());
+        assert_eq!(expected_next(one.path()).0, None);
+        assert_eq!(expected_next(two.path()).0, Some(11));
     }
 }

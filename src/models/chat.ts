@@ -21,7 +21,6 @@ export type Message = Readonly<{
     context?: number
     model?: string
     status?: 'streaming' | 'complete' | 'error' | 'aborted' | 'queued'
-    activity?: string
     attachments?: readonly ChatAttachment[]
     verifyPoints?: readonly VerifyPoint[]
     compaction?: MessageCompaction

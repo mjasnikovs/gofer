@@ -20,6 +20,7 @@ import type {
     ProjectMemory
 } from '../models/memory'
 import type {FileDiff, TaskChanges} from '../models/changes'
+import type {ProjectChange} from '../models/project-changes'
 import type {ProjectSketch, SketchHtml} from '../models/sketch'
 import type {
     Card,
@@ -320,9 +321,9 @@ type DesktopEventMap = Readonly<{
     'ai-question-settled': UserQuestionSettled
     'ai-memory-judge': MemoryJudgeEvent
     'ai-memory-sweep': MemorySweepEvent
-    'board-changed': undefined
     'chat-changed': Readonly<{taskId: string}>
     'godot-session-event': GodotSessionEvent
+    'project-changed': ProjectChange
     'rag-download-progress': DownloadProgress
     'settings-saved': SettingsResponse
     'tasks-changed': undefined
@@ -370,4 +371,15 @@ export function listen<EventName extends keyof DesktopEventMap>(
     const driver = testDriver()
     if (driver) return driver.listen(event, handler as EventCallback<unknown>)
     return tauriListen(event, handler)
+}
+
+/** `listen` for an effect: the stop it answers works whether or not registering has finished. */
+export function watchEvent<EventName extends keyof DesktopEventMap>(
+    event: EventName,
+    handler: EventCallback<DesktopEventMap[EventName]>
+): () => void {
+    const registered = listen(event, handler).catch(() => undefined)
+    return () => {
+        void registered.then(unlisten => unlisten?.())
+    }
 }

@@ -314,6 +314,9 @@ fn take_pending(approval_id: &str) -> Option<std::sync::mpsc::Sender<bool>> {
 /// against each other and against nothing else — the half of the problem that was never the hard
 /// half.
 ///
+/// It also serializes the provider bit a turn begins by taking. A door call and a task switch take
+/// it too, so a test that takes it holds this, and a test that begins a turn finds the bit free.
+///
 /// Poisoning is taken rather than propagated, because a panic in one test is that test's failure,
 /// and re-raising it in every later one hides which test failed behind a `PoisonError`.
 #[cfg(test)]

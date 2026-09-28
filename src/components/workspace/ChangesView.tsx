@@ -1,4 +1,4 @@
-import {useCallback, useEffect, useMemo, useState} from 'react'
+import {useCallback, useEffect, useMemo, useRef, useState} from 'react'
 import {Banner} from '@astryxdesign/core/Banner'
 import {Button} from '@astryxdesign/core/Button'
 import {Divider} from '@astryxdesign/core/Divider'
@@ -7,7 +7,9 @@ import {List} from '@astryxdesign/core/List'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {Text} from '@astryxdesign/core/Text'
 import {ToggleButton, ToggleButtonGroup} from '@astryxdesign/core/ToggleButton'
-import {listTaskChanges, readTaskChange, toChangesError} from '../../services/task-changes'
+import {readTaskChange, toChangesError} from '../../services/task-changes'
+import {useProjectValue} from '../../hooks/useProjectValue'
+import {subscribeWorkspaceChanges} from '../../services/workspace-files'
 import {
     FILTER_KINDS,
     KIND_LABELS,
@@ -17,8 +19,9 @@ import {
     filterChanges,
     isGenerated
 } from '../../models/changes'
-import type {ChangedFile, FileDiff, TaskChanges} from '../../models/changes'
+import type {ChangedFile, FileDiff} from '../../models/changes'
 import type {FileKind} from '../../models/file-kinds'
+import type {WorkspaceFileChange} from '../../models/files'
 import type {CommandError} from '../../models/errors'
 import {MonacoDiff} from './MonacoDiff'
 import {PanelState} from './PanelState'
@@ -59,59 +62,70 @@ function whyNotShown(diff: FileDiff) {
     return undefined
 }
 
+// The watcher names a path from the workspace, Git from the repository root, and a project can sit
+// in a subfolder of its repository.
+function touches(batch: readonly WorkspaceFileChange[], file: ChangedFile | undefined) {
+    if (!file) return false
+    const paths = file.fromPath ? [file.path, file.fromPath] : [file.path]
+    return batch.some(change =>
+        paths.some(path => path === change.path || path.endsWith(`/${change.path}`))
+    )
+}
+
 export function ChangesView({isSideBySide, onSideBySideChange}: ChangesViewProps) {
-    const [changes, setChanges] = useState<TaskChanges>()
-    const [error, setError] = useState<CommandError>()
-    const [isLoading, setIsLoading] = useState(true)
+    const read = useProjectValue('changes')
     const [kinds, setKinds] = useState<readonly FileKind[]>([])
     const [showGenerated, setShowGenerated] = useState(false)
     const [chosen, setChosen] = useState<Selection>(NOTHING_OPEN)
     const [diff, setDiff] = useState<Answer<FileDiff>>()
     const [diffError, setDiffError] = useState<Answer<CommandError>>()
-    const [reads, setReads] = useState(0)
+    const [diffReads, setDiffReads] = useState(0)
+    const openFile = useRef<ChangedFile>(undefined)
+    const {changed, reload} = read
+    const error = read.failure === undefined ? undefined : toChangesError(read.failure)
+    const isLoading = read.isLoading
 
     useEffect(() => {
-        let cancelled = false
-        void listTaskChanges()
-            .then(listed => {
-                if (cancelled) return
-                setChanges(listed)
-                setError(undefined)
-            })
-            .catch((failure: unknown) => {
-                if (cancelled) return
-                setError(toChangesError(failure))
-                setChanges(undefined)
-            })
-            .finally(() => {
-                if (!cancelled) setIsLoading(false)
-            })
+        openFile.current = chosen.file
+    })
+
+    // Files are not the Ledger, so the listing and the open diff hear about them from the watcher.
+    useEffect(() => {
+        const subscription = subscribeWorkspaceChanges(batch => {
+            changed()
+            if (touches(batch, openFile.current)) setDiffReads(count => count + 1)
+        }).catch(() => undefined)
         return () => {
-            cancelled = true
+            void subscription.then(unsubscribe => unsubscribe?.()).catch(() => undefined)
         }
-    }, [reads])
+    }, [changed])
 
     useEffect(() => {
         const {file, attempt} = chosen
         if (!file) return undefined
         let cancelled = false
+        // One opening is read again on every change to its file, so each answer has to retire the
+        // other kind: a failure left standing would cover the read that then succeeded.
         void readTaskChange(file.path)
-            .then(read => {
-                if (!cancelled) setDiff({attempt, value: read})
+            .then(answer => {
+                if (cancelled) return
+                setDiff({attempt, value: answer})
+                setDiffError(undefined)
             })
             .catch((failure: unknown) => {
-                if (!cancelled) setDiffError({attempt, value: toChangesError(failure)})
+                if (cancelled) return
+                setDiffError({attempt, value: toChangesError(failure)})
+                setDiff(undefined)
             })
         return () => {
             cancelled = true
         }
-    }, [chosen])
+    }, [chosen, diffReads])
 
     const refresh = useCallback(() => {
-        setIsLoading(true)
         setChosen(previous => ({attempt: previous.attempt + 1}))
-        setReads(count => count + 1)
-    }, [])
+        reload()
+    }, [reload])
 
     // Compared by path, not by identity: `shown` filters the same objects, so clicking the row that
     // is already open hands React the value it already holds and it skips the update. The counter
@@ -122,7 +136,7 @@ export function ChangesView({isSideBySide, onSideBySideChange}: ChangesViewProps
         )
     }, [])
 
-    const listed = changes ?? NO_CHANGES
+    const listed = read.value ?? NO_CHANGES
     const counts = useMemo(
         () => countByKind(listed.files, showGenerated),
         [listed.files, showGenerated]

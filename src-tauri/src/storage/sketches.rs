@@ -125,6 +125,7 @@ impl Sketches<'_> {
                 ],
             )
             .map_err(database_error)?;
+        self.storage.announce(ProjectValue::Sketches);
         Ok(())
     }
 
@@ -256,6 +257,9 @@ impl Sketches<'_> {
             fs::remove_file(&path).map_err(|error| {
                 CommandError::from(format!("Could not remove {}: {error}", path.display()))
             })?;
+        }
+        if removed > 0 {
+            self.storage.announce(ProjectValue::Sketches);
         }
         Ok(Collected {
             sketches_removed: removed,

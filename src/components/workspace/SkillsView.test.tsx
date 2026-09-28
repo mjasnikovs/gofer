@@ -60,6 +60,19 @@ describe('the skills panel', () => {
         expect(screen.getByText('Where the audio buses go')).toBeInTheDocument()
     })
 
+    // The model cannot write under .gofer/skills, so an edit there came from outside the window.
+    it('lists again when the window comes back into focus', async () => {
+        backend([skill()])
+        await open()
+        const lists = () => tauri.invoke.mock.calls.filter(call => call[0] === 'list_skills').length
+        const before = lists()
+
+        window.dispatchEvent(new FocusEvent('focus'))
+        await flush()
+
+        expect(lists()).toBe(before + 1)
+    })
+
     it('says what is missing when a skill has no description', async () => {
         backend([skill({description: ''})])
         await open()

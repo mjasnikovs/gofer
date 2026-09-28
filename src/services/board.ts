@@ -1,4 +1,4 @@
-import {invoke, listen} from './desktop'
+import {invoke} from './desktop'
 import {toCommandError} from '../utils/command-error'
 import type {CommandError} from '../models/errors'
 import type {
@@ -79,13 +79,6 @@ export function commentOnCard(id: string, body: string): Promise<CardComment> {
 
 export function postCardToGofer(id: string, bringChanges: boolean): Promise<StoredChat> {
     return invoke('card_post_to_gofer', {id, bringChanges})
-}
-
-/** Fires after any write through any door — the window, the worker, or another agent. */
-export function watchBoard(handler: () => void): Promise<() => void> {
-    return listen('board-changed', () => {
-        handler()
-    })
 }
 
 export const toBoardError: (error: unknown) => CommandError = toCommandError

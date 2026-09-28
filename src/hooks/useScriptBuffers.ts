@@ -13,11 +13,7 @@ import {
     unsubscribeScriptDiagnostics,
     updateScriptDocument
 } from '../services/script-session'
-import {
-    listWorkspaceFiles,
-    subscribeWorkspaceChanges,
-    unsubscribeWorkspaceChanges
-} from '../services/workspace-files'
+import {listWorkspaceFiles, subscribeWorkspaceChanges} from '../services/workspace-files'
 import {NO_SCRIPT_TABS, reduceScriptTabs} from '../models/script-buffers'
 import type {ScriptBuffer} from '../models/script-buffers'
 import type {
@@ -315,7 +311,7 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
 
     useEffect(() => {
         if (!isTauri()) return
-        void subscribeWorkspaceChanges(changes => {
+        const subscription = subscribeWorkspaceChanges(changes => {
             void refreshFiles()
             for (const change of changes) {
                 const buffer = buffersRef.current.find(entry => entry.path === change.path)
@@ -328,7 +324,7 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
             }
         }).catch(() => undefined)
         return () => {
-            void unsubscribeWorkspaceChanges().catch(() => undefined)
+            void subscription.then(unsubscribe => unsubscribe?.()).catch(() => undefined)
         }
     }, [openBuffer, refreshFiles])
 

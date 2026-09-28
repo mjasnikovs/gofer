@@ -6,7 +6,8 @@ import {
     messageParts,
     retryPlan,
     settleRunningTools,
-    settleStoredChat
+    settleStoredChat,
+    turnActivity
 } from './chat-timeline'
 
 const USAGE: TokenUsage = {
@@ -355,70 +356,79 @@ describe('applyStreamEvent', () => {
         ])
         expect(message.tools?.map(tool => tool.tokens)).toEqual([51, 50, undefined])
     })
+})
 
-    it('drops the compaction label once compaction ends', () => {
-        const message = replay([
-            {type: 'compaction-start', tokens: 100, contextWindow: 200},
-            {type: 'compaction-end'}
-        ])
-        expect(message.activity).toBeUndefined()
+function caption(events: readonly AiStreamEvent[]) {
+    return events.reduce<string | undefined>(turnActivity, undefined)
+}
+
+const RETRY_SCHEDULED: AiStreamEvent = {
+    type: 'retry-scheduled',
+    attempt: 2,
+    maxAttempts: 10,
+    delayMs: 20_000,
+    errorMessage: 'connection refused'
+}
+
+describe('turnActivity', () => {
+    it('drops the compaction caption once compaction ends', () => {
+        expect(
+            caption([
+                {type: 'compaction-start', tokens: 100, contextWindow: 200},
+                {type: 'compaction-end'}
+            ])
+        ).toBeUndefined()
     })
 
-    it('says a turn is waiting to be tried again without ending it', () => {
-        const message = replay([
-            {type: 'text-delta', delta: 'Looking at it'},
-            {
-                type: 'retry-scheduled',
-                attempt: 2,
-                maxAttempts: 10,
-                delayMs: 20_000,
-                errorMessage: 'connection refused'
-            }
-        ])
-        expect(message.status).toBe('streaming')
-        expect(message.activity).toContain('20s')
-        expect(message.activity).toContain('2 of 10')
-        expect(message.activity).toContain('connection refused')
-        expect(message.text).toBe('Looking at it')
+    it('says a turn is waiting to be tried again', () => {
+        const waiting = caption([{type: 'text-delta', delta: 'Looking at it'}, RETRY_SCHEDULED])
+        expect(waiting).toContain('20s')
+        expect(waiting).toContain('2 of 10')
+        expect(waiting).toContain('connection refused')
     })
 
     it('replaces the countdown once the model is being asked again', () => {
-        const message = replay([
-            {
-                type: 'retry-scheduled',
-                attempt: 3,
-                maxAttempts: 10,
-                delayMs: 40_000,
-                errorMessage: 'overloaded'
-            },
-            {type: 'retry-start', attempt: 3, maxAttempts: 10}
-        ])
-        expect(message.activity).toBe('Trying again (3 of 10)')
-        expect(message.status).toBe('streaming')
+        expect(caption([RETRY_SCHEDULED, {type: 'retry-start', attempt: 2, maxAttempts: 10}])).toBe(
+            'Trying again (2 of 10)'
+        )
     })
 
-    it('drops the retry label when the turn finally answers', () => {
-        const message = replay([
-            {
-                type: 'retry-scheduled',
-                attempt: 1,
-                maxAttempts: 10,
-                delayMs: 5_000,
-                errorMessage: 'overloaded'
-            },
-            {type: 'retry-start', attempt: 1, maxAttempts: 10},
-            {
-                type: 'done',
-                text: 'Back online',
-                thinking: '',
-                stopReason: 'stop',
-                usage: USAGE,
-                model: 'local',
-                agentMessages: []
-            }
-        ])
-        expect(message.status).toBe('complete')
-        expect(message.activity).toBeUndefined()
+    it.each<AiStreamEvent>([
+        {type: 'text-delta', delta: 'Hmm'},
+        {type: 'thinking-delta', delta: 'Hmm'},
+        {type: 'tool-start', id: 'a', name: 'godot', startedAt: 1},
+        {type: 'steered', id: 'steer-1'}
+    ])('ends the retry caption on the first sign the retry worked: $type', progress => {
+        expect(
+            caption([RETRY_SCHEDULED, {type: 'retry-start', attempt: 2, maxAttempts: 10}, progress])
+        ).toBeUndefined()
+    })
+
+    it('keeps the caption through bookkeeping the turn sends while it waits', () => {
+        expect(
+            caption([
+                {type: 'context-rebuilt', messages: 4},
+                {type: 'turn-state', agentMessages: []},
+                {type: 'usage', usage: USAGE, model: 'local'}
+            ])
+        ).toContain('4 messages')
+    })
+
+    it('drops the caption when the turn answers', () => {
+        expect(
+            caption([
+                RETRY_SCHEDULED,
+                {
+                    type: 'done',
+                    text: 'Back online',
+                    thinking: '',
+                    stopReason: 'stop',
+                    usage: USAGE,
+                    model: 'local',
+                    agentMessages: []
+                }
+            ])
+        ).toBeUndefined()
     })
 })
 
@@ -640,14 +650,12 @@ describe('settleStoredChat', () => {
                 sender: 'assistant',
                 text: 'Starting',
                 timestamp: 0,
-                activity: 'Summarising the conversation',
                 tools: [{id: 'a', name: 'bash', status: 'running', startedAt: 1}],
                 status: 'streaming'
             }
         ])
         const reply = settled[1]
         expect(reply?.status).toBe('aborted')
-        expect(reply?.activity).toBeUndefined()
         expect(reply?.tools?.[0]?.status).toBe('error')
     })
 })

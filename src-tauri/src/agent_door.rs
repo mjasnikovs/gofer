@@ -835,6 +835,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_refusal_is_a_coded_error_the_caller_can_branch_on() {
+        let _turns = crate::approvals::serialize_gate_tests();
         let directory = TempDir::new().expect("temporary directory");
         let app = app_with_storage(&directory);
         let server = started(&app, "secret");
@@ -902,6 +903,7 @@ pub(crate) mod tests {
     /// code, at once, with nothing run — never waited on.
     #[test]
     fn what_would_wait_on_the_user_is_refused_by_code() {
+        let _turns = crate::approvals::serialize_gate_tests();
         let directory = TempDir::new().expect("temporary directory");
         let app = app_with_storage(&directory);
         let server = started(&app, "secret");
@@ -1012,6 +1014,7 @@ pub(crate) mod tests {
     /// Claim 23: while the model works a card's task, the door is told so.
     #[test]
     fn a_card_being_worked_on_is_refused_at_the_door() {
+        let _turns = crate::approvals::serialize_gate_tests();
         let directory = TempDir::new().expect("temporary directory");
         let app = app_with_storage(&directory);
         let storage = crate::workspace::project_storage(app.handle()).expect("storage");
@@ -1136,6 +1139,9 @@ pub(crate) mod tests {
     /// takes the turn's own bit, and says so when it cannot.
     #[test]
     fn a_godot_call_from_the_door_waits_for_no_turn_and_says_one_is_running() {
+        let _turns = crate::approvals::serialize_gate_tests();
+        // Its Godot call is meant to find no editor, not another test's scripted one.
+        let _no_editor = crate::godot_session::no_editor_bound();
         let directory = TempDir::new().expect("temporary directory");
         let app = app_with_storage(&directory);
         let server = started(&app, "secret");
@@ -1311,6 +1317,7 @@ pub(crate) mod tests {
     /// operations, while saying the whole call was described.
     #[test]
     fn a_gated_refusal_names_every_gated_operation_across_domains() {
+        let _turns = crate::approvals::serialize_gate_tests();
         let directory = TempDir::new().expect("temporary directory");
         let app = app_with_storage(&directory);
         let server = started(&app, "secret");
@@ -1367,6 +1374,7 @@ pub(crate) mod tests {
     /// shader save is the one write that needs no editor, so it is the one that would have landed.
     #[test]
     fn a_tool_call_with_no_card_in_doing_writes_nowhere() {
+        let _turns = crate::approvals::serialize_gate_tests();
         let directory = TempDir::new().expect("temporary directory");
         let app = app_with_storage(&directory);
         let server = started(&app, "secret");
@@ -1453,6 +1461,9 @@ pub(crate) mod tests {
     /// task list, so there was no diff to review and nothing to revert.
     #[test]
     fn a_move_to_doing_from_outside_opens_the_cards_task_and_the_calls_land_in_its_chat() {
+        let _turns = crate::approvals::serialize_gate_tests();
+        // Its Godot call is meant to find no editor, not another test's scripted one.
+        let _no_editor = crate::godot_session::no_editor_bound();
         let directory = TempDir::new().expect("temporary directory");
         let app = app_with_storage(&directory);
         let server = started(&app, "secret");

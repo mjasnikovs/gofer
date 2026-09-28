@@ -151,7 +151,7 @@ fn the_editor_runs_breaks_steps_and_terminates() {
     await_breakpoint(&client, &events, &editor);
 
     assert!(
-        crate::godot_dap::debuggee_is_stopped(),
+        crate::game_run::now().is_halted(),
         "a real breakpoint stop must be visible to the runtime router"
     );
 
@@ -231,7 +231,7 @@ fn the_editor_runs_breaks_steps_and_terminates() {
     );
     assert!(client.continue_execution(MAIN_THREAD_ID).expect("continue"));
     assert!(
-        !crate::godot_dap::debuggee_is_stopped(),
+        !crate::game_run::now().is_halted(),
         "a game told to run on is not halted, and a router that still thinks it is refuses a call \
          the game could have answered"
     );

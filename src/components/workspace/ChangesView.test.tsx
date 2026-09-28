@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it, vi} from 'vitest'
-import {cleanup, render, screen, within} from '@testing-library/react'
+import {act, cleanup, render, screen, waitFor, within} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {ChangesView} from './ChangesView'
 import type {MonacoStubState} from '../../test/monaco-stub'
@@ -52,7 +52,7 @@ function diff(overrides: Partial<FileDiff> = {}): FileDiff {
 
 function show(changes: Partial<TaskChanges> = {}, diffs: Record<string, FileDiff> = {}) {
     const onSideBySideChange = vi.fn()
-    installBackend(tauri, {
+    const server = installBackend(tauri, {
         changes: {
             files: [SCRIPT, SCENE, SPRITE, SIDECAR],
             dropped: 0,
@@ -68,8 +68,11 @@ function show(changes: Partial<TaskChanges> = {}, diffs: Record<string, FileDiff
             onSideBySideChange={onSideBySideChange}
         />
     )
-    return {onSideBySideChange}
+    return {onSideBySideChange, server}
 }
+
+const reads = (command: string) =>
+    tauri.invoke.mock.calls.filter(call => call[0] === command).length
 
 afterEach(() => {
     cleanup()
@@ -306,6 +309,53 @@ describe('the changes view', () => {
         await userEvent.click(screen.getByRole('button', {name: 'Split'}))
 
         expect(onSideBySideChange).not.toHaveBeenCalledWith(false)
+    })
+
+    it('follows files a turn writes, and keeps the open diff on screen while it does', async () => {
+        const {server} = show()
+        await userEvent.click(await screen.findByText('scripts/player.gd'))
+        await screen.findByTestId('task-change-diff-host')
+        const diffReads = reads('read_task_change')
+
+        const NEW = file({path: 'scripts/enemy.gd', status: 'added', added: 12, removed: 0})
+        server.state.changes = {
+            ...server.state.changes,
+            files: [...server.state.changes.files, NEW]
+        }
+        await act(async () => {
+            server.publishFileChanges([{path: 'scripts/enemy.gd', kind: 'created'}])
+            await Promise.resolve()
+        })
+
+        expect(await screen.findByText('scripts/enemy.gd')).toBeInTheDocument()
+        expect(screen.getByTestId('task-change-diff-host')).toBeInTheDocument()
+        expect(screen.queryByText(/Loading scripts/u)).not.toBeInTheDocument()
+        expect(reads('read_task_change')).toBe(diffReads)
+    })
+
+    it('reads the open diff again only for a batch that touches its file', async () => {
+        const {server} = show()
+        await userEvent.click(await screen.findByText('scripts/player.gd'))
+        await screen.findByTestId('task-change-diff-host')
+        const diffReads = reads('read_task_change')
+        const listReads = reads('list_task_changes')
+
+        await act(async () => {
+            server.publishFileChanges([{path: 'scenes/menu.tscn', kind: 'modified'}])
+            await Promise.resolve()
+        })
+        await waitFor(() => {
+            expect(reads('list_task_changes')).toBe(listReads + 1)
+        })
+        expect(reads('read_task_change')).toBe(diffReads)
+
+        await act(async () => {
+            server.publishFileChanges([{path: 'scripts/player.gd', kind: 'modified'}])
+            await Promise.resolve()
+        })
+        await waitFor(() => {
+            expect(reads('read_task_change')).toBe(diffReads + 1)
+        })
     })
 
     it('says how many rows the cap left out', async () => {

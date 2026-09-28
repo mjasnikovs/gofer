@@ -63,6 +63,7 @@ function backend(rows: readonly ProjectMemory[] = [memory({}), STALE]) {
     })
     return {
         state: server.state,
+        publishProjectChange: server.publishProjectChange,
         judged,
         stopped,
         swept,
@@ -78,15 +79,11 @@ function backend(rows: readonly ProjectMemory[] = [memory({}), STALE]) {
 }
 
 function emitJudge(event: MemoryJudgeEvent) {
-    for (const [name, handler] of tauri.listen.mock.calls)
-        if (name === 'ai-memory-judge')
-            (handler as (e: {payload: unknown}) => void)({payload: event})
+    tauri.emit('ai-memory-judge', event)
 }
 
 function emitSweep(event: MemorySweepEvent) {
-    for (const [name, handler] of tauri.listen.mock.calls)
-        if (name === 'ai-memory-sweep')
-            (handler as (e: {payload: unknown}) => void)({payload: event})
+    tauri.emit('ai-memory-sweep', event)
 }
 
 async function open() {
@@ -174,6 +171,49 @@ describe('the memory panel', () => {
 
         expect(log.listed().map(row => row.id)).toEqual(['one'])
         expect(screen.queryByText('GRAYZONE.md was deleted.')).toBeNull()
+    })
+
+    it('lists a memory the model files while the panel is open, and keeps an edit in progress', async () => {
+        const log = backend()
+        await open()
+        const user = userEvent.setup()
+        await user.click(screen.getByText('GRAYZONE.md was deleted.'))
+        await flush()
+        const field = screen.getByLabelText(/What is remembered/u)
+        await user.clear(field)
+        await user.type(field, 'Half written')
+
+        log.state.memories = [
+            ...log.state.memories,
+            memory({id: 'three', content: 'Signals are connected in code.'})
+        ]
+        log.publishProjectChange('memories')
+        await flush()
+
+        expect(screen.getByText('Signals are connected in code.')).toBeInTheDocument()
+        expect(screen.getByLabelText(/What is remembered/u)).toHaveValue('Half written')
+        expect(screen.getByLabelText(/What is remembered/u)).toHaveFocus()
+    })
+
+    it('shows the list again on Recheck after a write it could not do', async () => {
+        installBackend(tauri, {
+            memories: [memory({}), STALE],
+            answers: {
+                delete_project_memory: () => {
+                    throw new CommandFailure('memory_unavailable', 'The project database is locked')
+                }
+            }
+        })
+        await open()
+        const user = userEvent.setup()
+        await user.click(screen.getByText('GRAYZONE.md was deleted.'))
+        await user.click(await screen.findByRole('button', {name: 'Forget'}))
+        expect(await screen.findByText(/The project database is locked/u)).toBeVisible()
+
+        await user.click(screen.getByRole('button', {name: 'Recheck'}))
+
+        expect(await screen.findByLabelText(/What is remembered/u)).toBeVisible()
+        expect(screen.queryByText(/The project database is locked/u)).toBeNull()
     })
 
     it('reports a read it could not do', async () => {
@@ -377,25 +417,6 @@ describe('sweeping the whole list', () => {
         await flush()
 
         expect(log.stopped).toEqual([log.swept[0]?.requestId])
-    })
-
-    it('re-reads the list as each verdict lands rather than at the end', async () => {
-        backend([memory({}), STALE])
-        await open()
-        const user = userEvent.setup()
-        const readsBefore = tauri.invoke.mock.calls.filter(
-            ([command]) => command === 'list_project_memory'
-        ).length
-
-        await user.click(screen.getByRole('button', {name: 'Ask the model about 2'}))
-        await flush()
-        emitJudge({type: 'judge-verdict', memoryId: 'one', verdict: 'broken'})
-        await flush()
-
-        const readsAfter = tauri.invoke.mock.calls.filter(
-            ([command]) => command === 'list_project_memory'
-        ).length
-        expect(readsAfter).toBeGreaterThan(readsBefore)
     })
 
     it('shows which row it is on after an earlier one failed', async () => {

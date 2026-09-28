@@ -25,6 +25,7 @@ mod debug;
 #[cfg(all(test, feature = "godot-acceptance"))]
 mod dispatch_ledger;
 mod files;
+mod game_run;
 mod gdformat;
 mod git;
 #[cfg(all(test, feature = "godot-acceptance"))]
@@ -61,7 +62,9 @@ mod model_server;
 mod off_thread;
 mod paths;
 mod process;
+mod project_changes;
 mod project_memory;
+mod project_sync;
 pub mod protocol_v2;
 mod rag;
 mod read_ledger;
@@ -433,7 +436,6 @@ fn delete_chat_task(app: AppHandle, task_id: String) -> Result<StoredChat, Comma
     let chat = storage
         .tasks()
         .delete(&task_id, &storage.switch(&release)?)?;
-    board::announce_change(&app);
     Ok(chat)
 }
 
@@ -580,9 +582,7 @@ fn merge_task_branch(
     let release = switch_for(&app);
     let switch = storage.switch(&release)?;
     unsaved_work::settle(unsaved_work.unwrap_or_default())?;
-    let merged = storage.tasks().merge(&task_id, &switch)?;
-    board::announce_change(&app);
-    Ok(merged)
+    storage.tasks().merge(&task_id, &switch)
 }
 
 /// Brings the project's branch into the task so the agent can reconcile what clashed.

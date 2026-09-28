@@ -524,6 +524,60 @@ describe('the Godot rules', () => {
     })
 })
 
+describe('the agent prompt after a Godot rule changes', () => {
+    const strictLine = 'Always write typed GDScript.'
+    const promptWhile = (strict: boolean) => {
+        const prompt = strict ? `${shippedPrompt}\n${strictLine}` : shippedPrompt
+        return {prompt, defaultPrompt: prompt}
+    }
+
+    function answerByRule() {
+        let isStrict = true
+        answer(
+            {},
+            {
+                save_godot_settings: ({godot}, stored) => {
+                    isStrict = godot.strictTyping
+                    return stored()
+                },
+                read_agent_prompt: () => promptWhile(isStrict)
+            }
+        )
+    }
+
+    it('shows the default the new rule ships with', async () => {
+        const user = userEvent.setup()
+        answerByRule()
+        await open()
+        await openTab('Godot rules')
+        await user.click(screen.getByLabelText(/Enforce strict typing/))
+        await flush()
+
+        await openTab('Agent prompt')
+
+        expect(screen.getByLabelText(/System prompt/)).toHaveValue(shippedPrompt)
+        expect(screen.getByRole('button', {name: 'Restore default'})).toBeDisabled()
+    })
+
+    it('keeps a prompt the user was still editing', async () => {
+        const user = userEvent.setup()
+        answerByRule()
+        await open()
+        await openTab('Agent prompt')
+        await user.clear(screen.getByLabelText(/System prompt/))
+        await user.type(screen.getByLabelText(/System prompt/), 'Answer in Latvian.')
+        await openTab('Godot rules')
+        await user.click(screen.getByLabelText(/Enforce strict typing/))
+        await flush()
+
+        await openTab('Agent prompt')
+
+        expect(screen.getByLabelText(/System prompt/)).toHaveValue('Answer in Latvian.')
+        await user.click(screen.getByRole('button', {name: 'Restore default'}))
+        expect(screen.getByLabelText(/System prompt/)).toHaveValue(shippedPrompt)
+    })
+})
+
 describe('the documentation model cache', () => {
     it('shows where the cache is and how much disk it uses', async () => {
         await open()

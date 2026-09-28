@@ -37,6 +37,7 @@ import {RememberBlock} from './RememberBlock'
 type ChatConversationProps = Readonly<{
     attachmentPreviews: Readonly<Record<string, string>>
     isStreaming: boolean
+    activity: string | undefined
     messages: readonly Message[]
     scrollRef: Ref<HTMLElement>
     onRetry: (assistantId: number) => void
@@ -359,7 +360,12 @@ function useRunningCallClock(isRunning: boolean) {
     return isRunning ? now : undefined
 }
 
-function AssistantTimeline({message}: {message: Message}) {
+type AssistantTimelineProps = Readonly<{
+    activity: string | undefined
+    message: Message
+}>
+
+function AssistantTimeline({activity, message}: AssistantTimelineProps) {
     const parts = messageParts(message)
     const toolsById = useMemo(
         () => new Map((message.tools ?? []).map(tool => [tool.id, tool] as const)),
@@ -422,13 +428,13 @@ function AssistantTimeline({message}: {message: Message}) {
                         <Spinner
                             size='sm'
                             shade='subtle'
-                            aria-label={message.activity ?? 'Working'}
+                            aria-label={activity ?? 'Working'}
                         />
                         <Text
                             aria-hidden
                             type='supporting'
                         >
-                            {message.activity ?? 'Working'}
+                            {activity ?? 'Working'}
                         </Text>
                     </HStack>
                 </ChatMessageBubble>
@@ -499,6 +505,7 @@ function MessageAttachments({attachments, previews}: MessageAttachmentsProps) {
 
 type ConversationMessageProps = Readonly<{
     attachmentPreviews: Readonly<Record<string, string>>
+    activity: string | undefined
     isLast: boolean
     message: Message
     onRetry: (assistantId: number) => void
@@ -517,7 +524,7 @@ function QueuedNote() {
 }
 
 const ConversationMessage = memo(
-    ({attachmentPreviews, isLast, message, onRetry}: ConversationMessageProps) => {
+    ({attachmentPreviews, activity, isLast, message, onRetry}: ConversationMessageProps) => {
         if (message.sender === 'assistant') {
             return (
                 <ChatMessage
@@ -532,7 +539,10 @@ const ConversationMessage = memo(
                         )
                     })}
                 >
-                    <AssistantTimeline message={message} />
+                    <AssistantTimeline
+                        activity={activity}
+                        message={message}
+                    />
                 </ChatMessage>
             )
         }
@@ -571,6 +581,7 @@ ConversationMessage.displayName = 'ConversationMessage'
 export function ChatConversation({
     attachmentPreviews,
     isStreaming,
+    activity,
     messages,
     scrollRef,
     onRetry
@@ -592,6 +603,8 @@ export function ChatConversation({
                     <Fragment key={message.id}>
                         <ConversationMessage
                             attachmentPreviews={attachmentPreviews}
+                            // Only the answer being streamed has a caption; the rest keep their memo.
+                            activity={message.status === 'streaming' ? activity : undefined}
                             isLast={index === messages.length - 1}
                             message={message}
                             onRetry={onRetry}
