@@ -18,7 +18,6 @@ pub(crate) enum Halt {
     AtABreakpoint,
 }
 
-/// Something that happened to the game.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Transition<'a> {
     /// A debugger launch or restart was answered.
@@ -41,7 +40,6 @@ pub(crate) enum Transition<'a> {
     },
 }
 
-/// Who is asking to start a game.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Starter<'a> {
     DebugLaunch,
@@ -133,7 +131,6 @@ impl GameRun {
         &self.armed
     }
 
-    /// The files that still hold a breakpoint this session set.
     pub(crate) fn armed_files(&self) -> Vec<String> {
         self.armed.keys().cloned().collect()
     }
@@ -169,7 +166,6 @@ impl GameRun {
     }
 }
 
-/// The run and the signal that it changed.
 struct Watched {
     run: Mutex<GameRun>,
     changed: Condvar,

@@ -420,8 +420,9 @@ pub fn update_document(request: UpdateScriptRequest) -> Result<ScriptStamp, LspE
 /// Writes the buffer through the workspace transaction, then reports the save to the server with
 /// the saved text. A file the renderer never opened is opened first, so the notification is legal.
 pub fn save_document(request: SaveScriptRequest) -> Result<ScriptStamp, LspError> {
-    let saved = write_and_synchronize(request)?;
-    crate::project_sync::written_without_waiting(vec![saved.path.clone()]);
+    let saved = write_and_synchronize(request, |paths| {
+        crate::project_sync::written_without_waiting(paths.to_vec());
+    })?;
     Ok(ScriptStamp {
         path: saved.path,
         hash: Some(saved.hash),
@@ -450,8 +451,20 @@ struct SynchronizedSave<C = Arc<LspClient>> {
 /// diagnostics and only needs the stamp back; the agent has no subscription and would otherwise
 /// have to ask in a second call. Neither may write differently from the other, which is what
 /// keeping one body of it guarantees.
-fn write_and_synchronize(request: SaveScriptRequest) -> Result<SynchronizedSave, LspError> {
+fn write_and_synchronize(
+    request: SaveScriptRequest,
+    report: impl FnOnce(&[String]),
+) -> Result<SynchronizedSave, LspError> {
     let (client, workspace) = connection()?;
+    write_then_synchronize(&workspace, client, request, report)
+}
+
+fn write_then_synchronize(
+    workspace: &Workspace,
+    client: Arc<LspClient>,
+    request: SaveScriptRequest,
+    report: impl FnOnce(&[String]),
+) -> Result<SynchronizedSave, LspError> {
     let stamp = workspace
         .write(
             &request.path,
@@ -459,13 +472,16 @@ fn write_and_synchronize(request: SaveScriptRequest) -> Result<SynchronizedSave,
             request.expected_hash.as_deref(),
         )
         .map_err(file_error)?;
-    let uri = godot_lsp::file_uri(&workspace, &request.path)?;
-    let version = if client.is_open(&uri) {
-        client.change_document(&uri, &request.text)?
-    } else {
-        client.open_document(&uri, &request.text)?
-    };
-    client.save_document(&uri, &request.text)?;
+    let (uri, version) = reporting_written(std::slice::from_ref(&request.path), report, || {
+        let uri = godot_lsp::file_uri(workspace, &request.path)?;
+        let version = if client.is_open(&uri) {
+            client.change_document(&uri, &request.text)?
+        } else {
+            client.open_document(&uri, &request.text)?
+        };
+        client.save_document(&uri, &request.text)?;
+        Ok((uri, version))
+    })?;
     Ok(SynchronizedSave {
         path: request.path,
         uri,
@@ -586,8 +602,7 @@ pub struct SavedScript {
 /// publication rather than in a second call after it. A save is how every script is created, and
 /// the caller's next question is always whether it parses.
 pub fn save_and_publish(request: SaveScriptRequest) -> Result<SavedScript, LspError> {
-    let saved = write_and_synchronize(request)?;
-    written(std::slice::from_ref(&saved.path));
+    let saved = write_and_synchronize(request, written)?;
     published_save(
         saved,
         Duration::from_millis(DEFAULT_DIAGNOSTICS_WAIT_MS),
@@ -1174,9 +1189,7 @@ pub fn reparse_open_documents() {
     let Some(client) = live_connection() else {
         return;
     };
-    for (uri, text) in client.open_documents() {
-        let _ = client.change_document(&uri, &text);
-    }
+    let _ = client.resend_open_documents();
 }
 
 /// The text of a script as the language server holds it, or as the disk does when it is not open.
@@ -1633,6 +1646,30 @@ mod tests {
             old_text: old_text.to_owned(),
             new_text: new_text.to_owned(),
         }
+    }
+
+    /// The editor restarted between the write and the server hearing of it.
+    #[test]
+    fn a_save_the_server_never_heard_is_still_reported_as_written() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let mut reported = Vec::new();
+
+        let failed = write_then_synchronize(
+            &workspace(directory.path()),
+            Arc::new(LspClient::closed()),
+            SaveScriptRequest {
+                path: "coin.gd".to_owned(),
+                text: "class_name Coin\n".to_owned(),
+                expected_hash: None,
+            },
+            |paths| reported.extend_from_slice(paths),
+        )
+        .err()
+        .expect("the server's failure is the caller's answer");
+
+        assert_eq!(failed.code, "session_closed");
+        assert!(directory.path().join("coin.gd").exists());
+        assert_eq!(reported, ["coin.gd"]);
     }
 
     /// `commit_planned_edit` wrote both files before the server was told about either, so a

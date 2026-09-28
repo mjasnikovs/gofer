@@ -11,11 +11,11 @@ import {Token} from '@astryxdesign/core/Token'
 import {readProjectSketch, toSketchError} from '../../services/project-sketches'
 import {useProjectValue} from '../../hooks/useProjectValue'
 import {describeBlocked} from '../../services/sketch-regions'
-import {SKETCH_CANVAS, sketchMessage} from '../../models/sketch'
+import {NO_SKETCH_BODIES, SKETCH_CANVAS, bodyOf, sketchMessage, withBody} from '../../models/sketch'
 import {useChatReferences} from '../../hooks/useChatReferences'
 import {PanelState} from './PanelState'
 import {SketchFrame} from './SketchFrame'
-import type {ProjectSketch, SketchHtml} from '../../models/sketch'
+import type {ProjectSketch, SketchBodies, SketchHtml} from '../../models/sketch'
 
 const PREVIEW_LENGTH = 110
 
@@ -23,8 +23,6 @@ const SPARE = 300
 
 type SketchFilter = 'all' | 'approved'
 
-// A sketch is replaced under its own id when the agent keeps a new revision, so what was read for it
-// is only good for the row it was read under.
 function revisionOf(sketch: ProjectSketch): string {
     return `${sketch.id}@${String(sketch.savedAt)}`
 }
@@ -39,19 +37,22 @@ export function SketchesView() {
     const read = useProjectValue('sketches')
     const [filter, setFilter] = useState<SketchFilter>('all')
     const [openId, setOpenId] = useState<string>()
-    const [html, setHtml] = useState<ReadonlyMap<string, SketchHtml>>(() => new Map())
+    const [html, setHtml] = useState<SketchBodies>(NO_SKETCH_BODIES)
     const [readFailure, setReadFailure] = useState<{revision: string; reason: string}>()
     const [blocked, setBlocked] = useState<readonly string[]>([])
     const [zoomed, setZoomed] = useState<ProjectSketch>()
     const all = read.value ?? []
     const opened = all.find(sketch => sketch.id === openId)
     const openRevision = opened === undefined ? undefined : revisionOf(opened)
+    const openSavedAt = opened?.savedAt
     useEffect(() => {
-        if (openId === undefined || openRevision === undefined || html.has(openRevision)) return
+        if (openId === undefined || openSavedAt === undefined || openRevision === undefined) return
+        const revision = {id: openId, savedAt: openSavedAt}
+        if (bodyOf(html, revision)) return
         let cancelled = false
         void readProjectSketch(openId)
             .then(body => {
-                if (!cancelled) setHtml(previous => new Map(previous).set(openRevision, body))
+                if (!cancelled) setHtml(previous => withBody(previous, revision, body))
             })
             .catch((failure: unknown) => {
                 if (cancelled) return
@@ -61,11 +62,11 @@ export function SketchesView() {
         return () => {
             cancelled = true
         }
-    }, [openId, openRevision, html])
+    }, [openId, openSavedAt, openRevision, html])
 
     const {reload} = read
     const refresh = useCallback(() => {
-        setHtml(new Map())
+        setHtml(NO_SKETCH_BODIES)
         setReadFailure(undefined)
         setBlocked([])
         reload()
@@ -198,9 +199,7 @@ export function SketchesView() {
                                 {openId === sketch.id && (
                                     <SketchBody
                                         sketch={sketch}
-                                        {...(html.get(revisionOf(sketch)) && {
-                                            html: html.get(revisionOf(sketch))
-                                        })}
+                                        html={bodyOf(html, sketch)}
                                         {...(readFailure?.revision === revisionOf(sketch) && {
                                             failure: readFailure.reason
                                         })}
@@ -236,7 +235,7 @@ export function SketchesView() {
                         padding={4}
                     >
                         <SketchFrame
-                            html={html.get(revisionOf(zoomed))?.shown ?? ''}
+                            html={bodyOf(html, zoomed)?.shown ?? ''}
                             canvasSize={SKETCH_CANVAS}
                             spare={160}
                             onBlocked={noteBlocked}

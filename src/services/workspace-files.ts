@@ -21,12 +21,12 @@ let settling: Promise<unknown> = Promise.resolve()
 function settle(): Promise<void> {
     const step = settling.then(async () => {
         if (handlers.size > 0 && (!isWatching || wantsFreshWatcher)) {
-            wantsFreshWatcher = false
             const changes = new Channel<readonly WorkspaceFileChange[]>()
             changes.onmessage = batch => {
                 for (const handler of handlers) handler(batch)
             }
             await invoke('watch_workspace_files', {changes})
+            wantsFreshWatcher = false
             isWatching = true
         } else if (handlers.size === 0 && isWatching) {
             isWatching = false
@@ -37,21 +37,22 @@ function settle(): Promise<void> {
     return step
 }
 
-/** Answers with the call that ends this subscription. */
-export async function subscribeWorkspaceChanges(
-    handler: ChangeHandler
-): Promise<() => Promise<void>> {
+/**
+ * Handed back before the watcher starts: a remount's cleanup runs before the new subscription, and
+ * only a `stop` it can call at once lets the last subscriber leave, so the new folder is watched.
+ */
+export type WorkspaceSubscription = Readonly<{ready: Promise<void>; stop: () => Promise<void>}>
+
+export function subscribeWorkspaceChanges(handler: ChangeHandler): WorkspaceSubscription {
     handlers.add(handler)
-    const unsubscribe = () => {
+    const stop = () => {
         handlers.delete(handler)
         if (handlers.size === 0) wantsFreshWatcher = true
         return settle()
     }
-    try {
-        await settle()
-    } catch (error) {
-        await unsubscribe().catch(() => undefined)
+    const ready = settle().catch(async (error: unknown) => {
+        await stop().catch(() => undefined)
         throw error
-    }
-    return unsubscribe
+    })
+    return {ready, stop}
 }

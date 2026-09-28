@@ -3364,10 +3364,10 @@ mod tests {
         app
     }
 
-    /// The ledger is keyed on the worktree's spelling, so a `res://` delete that reached it
-    /// unnormalised found no record and ran unguarded.
+    /// The ledger is keyed on the worktree's spelling, so a `res://` call that reached it
+    /// unnormalised found no record: a delete ran unguarded, and a record outlived its file.
     #[test]
-    fn a_resource_spelled_delete_of_a_changed_file_is_refused_by_the_hash_it_was_listed_with() {
+    fn a_resource_spelled_path_is_held_to_the_same_hash_and_ledger_as_a_worktree_path() {
         let _gate = crate::approvals::serialize_gate_tests();
         let directory = TempDir::new().expect("temporary application data");
         let workspace_path = directory.path().join("workspace");
@@ -3407,7 +3407,53 @@ mod tests {
         .expect_err("a scene that changed since it was listed must not be deleted");
         assert_eq!(refused.code, "file_conflict", "{}", refused.message);
         assert!(workspace_path.join("levels/level.tscn").exists());
-        crate::read_ledger::forget_worktree(workspace.root());
+
+        let root = workspace.root();
+        dispatch(
+            app.handle(),
+            call("godot_resource", "list", json!({"hashes": true})),
+        )
+        .expect("list the worktree again");
+        dispatch(
+            app.handle(),
+            call(
+                "godot_resource",
+                "delete",
+                json!({"path": "res://levels/level.tscn"}),
+            ),
+        )
+        .expect("the hash the second listing recorded deletes it");
+        assert!(!workspace_path.join("levels/level.tscn").exists());
+        assert_eq!(
+            crate::read_ledger::recall(root, "levels/level.tscn"),
+            None,
+            "a record for a file that is gone is a claim about nothing"
+        );
+
+        let stamp = workspace
+            .write("levels/level.tscn", scene, None)
+            .expect("write the scene again");
+        dispatch(
+            app.handle(),
+            call("godot_resource", "list", json!({"hashes": true})),
+        )
+        .expect("list the worktree once more");
+        dispatch(
+            app.handle(),
+            call(
+                "godot_resource",
+                "move",
+                json!({"from": "res://levels/level.tscn", "to": "res://levels/one.tscn"}),
+            ),
+        )
+        .expect("move the scene");
+        assert_eq!(crate::read_ledger::recall(root, "levels/level.tscn"), None);
+        assert_eq!(
+            crate::read_ledger::recall(root, "levels/one.tscn").as_deref(),
+            Some(stamp.hash.as_str()),
+            "only where the file lives changed, so its record follows it"
+        );
+        crate::read_ledger::forget_worktree(root);
     }
 
     /// A read the worker made arms the save the router later checks, as the router's own would.

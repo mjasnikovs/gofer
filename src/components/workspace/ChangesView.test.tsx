@@ -358,6 +358,53 @@ describe('the changes view', () => {
         })
     })
 
+    it('does not read the open diff again for a same-named file in another folder', async () => {
+        const {server} = show()
+        await userEvent.click(await screen.findByText('scripts/player.gd'))
+        await screen.findByTestId('task-change-diff-host')
+        const diffReads = reads('read_task_change')
+        const listReads = reads('list_task_changes')
+
+        await act(async () => {
+            server.publishFileChanges([{path: 'player.gd', kind: 'created'}])
+            await Promise.resolve()
+        })
+        await waitFor(() => {
+            expect(reads('list_task_changes')).toBe(listReads + 1)
+        })
+
+        expect(reads('read_task_change')).toBe(diffReads)
+    })
+
+    // A task switch remounts the view onto another worktree, and the old watcher stays on the old one.
+    it('starts a fresh watcher when a task switch remounts it', async () => {
+        installBackend(tauri, {changes: {files: [SCRIPT], dropped: 0, isMerging: false}})
+        installDesktopFake(tauri)
+        const before = reads('watch_workspace_files')
+        const view = render(
+            <ChangesView
+                key='task-a'
+                isSideBySide
+                onSideBySideChange={vi.fn()}
+            />
+        )
+        await waitFor(() => {
+            expect(reads('watch_workspace_files')).toBe(before + 1)
+        })
+
+        view.rerender(
+            <ChangesView
+                key='task-b'
+                isSideBySide
+                onSideBySideChange={vi.fn()}
+            />
+        )
+
+        await waitFor(() => {
+            expect(reads('watch_workspace_files')).toBe(before + 2)
+        })
+    })
+
     it('says how many rows the cap left out', async () => {
         show({dropped: 25})
 

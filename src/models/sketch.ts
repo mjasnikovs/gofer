@@ -20,6 +20,26 @@ export type SketchHtml = Readonly<{
     source: string | null
 }>
 
+type SketchRevision = Pick<ProjectSketch, 'id' | 'savedAt'>
+
+export type SketchBodies = ReadonlyMap<string, Readonly<{savedAt: number; body: SketchHtml}>>
+
+export const NO_SKETCH_BODIES: SketchBodies = new Map()
+
+// A new revision is saved under the same id, so what was read for the last one is only good for it.
+export function bodyOf(bodies: SketchBodies, sketch: SketchRevision): SketchHtml | undefined {
+    const read = bodies.get(sketch.id)
+    return read?.savedAt === sketch.savedAt ? read.body : undefined
+}
+
+export function withBody(
+    bodies: SketchBodies,
+    sketch: SketchRevision,
+    body: SketchHtml
+): SketchBodies {
+    return new Map(bodies).set(sketch.id, {savedAt: sketch.savedAt, body})
+}
+
 export function sketchMessage(sketch: ProjectSketch, source: string): string {
     return (
         `This is the layout I agreed earlier ("${sketch.label}"). It is a picture of the result, `

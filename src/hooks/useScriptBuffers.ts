@@ -322,9 +322,10 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
                 }
                 void openBuffer(change.path, false)
             }
-        }).catch(() => undefined)
+        })
+        subscription.ready.catch(() => undefined)
         return () => {
-            void subscription.then(unsubscribe => unsubscribe?.()).catch(() => undefined)
+            subscription.stop().catch(() => undefined)
         }
     }, [openBuffer, refreshFiles])
 

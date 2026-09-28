@@ -62,14 +62,11 @@ function whyNotShown(diff: FileDiff) {
     return undefined
 }
 
-// The watcher names a path from the workspace, Git from the repository root, and a project can sit
-// in a subfolder of its repository.
+// The listing is empty unless the workspace is the repository root, so both sides spell a path alike.
 function touches(batch: readonly WorkspaceFileChange[], file: ChangedFile | undefined) {
     if (!file) return false
     const paths = file.fromPath ? [file.path, file.fromPath] : [file.path]
-    return batch.some(change =>
-        paths.some(path => path === change.path || path.endsWith(`/${change.path}`))
-    )
+    return batch.some(change => paths.includes(change.path))
 }
 
 export function ChangesView({isSideBySide, onSideBySideChange}: ChangesViewProps) {
@@ -94,9 +91,10 @@ export function ChangesView({isSideBySide, onSideBySideChange}: ChangesViewProps
         const subscription = subscribeWorkspaceChanges(batch => {
             changed()
             if (touches(batch, openFile.current)) setDiffReads(count => count + 1)
-        }).catch(() => undefined)
+        })
+        subscription.ready.catch(() => undefined)
         return () => {
-            void subscription.then(unsubscribe => unsubscribe?.()).catch(() => undefined)
+            subscription.stop().catch(() => undefined)
         }
     }, [changed])
 

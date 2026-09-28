@@ -36,8 +36,14 @@ describe('the workspace watcher', () => {
     it('hands every batch to every subscriber, from one watcher', async () => {
         const first: Batch[] = []
         const second: Batch[] = []
-        const stopFirst = await subscribeWorkspaceChanges(batch => first.push(batch))
-        const stopSecond = await subscribeWorkspaceChanges(batch => second.push(batch))
+        const {stop: stopFirst, ready: firstReady} = subscribeWorkspaceChanges(batch =>
+            first.push(batch)
+        )
+        await firstReady
+        const {stop: stopSecond, ready: secondReady} = subscribeWorkspaceChanges(batch =>
+            second.push(batch)
+        )
+        await secondReady
 
         publish(BATCH)
 
@@ -50,8 +56,12 @@ describe('the workspace watcher', () => {
 
     it('keeps watching for the subscriber that is left', async () => {
         const kept: Batch[] = []
-        const stopKept = await subscribeWorkspaceChanges(batch => kept.push(batch))
-        const stopGone = await subscribeWorkspaceChanges(() => undefined)
+        const {stop: stopKept, ready: keptReady} = subscribeWorkspaceChanges(batch =>
+            kept.push(batch)
+        )
+        await keptReady
+        const {stop: stopGone, ready: goneReady} = subscribeWorkspaceChanges(() => undefined)
+        await goneReady
 
         await stopGone()
         publish(BATCH)
@@ -62,7 +72,8 @@ describe('the workspace watcher', () => {
     })
 
     it('stops the watcher once nobody listens', async () => {
-        const stop = await subscribeWorkspaceChanges(() => undefined)
+        const {stop, ready} = subscribeWorkspaceChanges(() => undefined)
+        await ready
 
         await stop()
 
@@ -71,14 +82,35 @@ describe('the workspace watcher', () => {
 
     // A task switch remounts every subscriber at once, and the new task is a different folder.
     it('starts a fresh watcher when the last subscriber is replaced in the same tick', async () => {
-        const stopOld = await subscribeWorkspaceChanges(() => undefined)
+        const {stop: stopOld, ready: oldReady} = subscribeWorkspaceChanges(() => undefined)
+        await oldReady
         const replaced = stopOld()
         const fresh = subscribeWorkspaceChanges(() => undefined)
         await replaced
-        const stopFresh = await fresh
+        await fresh.ready
+        const stopFresh = fresh.stop
 
         expect(commands().filter(command => command === 'watch_workspace_files')).toHaveLength(2)
         expect(watcher).toBeDefined()
+        await stopFresh()
+    })
+
+    // The backend refuses before it stops the old watcher, so the old folder keeps streaming.
+    it('does not hand a subscriber the old watcher when the fresh one failed to start', async () => {
+        const {stop: stopOld, ready: oldReady} = subscribeWorkspaceChanges(() => undefined)
+        await oldReady
+        const oldWatcher = watcher
+        tauri.invoke.mockImplementationOnce(() => Promise.reject(new Error('no worktree yet')))
+        const replaced = stopOld().catch(() => undefined)
+        const heard: Batch[] = []
+        const fresh = subscribeWorkspaceChanges(batch => heard.push(batch))
+        await replaced
+        await fresh.ready
+        const stopFresh = fresh.stop
+
+        expect(watcher).not.toBe(oldWatcher)
+        publish(BATCH)
+        expect(heard).toEqual([BATCH])
         await stopFresh()
     })
 })

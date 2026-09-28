@@ -9,11 +9,11 @@
 
 use crate::godot_rpc::CallRequest;
 use serde_json::json;
+use std::sync::OnceLock;
+use std::sync::mpsc::{Receiver, Sender, channel};
 
-/// What happened on disk.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Change<'a> {
-    /// These files were written.
     Written(&'a [String]),
     /// A file moved or went. Either end can be a directory, so the whole project is walked.
     Moved,
@@ -36,7 +36,25 @@ pub(crate) fn changed(change: Change) {
 /// [`changed`] for writes nobody waits on: the addon holds a rescan until a running import scan
 /// settles, and a save from the script editor must not hold the user's Ctrl+S that long.
 pub(crate) fn written_without_waiting(paths: Vec<String>) {
-    std::thread::spawn(move || tell(&Live, Change::Written(&paths)));
+    static QUEUE: OnceLock<Sender<Vec<String>>> = OnceLock::new();
+    let queue = QUEUE.get_or_init(|| {
+        let (queue, saves) = channel();
+        std::thread::spawn(move || tell_as_they_come(&Live, saves));
+        queue
+    });
+    let _ = queue.send(paths);
+}
+
+/// One rescan at a time: saves that queue behind a held one are told together once it answers.
+fn tell_as_they_come(ports: &impl Ports, saves: Receiver<Vec<String>>) {
+    while let Ok(mut paths) = saves.recv() {
+        for path in saves.try_iter().flatten() {
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+        tell(ports, Change::Written(&paths));
+    }
 }
 
 fn tell(ports: &impl Ports, change: Change) {
@@ -104,7 +122,6 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
-    /// What each view was told, in order.
     #[derive(Default)]
     struct Told(RefCell<Vec<String>>);
 
@@ -122,6 +139,49 @@ mod tests {
         let ports = Told::default();
         tell(&ports, change);
         ports.0.into_inner()
+    }
+
+    /// Saves pressed while the addon holds a rescan for a running import scan.
+    struct SavedWhileHeld {
+        told: Told,
+        saved_meanwhile: RefCell<Option<Sender<Vec<String>>>>,
+    }
+
+    impl Ports for SavedWhileHeld {
+        fn rescan(&self, paths: &[String]) {
+            self.told.rescan(paths);
+            if let Some(queue) = self.saved_meanwhile.borrow_mut().take() {
+                for path in ["b.gd", "c.gd", "b.gd"] {
+                    queue.send(vec![path.to_owned()]).expect("queue");
+                }
+            }
+        }
+
+        fn reparse_open_scripts(&self) {
+            self.told.reparse_open_scripts();
+        }
+    }
+
+    #[test]
+    fn saves_that_queue_behind_a_held_rescan_are_told_together() {
+        let (queue, saves) = channel();
+        queue.send(vec!["a.gd".to_owned()]).expect("queue");
+        let ports = SavedWhileHeld {
+            told: Told::default(),
+            saved_meanwhile: RefCell::new(Some(queue)),
+        };
+
+        tell_as_they_come(&ports, saves);
+
+        assert_eq!(
+            ports.told.0.into_inner(),
+            [
+                r#"rescan ["a.gd"]"#,
+                "reparse",
+                r#"rescan ["b.gd", "c.gd"]"#,
+                "reparse"
+            ]
+        );
     }
 
     #[test]
