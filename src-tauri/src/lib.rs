@@ -1342,6 +1342,11 @@ pub fn run() {
     let builder = builder.setup(|app| {
         workers::remember_resource_dir(app.path().resource_dir().ok());
         godot_session_api::remember_app(app.handle().clone());
+        std::thread::spawn(|| {
+            if let Err(error) = rag::remove_retired_models() {
+                eprintln!("Could not delete a retired model from the cache: {error}");
+            }
+        });
         let storage = open_project_storage(app.handle());
         if let Ok(storage) = &storage {
             project_memory::restore_embeddings(storage.clone());

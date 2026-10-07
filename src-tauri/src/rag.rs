@@ -247,6 +247,21 @@ fn cache_status_for_path(path: &Path, busy: bool) -> Result<CacheStatus, String>
     })
 }
 
+/// Models an earlier gofer-rag downloaded and the current one never reads.
+const RETIRED_MODELS: [&str; 1] = ["onnx-community/Qwen3-Embedding-0.6B-ONNX"];
+
+/// Deletes what the cache still holds of the retired models.
+pub fn remove_retired_models() -> Result<(), String> {
+    remove_retired_models_from(&cache_path()?)
+}
+
+fn remove_retired_models_from(cache: &Path) -> Result<(), String> {
+    for model in RETIRED_MODELS {
+        delete_cache_path(&cache.join(model))?;
+    }
+    Ok(())
+}
+
 fn delete_cache_path(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
@@ -1054,6 +1069,29 @@ mod tests {
                 .state,
             CacheState::Busy
         );
+    }
+
+    #[test]
+    fn the_retired_embedder_is_deleted_and_the_current_models_are_kept() {
+        let directory = TempDir::new().expect("temporary directory");
+        let cache = directory.path().join("cache");
+        let qwen = cache.join("onnx-community/Qwen3-Embedding-0.6B-ONNX/onnx/model_fp16.onnx");
+        let mut kept = required_model_files(&cache).to_vec();
+        kept.push(cache.join("unrelated/model.onnx"));
+        for file in kept.iter().chain([&qwen]) {
+            fs::create_dir_all(file.parent().expect("model parent")).expect("create model parent");
+            fs::write(file, [0_u8; 2]).expect("write model file");
+        }
+
+        remove_retired_models_from(&cache).expect("remove retired models");
+        remove_retired_models_from(&cache).expect("nothing left to remove is not a failure");
+
+        assert!(
+            !cache
+                .join("onnx-community/Qwen3-Embedding-0.6B-ONNX")
+                .exists()
+        );
+        assert!(kept.iter().all(|file| file.is_file()));
     }
 
     #[test]
