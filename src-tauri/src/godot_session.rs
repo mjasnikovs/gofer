@@ -467,6 +467,30 @@ pub fn start_claimed(
     start_claimed_with(claim, request, &crate::process::SystemProcessSpawner)
 }
 
+/// Starts under a claim on a machine with no Godot at all. CI exports `GOFER_GODOT_BINARY`, and
+/// it outranks the request's binary, so a missing path alone still launches the real editor.
+#[cfg(test)]
+pub(crate) fn start_claimed_without_godot(
+    claim: &StartClaim,
+    request: LaunchRequest,
+) -> Result<SessionInfo, SessionError> {
+    start_claimed_with(claim, request, &NoProgramsSpawner)
+}
+
+#[cfg(test)]
+struct NoProgramsSpawner;
+
+#[cfg(test)]
+impl ProcessSpawner for NoProgramsSpawner {
+    fn output(&self, _: &OsStr, _: &[OsString]) -> std::io::Result<crate::process::ProcessOutput> {
+        Err(std::io::ErrorKind::NotFound.into())
+    }
+
+    fn spawn(&self, _: &OsStr, _: &[OsString], _: bool) -> std::io::Result<Box<dyn ChildProcess>> {
+        Err(std::io::ErrorKind::NotFound.into())
+    }
+}
+
 #[cfg(test)]
 fn start_with(
     request: LaunchRequest,
@@ -1057,7 +1081,13 @@ pub fn stop() -> Result<(), SessionError> {
     quit_gracefully(&active, &mut child);
     active.rpc.stop();
     match child.kill() {
-        Ok(()) => Ok(()),
+        // Windows ends a killed process after `kill` returns, and until then it holds the project
+        // files the caller is about to restore.
+        Ok(()) => {
+            // A wait that fails has no child left to wait for, and the kill already worked.
+            let _ = child.wait();
+            Ok(())
+        }
         Err(error) => match child.try_wait() {
             Ok(Some(_)) => Ok(()),
             _ => Err(SessionError::new(
@@ -1421,6 +1451,8 @@ mod tests {
         child: Mutex<Option<FakeChild>>,
         /// Flipped by a test that wants the editor to die the way a crash or a closed window does.
         exited: Arc<AtomicBool>,
+        /// Set once the killed child is waited on, which is the only proof it is gone.
+        reaped: Arc<AtomicBool>,
         arguments: Arc<Mutex<Vec<OsString>>>,
         env_vars: Arc<Mutex<Vec<(OsString, OsString)>>>,
         fail_spawn: bool,
@@ -1429,6 +1461,7 @@ mod tests {
     impl FakeSpawner {
         fn new(version: &str) -> Self {
             let exited = Arc::new(AtomicBool::new(false));
+            let reaped = Arc::new(AtomicBool::new(false));
             Self {
                 version_output: version.to_owned(),
                 child: Mutex::new(Some(FakeChild {
@@ -1441,8 +1474,10 @@ mod tests {
                     },
                     killed: Arc::new(AtomicBool::new(false)),
                     exited: Arc::clone(&exited),
+                    reaped: Arc::clone(&reaped),
                 })),
                 exited,
+                reaped,
                 arguments: Arc::new(Mutex::new(Vec::new())),
                 env_vars: Arc::new(Mutex::new(Vec::new())),
                 fail_spawn: false,
@@ -1502,6 +1537,7 @@ mod tests {
         /// `None` while it is up, so a fake that always answers `Some` would make every session
         /// look dead the moment anything looked.
         exited: Arc<AtomicBool>,
+        reaped: Arc<AtomicBool>,
     }
 
     impl ChildProcess for FakeChild {
@@ -1525,6 +1561,9 @@ mod tests {
         }
 
         fn wait(&mut self) -> io::Result<ProcessStatus> {
+            if self.killed.load(Ordering::Acquire) {
+                self.reaped.store(true, Ordering::Release);
+            }
             Ok(self.status.clone())
         }
 
@@ -1850,6 +1889,40 @@ mod tests {
             std::env::remove_var("GOFER_GODOT_EDITOR_SETTINGS");
             std::env::remove_var("WAYLAND_DISPLAY");
         };
+    }
+
+    /// A stop answers only once the killed editor is gone. Windows ends a killed process after
+    /// `kill` returns, and until then the editor still holds the project files staging restores.
+    #[test]
+    fn a_stop_waits_for_the_killed_editor_to_be_gone() {
+        let _test = SESSION_TEST_LOCK.lock().expect("session test lock");
+        let (_directory, worktree) = workspace();
+        let (_settings_dir, settings_path) = settings_file_with("127.0.0.1");
+        unsafe {
+            std::env::set_var(
+                "GOFER_GODOT_EDITOR_SETTINGS",
+                settings_path.display().to_string(),
+            )
+        };
+        let spawner = FakeSpawner::new("4.7.2.stable");
+        start_with(
+            LaunchRequest {
+                worktree,
+                binary: None,
+                embed_game_window: false,
+                headless: false,
+            },
+            &spawner,
+        )
+        .expect("start session");
+
+        stop().expect("stop session");
+
+        assert!(
+            spawner.reaped.load(Ordering::Acquire),
+            "stop answered before the killed editor was gone"
+        );
+        unsafe { std::env::remove_var("GOFER_GODOT_EDITOR_SETTINGS") };
     }
 
     /// An editor that exits on its own stops being reported as a live session.

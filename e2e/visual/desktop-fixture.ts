@@ -274,21 +274,25 @@ export async function installDesktop(
                                     root: {
                                         name: 'Main',
                                         type: 'Node2D',
+                                        icon: 'Node2D',
                                         path: 'Main',
                                         children: [
                                             {
                                                 name: 'Player',
                                                 type: 'CharacterBody2D',
+                                                icon: 'CharacterBody2D',
                                                 path: 'Main/Player',
                                                 children: [
                                                     {
                                                         name: 'CollisionShapeForThePlayerBody',
                                                         type: 'CollisionShape2D',
+                                                        icon: 'CollisionShape2D',
                                                         path: 'Main/Player/CollisionShapeForThePlayerBody',
                                                         children: [
                                                             {
                                                                 name: 'DeeplyNestedMarkerNodeName',
                                                                 type: 'Marker2D',
+                                                                icon: 'Marker2D',
                                                                 path: 'Main/Player/CollisionShapeForThePlayerBody/DeeplyNestedMarkerNodeName',
                                                                 children: []
                                                             }
@@ -299,6 +303,7 @@ export async function installDesktop(
                                             {
                                                 name: 'Camera',
                                                 type: 'Camera2D',
+                                                icon: 'Camera2D',
                                                 path: 'Main/Camera',
                                                 children: []
                                             }

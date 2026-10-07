@@ -187,6 +187,7 @@ export const SCENE_TREE = {
     root: {
         name: 'Main',
         type: 'Node2D',
+        icon: 'Node2D',
         path: 'Main',
         children: [
             {

@@ -208,9 +208,12 @@ fn remaining_under(root: &Path) -> Vec<String> {
     found
 }
 
+#[track_caller]
 fn read(root: &Path, path: &str) -> String {
-    std::fs::read_to_string(root.join(path))
-        .unwrap_or_else(|error| panic!("read {}/{path}: {error}", root.display()))
+    match std::fs::read_to_string(root.join(path)) {
+        Ok(text) => text,
+        Err(error) => panic!("read {}/{path}: {error}", root.display()),
+    }
 }
 
 /// Builds the user's own checkout: the fixture project plus the scripts this journey navigates,

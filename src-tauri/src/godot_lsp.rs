@@ -438,6 +438,18 @@ impl LspClient {
         }
     }
 
+    /// Waits until Godot has sent every verdict on text sent before now, and answers with the time
+    /// left. Godot answers in order, and publishes twice per save, so a late one can be stale.
+    pub fn settle(&self, uri: &Url, timeout: Duration) -> Duration {
+        let deadline = Instant::now() + timeout;
+        let _ = self.request_with_timeout(
+            "textDocument/documentSymbol",
+            json!({"textDocument": {"uri": uri}}),
+            timeout,
+        );
+        deadline.saturating_duration_since(Instant::now())
+    }
+
     pub fn hover(&self, uri: &Url, position: Position) -> Result<Option<Hover>, LspError> {
         self.request("textDocument/hover", position_params(uri, position))
     }
@@ -2318,6 +2330,67 @@ mod tests {
             .diagnostics(&unanswered, Duration::from_secs(2))
             .expect_err("a closed session can no longer produce a first verdict");
         assert_eq!(error.code, "session_closed");
+        server.join.join().expect("server thread");
+    }
+
+    /// The older text's late verdict lands after the newer text's change, and once settled the
+    /// cache holds the newer one, because the server sent that before answering the barrier.
+    #[test]
+    fn a_settled_read_skips_the_verdict_on_the_text_before() {
+        let (_directory, root) = workspace();
+        let publish = |writer: &mut TcpStream, uri: &Value, message: &str| {
+            let diagnostics = if message.is_empty() {
+                json!([])
+            } else {
+                json!([{
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 4}
+                    },
+                    "message": message,
+                    "severity": 1
+                }])
+            };
+            let notification = json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/publishDiagnostics",
+                "params": {"uri": uri, "diagnostics": diagnostics}
+            });
+            write_message(writer, &notification).expect("publish diagnostics");
+        };
+        let server = start_fake_server(move |message, writer| {
+            let uri = &message["params"]["textDocument"]["uri"];
+            match message.get("method").and_then(Value::as_str) {
+                Some("textDocument/didChange") => {
+                    publish(writer, uri, "Expected expression");
+                    FakeAction::Ignore
+                }
+                Some("textDocument/documentSymbol") => {
+                    publish(writer, uri, "");
+                    FakeAction::Result(json!([]))
+                }
+                _ => handshake_handler(message, writer),
+            }
+        });
+        let client = LspClient::connect(server.address, root.root()).expect("connect");
+        let uri = Url::parse("file:///worktree/scripts/repaired.gd").expect("uri");
+        client.open_document(&uri, "return 1 +\n").expect("open");
+
+        client
+            .change_document(&uri, "return 1 + 1\n")
+            .expect("change");
+        let left = client.settle(&uri, Duration::from_secs(2));
+        let verdict = client
+            .diagnostics(&uri, left)
+            .expect("a pull")
+            .expect("a verdict");
+
+        assert!(
+            verdict.diagnostics.is_empty(),
+            "the verdict on the text before was read as this one's: {:?}",
+            verdict.diagnostics
+        );
+        client.shutdown();
         server.join.join().expect("server thread");
     }
 

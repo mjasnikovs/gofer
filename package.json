@@ -21,7 +21,7 @@
         "build:frontend:webdriver": "npm run --silent build:renderer -- --mode webdriver && node scripts/stable-dist-mtimes.mjs && npm run --silent build:workers",
         "build:workers": "node scripts/build-workers.mjs",
         "typecheck": "tsc --noEmit --pretty false && tsc -p tsconfig.node.json --noEmit --pretty false",
-        "lint": "eslint . --quiet --cache --cache-location node_modules/.cache/eslint/",
+        "lint": "eslint . --quiet",
         "lint:fix": "eslint . --fix --quiet",
         "format": "node scripts/format.mjs write",
         "format:check": "node scripts/format.mjs check",

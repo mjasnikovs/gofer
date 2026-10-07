@@ -146,7 +146,7 @@ function nodeItems(node: GodotNode, context: NodeTreeContext): TreeListItemData 
                     style={ROW_LABEL_STYLE}
                 >
                     <NodeIcon
-                        icon={icons[node.icon ?? node.type]}
+                        icon={icons[node.icon]}
                         type={node.type}
                     />
                     <Text

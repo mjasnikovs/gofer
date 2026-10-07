@@ -1409,10 +1409,10 @@ mod tests {
             && worktree.join("addons/gofer/plugin.gd").is_file()
     }
 
-    fn a_launch_that_fails(directory: &TempDir, worktree: &Path) -> LaunchRequest {
+    fn a_launch(worktree: &Path) -> LaunchRequest {
         LaunchRequest {
             worktree: worktree.to_path_buf(),
-            binary: Some(directory.path().join("no-godot-here").display().to_string()),
+            binary: None,
             embed_game_window: false,
             headless: false,
         }
@@ -1431,7 +1431,7 @@ mod tests {
         let _running = PlantedSession::new(&worktree, "task");
 
         let launched = stage_and_start(&stager, &workspace, |claim| {
-            godot_session::start_claimed(claim, a_launch_that_fails(&directory, &worktree))
+            godot_session::start_claimed_without_godot(claim, a_launch(&worktree))
         });
 
         assert!(
@@ -1456,13 +1456,12 @@ mod tests {
         let held = std::cell::Cell::new(false);
 
         let launched = stage_and_start(&stager, &workspace, |claim| {
-            let failed =
-                godot_session::start_claimed(claim, a_launch_that_fails(&directory, &worktree));
+            let failed = godot_session::start_claimed_without_godot(claim, a_launch(&worktree));
             held.set(godot_session::start_in_flight());
             failed
         });
 
-        launched.expect_err("a Godot binary that is not there cannot start");
+        launched.expect_err("a machine with no Godot cannot start");
         assert!(
             held.get(),
             "the claim was released before the addon was unstaged"

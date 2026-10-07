@@ -10,7 +10,7 @@ export function iconClasses(root: GodotNode | null | undefined): string[] {
     const names: string[] = []
     const seen = new Set<string>()
     const walk = (node: GodotNode) => {
-        const name = node.icon ?? node.type
+        const name = node.icon
         if (name !== '' && !seen.has(name)) {
             seen.add(name)
             names.push(name)
@@ -39,7 +39,7 @@ export function useGodotClassIcons(
         void call('editor.get_class_icons', {classes: missing})
             .then(answer => {
                 const fetched: Record<string, string> = {}
-                for (const [name, data] of Object.entries(answer.icons ?? {})) {
+                for (const [name, data] of Object.entries(answer.icons)) {
                     fetched[name] = `data:image/png;base64,${data}`
                 }
                 setIcons(current => ({...current, ...fetched}))

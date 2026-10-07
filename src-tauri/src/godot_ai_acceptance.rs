@@ -926,6 +926,13 @@ fn a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits() {
         "continue needs a debuggee that is stopped again: {stepped_over}"
     );
 
+    // The breakpoint is on a line every frame runs, so a game let go with it set halts again at
+    // once, and that halt races the pause below for the next stop.
+    call(
+        "godot_debug",
+        json!({"ops": [{"op": "set_breakpoints", "path": PROBE_PATH, "lines": []}]}),
+    )
+    .expect("clear the breakpoint so the game really runs on");
     call("godot_debug", json!({"ops": [{"op": "continue"}]})).expect("the game runs on");
     let after = call(
         "godot_runtime",
@@ -964,6 +971,11 @@ fn a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits() {
         "Godot debugs exactly one thread: {threads}"
     );
 
+    call(
+        "godot_debug",
+        json!({"ops": [{"op": "set_breakpoints", "path": PROBE_PATH, "lines": [BREAK_LINE]}]}),
+    )
+    .expect("arm the breakpoint again for the restart");
     let _ = call("godot_debug", json!({"ops": [{"op": "terminate"}]}));
     assert_eq!(
         crate::game_run::now().armed_files(),

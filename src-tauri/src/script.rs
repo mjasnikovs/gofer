@@ -606,7 +606,10 @@ pub fn save_and_publish(request: SaveScriptRequest) -> Result<SavedScript, LspEr
     published_save(
         saved,
         Duration::from_millis(DEFAULT_DIAGNOSTICS_WAIT_MS),
-        |client, uri, wait| client.diagnostics(uri, wait),
+        |client, uri, wait| {
+            let left = client.settle(uri, wait);
+            client.diagnostics(uri, left)
+        },
     )
 }
 
@@ -1083,11 +1086,14 @@ pub fn edit_documents(request: EditScriptRequest) -> Result<Vec<EditedScript>, L
         }
         Ok(synchronized)
     })?;
-    collect_published(
-        synchronized,
-        Duration::from_millis(DEFAULT_DIAGNOSTICS_WAIT_MS),
-        |uri, wait| client.diagnostics(uri, wait),
-    )
+    let budget = Duration::from_millis(DEFAULT_DIAGNOSTICS_WAIT_MS);
+    let budget = match synchronized.first() {
+        Some((first, ..)) => client.settle(first, budget),
+        None => budget,
+    };
+    collect_published(synchronized, budget, |uri, wait| {
+        client.diagnostics(uri, wait)
+    })
 }
 
 /// Reads each synchronized document's diagnostics under one deadline for the whole batch.
@@ -1154,6 +1160,10 @@ pub fn diagnostics_for(
         .iter()
         .map(|path| godot_lsp::file_uri(&workspace, path))
         .collect::<Result<Vec<_>, _>>()?;
+    let budget = match uris.first() {
+        Some(first) => client.settle(first, budget),
+        None => budget,
+    };
     pull_published(paths, uris, budget, |uri, wait| {
         client.diagnostics(uri, wait)
     })

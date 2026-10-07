@@ -16,8 +16,11 @@ import {PanelState} from './PanelState'
 
 const CAPTURE_FRAME_STYLE = {maxWidth: '100%', height: 'auto'} as const
 
+// A frame saved to disk carries a path and no pixels, and the panel can only show pixels.
+type ShownFrame = GodotFrame & Readonly<{data: string}>
+
 type Capture = Readonly<{
-    frame: GodotFrame
+    frame: ShownFrame
     source: 'game' | 'editor'
     at: number
     sessionId: string | undefined
@@ -39,8 +42,8 @@ const REPLACES_THE_GAME: ReadonlySet<GameControl> = new Set<GameControl>([
     'runtime.stop'
 ])
 
-function asFrame(frame: GodotFrame | undefined): GodotFrame | undefined {
-    return frame && typeof frame.data === 'string' ? frame : undefined
+function hasPixels(frame: GodotFrame | undefined): frame is ShownFrame {
+    return typeof frame?.data === 'string'
 }
 
 export function GameView() {
@@ -73,8 +76,8 @@ export function GameView() {
             })
                 .then(result => {
                     setError(undefined)
-                    const frame = 'frame' in result ? asFrame(result.frame) : undefined
-                    if (frame && order > shown.current) {
+                    const frame = 'frame' in result ? result.frame : undefined
+                    if (hasPixels(frame) && order > shown.current) {
                         shown.current = order
                         setTaken({frame, source, at: Date.now(), sessionId: stamp})
                     }

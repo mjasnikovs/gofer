@@ -16,8 +16,17 @@ const TREE = {
     root: {
         name: 'Main',
         type: 'Node2D',
+        icon: 'Node2D',
         path: '.',
-        children: [{name: 'Player', type: 'CharacterBody2D', path: 'Player', children: []}]
+        children: [
+            {
+                name: 'Player',
+                type: 'CharacterBody2D',
+                icon: 'CharacterBody2D',
+                path: 'Player',
+                children: []
+            }
+        ]
     }
 }
 
