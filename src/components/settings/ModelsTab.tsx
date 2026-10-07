@@ -189,7 +189,7 @@ export function useModelsTab(view: SettingsView, onCacheDeleted: () => void): Mo
                     dispatch({type: 'delete-dialog', isOpen: isDeleteOpen})
                 }}
                 title='Delete documentation model cache?'
-                description='This removes only the downloaded embedding and reranking models. Gofer will return to the preparation screen and download approximately 1.68 GiB again.'
+                description='This removes only the downloaded embedding and reranking models. Gofer will return to the preparation screen and download approximately 0.89 GiB again.'
                 actionLabel='Delete model cache'
                 isActionLoading={busy.deleting}
                 onAction={deleteCache}

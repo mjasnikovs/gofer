@@ -1139,7 +1139,11 @@ async fn delete_rag_cache() -> Result<rag::CacheStatus, CommandError> {
 #[tauri::command]
 async fn initialize_rag(app: AppHandle) -> Result<(), CommandError> {
     off_thread_coded("initialize_rag", "models_unavailable", move || {
-        rag::run_initialization(|| rag::run_warmup(&app))
+        rag::run_initialization(|| rag::run_warmup(&app))?;
+        if let Ok(storage) = project_storage(&app) {
+            project_memory::restore_embeddings(storage);
+        }
+        Ok(())
     })
     .await
     .map_err(CommandError::retryable)
@@ -1338,7 +1342,11 @@ pub fn run() {
     let builder = builder.setup(|app| {
         workers::remember_resource_dir(app.path().resource_dir().ok());
         godot_session_api::remember_app(app.handle().clone());
-        app.manage(StorageSlot::new(open_project_storage(app.handle())));
+        let storage = open_project_storage(app.handle());
+        if let Ok(storage) = &storage {
+            project_memory::restore_embeddings(storage.clone());
+        }
+        app.manage(StorageSlot::new(storage));
         open_agent_door(app.handle());
         Ok(())
     });

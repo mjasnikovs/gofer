@@ -198,9 +198,12 @@ fn project_data_path(workspace: &Path) -> Result<PathBuf, String> {
 pub(crate) fn reopen_storage(
     app: &AppHandle,
 ) -> Result<ProjectStorage, crate::command_error::CommandError> {
-    app.try_state::<StorageSlot>()
+    let storage = app
+        .try_state::<StorageSlot>()
         .ok_or_else(|| "Project storage has not been initialized".to_owned())?
-        .replace(open_project_storage(app))
+        .replace(open_project_storage(app))?;
+    crate::project_memory::restore_embeddings(storage.clone());
+    Ok(storage)
 }
 
 /// Reports the workspace as it stands, and the one thing outside this module a report needs: how

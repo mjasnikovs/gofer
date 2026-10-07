@@ -56,7 +56,7 @@ const CARD_TEMPLATE_KEY: &str = "board.card_template";
 /// every skill it holds is live. It shares `project_state` with the prompt for the same reason the
 /// prompt is there: it is what the agent is told, and it is not the renderer's to write blind.
 const DISABLED_SKILLS_KEY: &str = "agent.skills.disabled";
-const MEMORY_EMBEDDING_DIMENSIONS: usize = 1024;
+const MEMORY_EMBEDDING_DIMENSIONS: usize = 768;
 /// Read from the worker that produces the vectors rather than written again here.
 ///
 /// Two copies of this string had no compile-time tie. `memory_embeddings.model` is checked on write
@@ -496,6 +496,22 @@ CREATE UNIQUE INDEX cards_number ON cards(number);
 INSERT INTO project_state (key, value)
 SELECT 'board.next_card_number', CAST(COALESCE(MAX(number), 0) + 1 AS TEXT) FROM cards;
 PRAGMA user_version = 12;
+COMMIT;
+"#;
+
+/// Memory moved from Qwen3-Embedding (1024 dimensions) to EmbeddingGemma 2 (768). A vec0 column
+/// cannot change width, and an old vector ranked beside a new one is noise, so both go.
+/// [`Memories::restore_embeddings`] puts every one back once the new model can answer.
+const PROJECT_SCHEMA_V13: &str = r#"
+BEGIN;
+DELETE FROM memory_embeddings;
+DROP TABLE memory_vectors;
+CREATE VIRTUAL TABLE memory_vectors USING vec0(
+    memory_id TEXT PRIMARY KEY,
+    embedding float[768] distance_metric=cosine,
+    scope_key TEXT partition key
+);
+PRAGMA user_version = 13;
 COMMIT;
 "#;
 
@@ -1318,9 +1334,9 @@ fn migrate_project(connection: &Connection) -> Result<(), CommandError> {
     let current = connection
         .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
         .map_err(database_error)?;
-    if current > 12 {
+    if current > 13 {
         return Err(format!(
-            "The database schema version {current} is newer than supported version 12"
+            "The database schema version {current} is newer than supported version 13"
         )
         .into());
     }
@@ -1382,6 +1398,11 @@ fn migrate_project(connection: &Connection) -> Result<(), CommandError> {
     if current <= 11 {
         connection
             .execute_batch(PROJECT_SCHEMA_V12)
+            .map_err(database_error)?;
+    }
+    if current <= 12 {
+        connection
+            .execute_batch(PROJECT_SCHEMA_V13)
             .map_err(database_error)?;
     }
     Ok(())
@@ -1796,7 +1817,7 @@ mod tests {
             .query_row("SELECT vec_version()", [], |row| row.get::<_, String>(0))
             .expect("sqlite-vec version");
 
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
         assert_eq!(vec_version, "v0.1.9");
     }
 
@@ -1826,7 +1847,7 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .expect("schema version");
         assert_eq!(title, "Existing task");
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
         connection
             .execute_batch(
                 "INSERT INTO sketches (id, task_id, question_id, question, label, is_approved, saved_at)
@@ -1998,6 +2019,85 @@ mod tests {
             indexed("instances"),
             1,
             "the project's own memory is untouched"
+        );
+    }
+
+    /// The Qwen vectors go, the memories stay, and the delete trigger still reaches the new table.
+    #[test]
+    fn the_embedder_migration_drops_every_qwen_vector_and_keeps_the_memories() {
+        register_sqlite_vec();
+        let connection = Connection::open_in_memory().expect("in-memory database");
+        for schema in [
+            PROJECT_SCHEMA_V1,
+            PROJECT_SCHEMA_V2,
+            PROJECT_SCHEMA_V3,
+            PROJECT_SCHEMA_V4,
+            PROJECT_SCHEMA_V5,
+            PROJECT_SCHEMA_V6,
+            PROJECT_SCHEMA_V7,
+            PROJECT_SCHEMA_V8,
+            PROJECT_SCHEMA_V9,
+            PROJECT_SCHEMA_V10,
+            PROJECT_SCHEMA_V11,
+            PROJECT_SCHEMA_V12,
+        ] {
+            connection.execute_batch(schema).expect("earlier schema");
+        }
+        let qwen = vec![0_u8; 1024 * 4];
+        connection
+            .execute_batch(
+                "INSERT INTO memory_items
+                     (id, task_id, kind, state, content, provenance_json, created_at, updated_at)
+                 VALUES ('memory-1', NULL, 'fact', 'confirmed', 'The player uses CharacterBody2D', '{}', 1, 1);",
+            )
+            .expect("a memory");
+        connection
+            .execute(
+                "INSERT INTO memory_embeddings
+                     (memory_id, model, dimensions, normalized, format_version, embedding, updated_at)
+                 VALUES ('memory-1', 'onnx-community/Qwen3-Embedding-0.6B-ONNX', 1024, 1, 1, ?1, 1)",
+                [&qwen],
+            )
+            .expect("a qwen embedding");
+        connection
+            .execute(
+                "INSERT INTO memory_vectors (memory_id, embedding, scope_key)
+                 VALUES ('memory-1', ?1, 'project')",
+                [&qwen],
+            )
+            .expect("a qwen vector");
+
+        migrate_project(&connection).expect("migrate project");
+
+        let count = |table: &str| {
+            connection
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get::<_, u32>(0)
+                })
+                .expect("row count")
+        };
+        assert_eq!(count("memory_items"), 1, "the memory itself stays");
+        assert_eq!(count("memory_embeddings"), 0);
+        assert_eq!(count("memory_vectors"), 0);
+
+        let gemma: Vec<u8> = vec![0.0_f32; MEMORY_EMBEDDING_DIMENSIONS]
+            .iter()
+            .flat_map(|value| value.to_ne_bytes())
+            .collect();
+        connection
+            .execute(
+                "INSERT INTO memory_vectors (memory_id, embedding, scope_key)
+                 VALUES ('memory-1', ?1, 'project')",
+                [&gemma],
+            )
+            .expect("the new table takes the new width");
+        connection
+            .execute("DELETE FROM memory_items WHERE id = 'memory-1'", [])
+            .expect("delete the memory");
+        assert_eq!(
+            count("memory_vectors"),
+            0,
+            "the trigger reached the new table"
         );
     }
 

@@ -1,9 +1,18 @@
 import readline from 'node:readline'
-import {pipeline} from '@huggingface/transformers'
-import {createEmbedder, RESPONSE_PREFIX} from './memory-embedder.mjs'
+import {
+    AutoConfig,
+    AutoModel,
+    AutoTokenizer,
+    env,
+    LogLevel,
+    Tensor
+} from '@huggingface/transformers'
+import {createEmbedder, embedText, loadGemma, RESPONSE_PREFIX} from './memory-embedder.mjs'
 
 const handleLine = createEmbedder({
-    loadPipeline: (model, options) => pipeline('feature-extraction', model, options)
+    loadModel: cacheDir =>
+        loadGemma({AutoConfig, AutoModel, AutoTokenizer, env, LogLevel}, cacheDir),
+    embed: (loaded, text) => embedText({...loaded, Tensor}, text)
 })
 
 const lines = readline.createInterface({input: process.stdin, crlfDelay: Infinity})

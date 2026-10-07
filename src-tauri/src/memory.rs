@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const RESPONSE_PREFIX: &str = "GOFER_MEMORY_RESPONSE:";
-pub const MODEL: &str = "onnx-community/Qwen3-Embedding-0.6B-ONNX";
+pub const MODEL: &str = "onnx-community/embeddinggemma-2-ONNX";
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 static WORKER: Mutex<Option<MemoryWorker>> = Mutex::new(None);
 

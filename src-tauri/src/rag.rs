@@ -216,6 +216,15 @@ pub fn cache_status() -> Result<CacheStatus, String> {
     cache_status_for_path(&path, busy)
 }
 
+/// Whether every model file is on disk, with none of the size or busy reporting the screen needs.
+pub fn models_installed() -> bool {
+    cache_path().is_ok_and(|cache| {
+        required_model_files(&cache)
+            .iter()
+            .all(|file| file.is_file())
+    })
+}
+
 fn cache_status_for_path(path: &Path, busy: bool) -> Result<CacheStatus, String> {
     let state = if busy {
         CacheState::Busy
@@ -258,17 +267,20 @@ fn delete_cache_path(path: &Path) -> Result<(), String> {
 /// Mirrors the model definitions gofer-rag downloads, so a cache missing any of
 /// them reads as `Incomplete` rather than claiming a retrieval that cannot run.
 /// Keep this in step with `dist/ai/downloads.js` when the package moves.
-fn required_model_files(cache: &Path) -> [PathBuf; 10] {
+fn required_model_files(cache: &Path) -> [PathBuf; 13] {
     [
-        cache.join("onnx-community/Qwen3-Embedding-0.6B-ONNX/config.json"),
-        cache.join("onnx-community/Qwen3-Embedding-0.6B-ONNX/tokenizer.json"),
-        cache.join("onnx-community/Qwen3-Embedding-0.6B-ONNX/onnx/model_fp16.onnx"),
-        cache.join("onnx-community/Qwen3-Embedding-0.6B-ONNX/onnx/model_fp16.onnx_data"),
+        cache.join("onnx-community/embeddinggemma-2-ONNX/config.json"),
+        cache.join("onnx-community/embeddinggemma-2-ONNX/tokenizer.json"),
+        cache.join("onnx-community/embeddinggemma-2-ONNX/tokenizer_config.json"),
+        cache.join("onnx-community/embeddinggemma-2-ONNX/onnx/model_quantized.onnx"),
+        cache.join("onnx-community/embeddinggemma-2-ONNX/onnx/model_quantized.onnx_data"),
         cache.join("onnx-community/bge-reranker-v2-m3-ONNX/config.json"),
         cache.join("onnx-community/bge-reranker-v2-m3-ONNX/tokenizer.json"),
+        cache.join("onnx-community/bge-reranker-v2-m3-ONNX/tokenizer_config.json"),
         cache.join("onnx-community/bge-reranker-v2-m3-ONNX/onnx/model_quantized.onnx"),
         cache.join("Xenova/ms-marco-MiniLM-L-6-v2/config.json"),
         cache.join("Xenova/ms-marco-MiniLM-L-6-v2/tokenizer.json"),
+        cache.join("Xenova/ms-marco-MiniLM-L-6-v2/tokenizer_config.json"),
         cache.join("Xenova/ms-marco-MiniLM-L-6-v2/onnx/model_quantized.onnx"),
     ]
 }
@@ -865,8 +877,8 @@ fn probe_reader(spawner: &impl ProcessSpawner) -> Result<(), String> {
 
 /// Fills `cache` with the file names the documentation probe looks for.
 ///
-/// For the suites that drive a real turn: the probe reads this directory, and downloading three
-/// gigabytes of models before a test can start is not something anybody would run.
+/// For the suites that drive a real turn: the probe reads this directory, and downloading a
+/// gigabyte of models before a test can start is not something anybody would run.
 #[cfg(all(test, feature = "godot-acceptance"))]
 pub fn stage_probe_cache(cache: &Path) -> std::io::Result<()> {
     for file in required_model_files(cache) {
@@ -1041,6 +1053,33 @@ mod tests {
                 .expect("busy status")
                 .state,
             CacheState::Busy
+        );
+    }
+
+    #[test]
+    fn a_cache_from_the_qwen_embedder_is_incomplete_rather_than_installed() {
+        let directory = TempDir::new().expect("temporary directory");
+        let cache = directory.path().join("cache");
+        let qwen = [
+            "onnx-community/Qwen3-Embedding-0.6B-ONNX/config.json",
+            "onnx-community/Qwen3-Embedding-0.6B-ONNX/tokenizer.json",
+            "onnx-community/Qwen3-Embedding-0.6B-ONNX/onnx/model_fp16.onnx",
+            "onnx-community/Qwen3-Embedding-0.6B-ONNX/onnx/model_fp16.onnx_data",
+        ]
+        .map(|file| cache.join(file));
+        let rerankers = required_model_files(&cache)
+            .into_iter()
+            .filter(|file| !file.starts_with(cache.join("onnx-community/embeddinggemma-2-ONNX")));
+        for file in qwen.into_iter().chain(rerankers) {
+            fs::create_dir_all(file.parent().expect("model parent")).expect("create model parent");
+            fs::write(file, [0_u8; 2]).expect("write model file");
+        }
+
+        assert_eq!(
+            cache_status_for_path(&cache, false)
+                .expect("cache status")
+                .state,
+            CacheState::Incomplete
         );
     }
 
@@ -1254,7 +1293,7 @@ mod tests {
         fs::create_dir(&cache).expect("create cache");
 
         let empty = probe_models(&cache).expect_err("an empty cache cannot answer a search");
-        assert!(empty.contains("10 of 10 files are missing"), "{empty}");
+        assert!(empty.contains("13 of 13 files are missing"), "{empty}");
 
         let required = required_model_files(&cache);
         for file in required.iter().skip(1) {
@@ -1262,7 +1301,7 @@ mod tests {
             fs::write(file, [0_u8; 2]).expect("write model file");
         }
         let partial = probe_models(&cache).expect_err("a partial cache cannot answer a search");
-        assert!(partial.contains("1 of 10 files are missing"), "{partial}");
+        assert!(partial.contains("1 of 13 files are missing"), "{partial}");
 
         fs::create_dir_all(required[0].parent().expect("model parent")).expect("create parent");
         fs::write(&required[0], [0_u8; 2]).expect("write model file");

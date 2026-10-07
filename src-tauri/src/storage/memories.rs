@@ -178,13 +178,24 @@ impl Memories<'_> {
     /// single write mutex, a project with two hundred unembedded memories blocks every chat save,
     /// sketch keep, memory upsert and task write for the whole pass.
     ///
-    /// It stops at the first failure, because a worker that cannot answer for one memory cannot
-    /// answer for the next two hundred either, and each attempt would pay the same timeout.
+    /// A failure is asked again on one word. A worker that cannot embed that cannot embed the next
+    /// two hundred either, so the pass stops; one that can was refused only that memory's text, and
+    /// stopping there would leave every memory after it without a vector for good.
     pub(crate) fn embeddings_to_restore(&self) -> Result<Vec<PendingEmbedding>, CommandError> {
+        self.embeddings_to_restore_with(&crate::project_memory::memory_vector)
+    }
+
+    fn embeddings_to_restore_with(
+        &self,
+        embed: &impl Fn(&str) -> Result<Vec<f32>, String>,
+    ) -> Result<Vec<PendingEmbedding>, CommandError> {
         let mut prepared = Vec::new();
         for memory in self.missing_embeddings(BACKFILL_LIMIT)? {
-            let Ok(vector) = crate::project_memory::memory_vector(&memory.content) else {
-                break;
+            let Ok(vector) = embed(&memory.content) else {
+                if embed("memory").is_err() {
+                    break;
+                }
+                continue;
             };
             prepared.push(PendingEmbedding {
                 request: SaveMemoryEmbeddingRequest {
@@ -427,27 +438,7 @@ impl Memories<'_> {
         pending: &[PendingEmbedding],
     ) -> Result<Collected, CommandError> {
         let mut connection = self.storage.connection()?;
-        let mut restored = 0;
-        for entry in pending {
-            let current = connection
-                .query_row(
-                    "SELECT content FROM memory_items WHERE id = ?1",
-                    [&entry.request.memory_id],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(database_error)?;
-            if current.as_deref() != Some(entry.content.as_str()) {
-                continue;
-            }
-            if self
-                .write_embedding(&mut connection, &entry.request)
-                .is_err()
-            {
-                continue;
-            }
-            restored += 1;
-        }
+        let restored = self.write_pending(&mut connection, pending)?;
         let mut statement = connection
             .prepare(
                 "SELECT memory_id FROM memory_vectors
@@ -475,6 +466,58 @@ impl Memories<'_> {
             memory_vectors_refiled: refiled,
             ..Collected::default()
         })
+    }
+
+    /// Re-embeds every memory with no vector, a batch at a time, until none is left or the worker
+    /// stops answering.
+    ///
+    /// Covers a memory saved before the models were downloaded, and every memory after a migration
+    /// dropped the vectors an older embedder wrote.
+    pub fn restore_embeddings(&self) -> Result<usize, CommandError> {
+        self.restore_embeddings_with(&crate::project_memory::memory_vector)
+    }
+
+    fn restore_embeddings_with(
+        &self,
+        embed: &impl Fn(&str) -> Result<Vec<f32>, String>,
+    ) -> Result<usize, CommandError> {
+        let mut restored = 0;
+        loop {
+            let pending = self.embeddings_to_restore_with(embed)?;
+            let (_write_guard, mut connection) = self.storage.write_connection()?;
+            let written = self.write_pending(&mut connection, &pending)?;
+            if written == 0 {
+                return Ok(restored);
+            }
+            restored += written;
+        }
+    }
+
+    /// Writes the vectors whose memory still holds the text they were computed from.
+    fn write_pending(
+        &self,
+        connection: &mut Connection,
+        pending: &[PendingEmbedding],
+    ) -> Result<usize, CommandError> {
+        let mut written = 0;
+        for entry in pending {
+            let current = connection
+                .query_row(
+                    "SELECT content FROM memory_items WHERE id = ?1",
+                    [&entry.request.memory_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(database_error)?;
+            if current.as_deref() != Some(entry.content.as_str()) {
+                continue;
+            }
+            if self.write_embedding(connection, &entry.request).is_err() {
+                continue;
+            }
+            written += 1;
+        }
+        Ok(written)
     }
 
     /// Vectors filed under a scope their memory has left, put back under the one it has now.
@@ -1017,6 +1060,64 @@ mod tests {
             "the edited row keeps no vector, so the next pass computes one for what it now says"
         );
         assert!(!still_missing.contains(&kept.id));
+    }
+
+    #[test]
+    fn restoring_runs_past_one_batch_and_one_refused_memory_and_stops_without_a_worker() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        for index in 0..=BACKFILL_LIMIT {
+            storage
+                .memory()
+                .upsert(&UpsertMemoryRequest {
+                    id: None,
+                    task_id: None,
+                    kind: "fact".to_owned(),
+                    state: "confirmed".to_owned(),
+                    content: format!("Fact number {index}"),
+                    provenance: serde_json::json!({"source": "user"}),
+                    superseded_by: None,
+                })
+                .expect("save memory");
+        }
+        let unavailable = |_: &str| Err("the model is not downloaded".to_owned());
+        let refuses_the_newest = |text: &str| {
+            if text == format!("Fact number {BACKFILL_LIMIT}") {
+                return Err("the worker refused this text".to_owned());
+            }
+            let mut vector = vec![0.0; MEMORY_EMBEDDING_DIMENSIONS];
+            vector[0] = 1.0;
+            Ok(vector)
+        };
+        let unit = |_: &str| {
+            let mut vector = vec![0.0; MEMORY_EMBEDDING_DIMENSIONS];
+            vector[0] = 1.0;
+            Ok(vector)
+        };
+
+        let none = storage
+            .memory()
+            .restore_embeddings_with(&unavailable)
+            .expect("restore without a worker");
+        let past_the_refused = storage
+            .memory()
+            .restore_embeddings_with(&refuses_the_newest)
+            .expect("restore past a refused memory");
+        let all = storage
+            .memory()
+            .restore_embeddings_with(&unit)
+            .expect("restore");
+
+        assert_eq!(none, 0);
+        assert_eq!(past_the_refused, BACKFILL_LIMIT);
+        assert_eq!(all, 1);
+        assert!(
+            storage
+                .memory()
+                .missing_embeddings(10)
+                .expect("missing")
+                .is_empty()
+        );
     }
 
     /// Deleting a task deletes the memories it made, and every trace of them.

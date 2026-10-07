@@ -816,7 +816,7 @@ describe('the live workspace', () => {
 
         it('asks before deleting the retrieval cache, and takes no for an answer', async () => {
             await clickButton('Delete model cache')
-            await expectText(['Delete documentation model cache?', '1.68 GiB'])
+            await expectText(['Delete documentation model cache?', '0.89 GiB'])
             await clickButton('Cancel')
             await expectGone(['Delete documentation model cache?'])
         })

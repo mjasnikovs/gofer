@@ -67,12 +67,12 @@ Gofer cannot work in is not worth a gigabyte of models.
 
 ## Godot documentation RAG
 
-The project pins [`@mjasnikovs/gofer-rag`](https://github.com/mjasnikovs/gofer-rag) at
-`0.1.0-canary.1`. It provides local retrieval and grounded answers over the Godot 4.7 documentation.
+The project pins [`@mjasnikovs/gofer-rag`](https://github.com/mjasnikovs/gofer-rag) at `^0.3.0`. It
+provides local retrieval and grounded answers over the Godot 4.7 documentation.
 
 The package requires Node.js 22.19 or newer and is a Node-only runtime dependency, so Tauri invokes
 it through `scripts/rag-warmup.mjs` instead of bundling it into the Vite browser renderer. The
-preparation splash downloads approximately 1.68 GiB of embedding and reranking models when they are
+preparation splash downloads approximately 0.89 GiB of embedding and reranking models when they are
 missing. The Node worker aggregates their file events into one overall progress total before the
 Rust backend streams it to the interface. The models remain in the operating system's user cache
 until they are explicitly deleted from Settings; deletion returns the app to the preparation splash

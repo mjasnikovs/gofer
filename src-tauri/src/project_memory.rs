@@ -18,6 +18,7 @@ use crate::storage::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::{Mutex, PoisonError};
 
 /// How many memories one listing hands the window.
 ///
@@ -174,6 +175,32 @@ pub(crate) fn memory_vector(content: &str) -> Result<Vec<f32>, String> {
     crate::memory::embed_documents(&[content.to_owned()], &crate::rag::cache_path()?)?
         .pop()
         .ok_or_else(|| "The memory worker returned no document vector".to_owned())
+}
+
+/// One restore at a time. A second waits, then finds nothing left to embed.
+static RESTORING: Mutex<()> = Mutex::new(());
+
+/// Gives a project's memories back the vectors they are missing, on a thread of its own.
+///
+/// Called when a project opens and after the models download: the two moments the worker may newly
+/// answer. Opening is also when a migration drops every vector an older embedder wrote.
+pub(crate) fn restore_embeddings(storage: ProjectStorage) {
+    #[cfg(feature = "webdriver")]
+    if std::env::var_os("GOFER_WEBDRIVER_RAG_READY").is_some() {
+        return;
+    }
+    if !crate::rag::models_installed() {
+        return;
+    }
+    std::thread::spawn(move || {
+        let _restoring = RESTORING.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Err(failure) = storage.memory().restore_embeddings() {
+            eprintln!(
+                "Restoring memory embeddings failed, the next project open tries again: {}",
+                failure.message
+            );
+        }
+    });
 }
 
 /// What checking a memory's paths found.
